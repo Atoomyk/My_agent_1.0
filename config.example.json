@@ -1,0 +1,15 @@
+{
+  "provider": "openai",
+  "base_url": "",
+  "model": "",
+  "api_key": "",
+  "max_steps": 25,
+  "image_model": "",
+  "image_base_url": "",
+  "image_api_key": "",
+  "project_dir": "",
+  "theme": "",
+  "active_profile": "",
+  "profiles": [],
+  "mcp_servers": []
+}
