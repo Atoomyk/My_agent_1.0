@@ -29,6 +29,7 @@ def default_config() -> dict:
         "image_api_key": "",
         "project_dir": "",
         "theme": "dark",
+        "prompt_height": 0,
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
@@ -107,6 +108,16 @@ def _servers(raw) -> list[dict]:
     return servers
 
 
+def _prompt_height(raw) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+    return min(640, value)
+
+
 def _theme(raw) -> str:
     value = str(raw or "").strip().lower()
     if value in ("dark", "light"):
@@ -166,6 +177,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
             merged[key] = current[key]
     merged["mcp_servers"] = _servers(data.get("mcp_servers"))
     merged["theme"] = _theme(data.get("theme"))
+    merged["prompt_height"] = _prompt_height(data.get("prompt_height"))
     return merged, None
 
 
@@ -180,7 +192,24 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["active_profile"] = active if active in names else ""
     payload["mcp_servers"] = _servers(data.get("mcp_servers"))
     payload["theme"] = _theme(data.get("theme"))
+    payload["prompt_height"] = _prompt_height(data.get("prompt_height"))
     _write_config(path, payload)
+
+
+def save_prompt_height(height: int, path: Path | None = None) -> None:
+    path = path or config_path()
+    height = _prompt_height(height)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(data, dict):
+            raise ValueError("config.json должен быть объектом")
+    else:
+        data = default_config()
+    data["prompt_height"] = height
+    _write_config(path, data)
 
 
 def save_theme(theme: str, path: Path | None = None) -> None:

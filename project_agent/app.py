@@ -9,10 +9,19 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw
 
 from project_agent.agent import Agent
 from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
-from project_agent.config import ai_settings, config_dir, load_config, needs_api_key, save_config, save_theme
+from project_agent.config import (
+    ai_settings,
+    config_dir,
+    load_config,
+    needs_api_key,
+    save_config,
+    save_prompt_height,
+    save_theme,
+)
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
 from project_agent.paths import PathError, list_entries, read_text_file, resolve_inside
@@ -31,17 +40,20 @@ THEME_LABELS = {
 LABEL_BY_THEME = {value: key for key, value in THEME_LABELS.items()}
 _PENDING = "\uE000"
 _NO_PROFILE = "нет профилей"
-INK = ("#f3f4f6", "#1c1e22")
-PANEL = ("#e6e8ec", "#25282e")
-FIELD = ("#ffffff", "#1a1c20")
-BUTTON = ("#d8dbe1", "#31363f")
-BUTTON_HOVER = ("#c9ced6", "#3c424d")
-BORDER = ("#b7bcc4", "#454c58")
-TEXT = ("#1c1e22", "#e7e9ee")
-MUTED = ("#6a7280", "#8e97a3")
-USER_TEXT = ("#3a332b", "#f4f0e8")
-SELECT = ("#d0d4db", "#3e4654")
-PRIMARY_HOVER = ("#c3c8d0", "#4b5563")
+INK = ("#f6f3ee", "#1c1916")
+PANEL = ("#efeae3", "#26221e")
+FIELD = ("#fffdf8", "#161310")
+BUTTON = ("#fffdf8", "#2c2824")
+BUTTON_HOVER = ("#e6dfd6", "#3a342e")
+BORDER = ("#ddd4c8", "#4a433c")
+TEXT = ("#2c2824", "#f3eee6")
+MUTED = ("#8d847a", "#a3988c")
+USER_TEXT = ("#4a3c30", "#f7f0e4")
+SELECT = ("#e4dcd2", "#3a342e")
+SEND = ("#3c3631", "#efe6da")
+SEND_HOVER = ("#2b2724", "#f7f1e8")
+ON_SEND = ("#f6f1ea", "#1c1916")
+_ICONS: dict[str, ctk.CTkImage] = {}
 
 
 def _tone(color: tuple[str, str]) -> str:
@@ -130,18 +142,128 @@ def _on_layout_clipboard(event):
     return "break"
 
 
-def quiet_button(parent, text, command, width=96, primary=False):
+def _paint_folder(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.rounded_rectangle((5, 13, 27, 26), radius=3, outline=color, width=2)
+    draw.line((6, 14, 12, 14, 15, 8, 22, 8), fill=color, width=2)
+
+
+def _paint_sliders(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((7, 10, 25, 10), fill=color, width=2)
+    draw.ellipse((14, 7, 20, 13), outline=color, width=2)
+    draw.line((7, 16, 25, 16), fill=color, width=2)
+    draw.ellipse((10, 13, 16, 19), outline=color, width=2)
+    draw.line((7, 22, 25, 22), fill=color, width=2)
+    draw.ellipse((16, 19, 22, 25), outline=color, width=2)
+
+
+def _paint_plus(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((16, 8, 16, 24), fill=color, width=2)
+    draw.line((8, 16, 24, 16), fill=color, width=2)
+
+
+def _paint_refresh(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.arc((7, 8, 25, 26), start=40, end=310, fill=color, width=2)
+    draw.polygon([(22, 6), (27, 12), (19, 13)], fill=color)
+
+
+def _paint_trash(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((8, 11, 24, 11), fill=color, width=2)
+    draw.line((13, 11, 13, 8, 19, 8, 19, 11), fill=color, width=2)
+    draw.rounded_rectangle((9, 13, 23, 26), radius=2, outline=color, width=2)
+    draw.line((13, 16, 13, 23), fill=color, width=2)
+    draw.line((19, 16, 19, 23), fill=color, width=2)
+
+
+def _paint_save(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((16, 6, 16, 18), fill=color, width=2)
+    draw.line((10, 14, 16, 20, 22, 14), fill=color, width=2)
+    draw.line((8, 24, 24, 24), fill=color, width=2)
+
+
+def _paint_close(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((9, 9, 23, 23), fill=color, width=2)
+    draw.line((23, 9, 9, 23), fill=color, width=2)
+
+
+def _paint_image(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.rounded_rectangle((5, 8, 27, 24), radius=3, outline=color, width=2)
+    draw.ellipse((18, 11, 22, 15), outline=color, width=2)
+    draw.line((8, 20, 13, 15, 17, 19, 21, 15, 25, 20), fill=color, width=2)
+
+
+def _paint_send(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((16, 24, 16, 8), fill=color, width=2)
+    draw.line((9, 15, 16, 8, 23, 15), fill=color, width=2)
+
+
+def _paint_stop(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.rounded_rectangle((9, 9, 23, 23), radius=3, outline=color, width=2)
+
+
+def _paint_check(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.line((8, 17, 14, 23, 24, 10), fill=color, width=2)
+
+
+_PAINT = {
+    "folder": _paint_folder,
+    "sliders": _paint_sliders,
+    "plus": _paint_plus,
+    "refresh": _paint_refresh,
+    "trash": _paint_trash,
+    "save": _paint_save,
+    "close": _paint_close,
+    "image": _paint_image,
+    "send": _paint_send,
+    "stop": _paint_stop,
+    "check": _paint_check,
+}
+
+
+def glyph(name: str, invert: bool = False) -> ctk.CTkImage:
+    key = f"{name}:{int(invert)}"
+    cached = _ICONS.get(key)
+    if cached is not None:
+        return cached
+    light = ON_SEND[0] if invert else TEXT[0]
+    dark = ON_SEND[1] if invert else TEXT[1]
+
+    def sheet(color: str) -> Image.Image:
+        image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        _PAINT[name](ImageDraw.Draw(image), color)
+        return image
+
+    icon = ctk.CTkImage(light_image=sheet(light), dark_image=sheet(dark), size=(16, 16))
+    _ICONS[key] = icon
+    return icon
+
+
+def quiet_button(parent, text, command, width=96, primary=False, mark=None, round_mark=False):
+    if round_mark:
+        return ctk.CTkButton(
+            parent,
+            text="",
+            image=glyph("send", invert=True),
+            width=40,
+            height=40,
+            corner_radius=20,
+            border_width=0,
+            fg_color=SEND,
+            hover_color=SEND_HOVER,
+            command=command,
+        )
     return ctk.CTkButton(
         parent,
         text=text,
+        image=None if mark is None else glyph(mark, invert=primary),
         width=width,
-        height=28,
-        corner_radius=6,
-        border_width=1,
+        height=32,
+        corner_radius=16,
+        border_width=0 if primary else 1,
         border_color=BORDER,
-        fg_color=SELECT if primary else BUTTON,
-        hover_color=PRIMARY_HOVER if primary else BUTTON_HOVER,
-        text_color=TEXT,
+        fg_color=SEND if primary else BUTTON,
+        hover_color=SEND_HOVER if primary else BUTTON_HOVER,
+        text_color=ON_SEND if primary else TEXT,
+        font=("Segoe UI", 12),
         command=command,
     )
 
@@ -152,15 +274,17 @@ def quiet_menu(parent, variable, values, command=None):
         variable=variable,
         values=values,
         command=command,
-        height=28,
-        corner_radius=6,
+        height=34,
+        corner_radius=12,
         fg_color=BUTTON,
         button_color=BUTTON_HOVER,
         button_hover_color=BORDER,
         text_color=TEXT,
+        font=("Segoe UI", 12),
         dropdown_fg_color=PANEL,
         dropdown_text_color=TEXT,
         dropdown_hover_color=SELECT,
+        dropdown_font=("Segoe UI", 12),
     )
 
 
@@ -183,8 +307,8 @@ class ConfirmDialog(ctk.CTkToplevel):
         )
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(pady=16)
-        quiet_button(row, "Нет", self.refuse, width=100).pack(side="left", padx=8)
-        quiet_button(row, "Да", self.allow, width=100, primary=True).pack(side="left", padx=8)
+        quiet_button(row, "Нет", self.refuse, width=110, mark="close").pack(side="left", padx=8)
+        quiet_button(row, "Да", self.allow, width=110, primary=True, mark="check").pack(side="left", padx=8)
         self.protocol("WM_DELETE_WINDOW", self.refuse)
         self.bind("<Escape>", lambda _event: self.refuse())
         self.after(50, self.focus)
@@ -206,6 +330,53 @@ class ConfirmDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class NameDialog(ctk.CTkToplevel):
+    def __init__(self, master) -> None:
+        super().__init__(master)
+        self.result = ""
+        self._closed = False
+        self.title("Профиль")
+        self.geometry("420x168")
+        self.resizable(False, False)
+        self.configure(fg_color=INK)
+        self.transient(master)
+        self.grab_set()
+        ctk.CTkLabel(self, text="Имя профиля", anchor="w", text_color=MUTED).pack(fill="x", padx=16, pady=(16, 4))
+        self.entry = ctk.CTkEntry(
+            self,
+            fg_color=FIELD,
+            border_color=BORDER,
+            text_color=TEXT,
+            height=36,
+            corner_radius=12,
+        )
+        self.entry.pack(fill="x", padx=16, pady=4)
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=12)
+        quiet_button(row, "Отмена", self._cancel, width=120, mark="close").pack(side="left", padx=8)
+        quiet_button(row, "Сохранить", self._ok, width=140, primary=True, mark="save").pack(side="left", padx=8)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.entry.bind("<Return>", lambda _event: self._ok())
+        self.after(50, self.entry.focus)
+
+    def _ok(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.result = self.entry.get()
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.result = ""
+        self.grab_release()
+        self.destroy()
+
+
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, app: "App") -> None:
         super().__init__(app)
@@ -220,6 +391,7 @@ class SettingsWindow(ctk.CTkToplevel):
         settings = ctk.CTkScrollableFrame(
             self,
             fg_color=PANEL,
+            corner_radius=16,
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
@@ -232,8 +404,8 @@ class SettingsWindow(ctk.CTkToplevel):
         app._sync_profile_menu()
         profile_row = ctk.CTkFrame(settings, fg_color="transparent")
         profile_row.pack(fill="x", padx=8, pady=4)
-        quiet_button(profile_row, "Сохранить профиль", app.save_profile, width=160).pack(side="left", padx=(0, 4))
-        quiet_button(profile_row, "Удалить", app.delete_profile, width=90).pack(side="left")
+        quiet_button(profile_row, "Сохранить профиль", app.save_profile, width=188, mark="save").pack(side="left", padx=(0, 4))
+        quiet_button(profile_row, "Удалить", app.delete_profile, width=112, mark="trash").pack(side="left")
         app._field(settings, "Провайдер")
         quiet_menu(settings, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=4)
         app._entry(settings, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic")
@@ -250,7 +422,7 @@ class SettingsWindow(ctk.CTkToplevel):
             justify="left",
             text_color=MUTED,
         ).pack(fill="x", padx=8, pady=(4, 8))
-        quiet_button(settings, "Сохранить", app.save_settings, width=160, primary=True).pack(fill="x", padx=8, pady=4)
+        quiet_button(settings, "Сохранить", app.save_settings, width=160, primary=True, mark="check").pack(fill="x", padx=8, pady=4)
         ctk.CTkLabel(settings, text="MCP-серверы", anchor="w", text_color=TEXT).pack(fill="x", padx=8, pady=(12, 0))
         app.mcp_list = ctk.CTkTextbox(
             settings,
@@ -267,8 +439,8 @@ class SettingsWindow(ctk.CTkToplevel):
         app._entry(settings, "Команда MCP", app.mcp_command_var, "python -m server")
         mcp_row = ctk.CTkFrame(settings, fg_color="transparent")
         mcp_row.pack(fill="x", padx=8, pady=4)
-        quiet_button(mcp_row, "Добавить", app.add_mcp, width=100).pack(side="left", padx=(0, 4))
-        quiet_button(mcp_row, "Удалить", app.remove_mcp, width=90).pack(side="left")
+        quiet_button(mcp_row, "Добавить", app.add_mcp, width=124, mark="plus").pack(side="left", padx=(0, 4))
+        quiet_button(mcp_row, "Удалить", app.remove_mcp, width=112, mark="trash").pack(side="left")
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.after(50, self.focus)
@@ -322,6 +494,7 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_width = 420
+        self.prompt_height = 0
         self.provider_var = ctk.StringVar(value="OpenAI-совместимый")
         self.base_url_var = ctk.StringVar()
         self.model_var = ctk.StringVar()
@@ -351,10 +524,10 @@ class App(ctk.CTk):
         self.folder_label = ctk.CTkLabel(top, text="не выбрана", anchor="w", justify="left", text_color=TEXT)
         self.folder_label.grid(row=0, column=1, sticky="ew", padx=4, pady=8)
         self.folder_label.bind("<Configure>", self._fit_folder)
-        self.folder_button = quiet_button(top, "Выбрать", self.choose_folder, width=96)
-        self.folder_button.grid(row=0, column=2, padx=4, pady=6)
-        quiet_button(top, "Настройки", self.open_settings, width=104).grid(row=0, column=3, padx=4, pady=6)
-        quiet_button(top, "Новый чат", self.new_chat, width=104).grid(row=0, column=4, padx=(4, 12), pady=6)
+        self.folder_button = quiet_button(top, "Выбрать", self.choose_folder, width=112, mark="folder")
+        self.folder_button.grid(row=0, column=2, padx=4, pady=8)
+        quiet_button(top, "Настройки", self.open_settings, width=124, mark="sliders").grid(row=0, column=3, padx=4, pady=8)
+        quiet_button(top, "Новый чат", self.new_chat, width=128, mark="plus").grid(row=0, column=4, padx=(4, 12), pady=8)
 
         side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         side.grid(row=1, column=0, sticky="nsew")
@@ -365,7 +538,7 @@ class App(ctk.CTk):
         side_top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         side_top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(side_top, text="Структура", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w")
-        quiet_button(side_top, "Обновить", self._refresh_tree, width=90).grid(row=0, column=1, padx=(8, 0))
+        quiet_button(side_top, "Обновить", self._refresh_tree, width=118, mark="refresh").grid(row=0, column=1, padx=(8, 0))
         tree_holder = ctk.CTkFrame(side, fg_color="transparent")
         tree_holder.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         tree_holder.grid_columnconfigure(0, weight=1)
@@ -384,7 +557,7 @@ class App(ctk.CTk):
         chat_top.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
         chat_top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(chat_top, text="Чаты", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w")
-        quiet_button(chat_top, "Удалить", self.delete_selected_chat, width=90).grid(row=0, column=1, padx=(8, 0))
+        quiet_button(chat_top, "Удалить", self.delete_selected_chat, width=112, mark="trash").grid(row=0, column=1, padx=(8, 0))
         chat_holder = ctk.CTkFrame(side, fg_color="transparent")
         chat_holder.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         chat_holder.grid_columnconfigure(0, weight=1)
@@ -413,8 +586,22 @@ class App(ctk.CTk):
         self.center.grid_columnconfigure(0, weight=1)
         self.center.grid_rowconfigure(0, weight=1)
         self.work.add(self.center, stretch="always", minsize=360, sticky="nsew")
-        self.chat = ctk.CTkTextbox(
+        self.stack = tk.PanedWindow(
             self.center,
+            orient="vertical",
+            sashwidth=6,
+            sashrelief="flat",
+            bd=0,
+            bg=_tone(INK),
+            sashcursor="sb_v_double_arrow",
+        )
+        self.stack.grid(row=0, column=0, sticky="nsew")
+        self.stack.bind("<ButtonRelease-1>", self._remember_prompt_height)
+        chat_holder = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
+        chat_holder.grid_columnconfigure(0, weight=1)
+        chat_holder.grid_rowconfigure(0, weight=1)
+        self.chat = ctk.CTkTextbox(
+            chat_holder,
             wrap="word",
             fg_color=INK,
             text_color=TEXT,
@@ -425,6 +612,7 @@ class App(ctk.CTk):
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
         self.chat.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        self.stack.add(chat_holder, stretch="always", minsize=140, sticky="nsew")
         self._tag_chat()
         self.chat.bind("<<Paste>>", lambda _event: "break")
         self.chat.bind("<<Cut>>", lambda _event: "break")
@@ -439,8 +627,8 @@ class App(ctk.CTk):
         editor_head.grid_columnconfigure(0, weight=1)
         self.editor_title = ctk.CTkLabel(editor_head, text="", anchor="w", text_color=TEXT)
         self.editor_title.grid(row=0, column=0, sticky="ew")
-        quiet_button(editor_head, "Сохранить", self._save_editor, width=104).grid(row=0, column=1, padx=(8, 4))
-        quiet_button(editor_head, "Закрыть", self._close_editor, width=88).grid(row=0, column=2)
+        quiet_button(editor_head, "Сохранить", self._save_editor, width=128, mark="save").grid(row=0, column=1, padx=(8, 4))
+        quiet_button(editor_head, "Закрыть", self._close_editor, width=112, mark="close").grid(row=0, column=2)
         self.editor_box = ctk.CTkTextbox(
             self.editor_frame,
             wrap="none",
@@ -454,38 +642,54 @@ class App(ctk.CTk):
         )
         self.editor_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        bottom = ctk.CTkFrame(self.center, fg_color=PANEL, corner_radius=10)
-        bottom.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 10))
+        bottom = ctk.CTkFrame(self.stack, fg_color=FIELD, corner_radius=18, border_width=1, border_color=BORDER)
+        self.bottom = bottom
         bottom.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(bottom, text="Задача", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
+        bottom.grid_rowconfigure(1, weight=1)
+        self.stack.add(bottom, stretch="never", minsize=188, sticky="nsew")
+        ctk.CTkLabel(bottom, text="Задача", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
         self.task = ctk.CTkTextbox(
             bottom,
-            height=76,
+            height=72,
             fg_color=FIELD,
             text_color=TEXT,
             border_color=BORDER,
             border_width=1,
-            corner_radius=8,
+            corner_radius=12,
             font=("Segoe UI", 13),
         )
-        self.task.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 0))
+        self.task.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=(4, 0))
         self.task.bind("<Return>", self._send_key)
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
-        ctk.CTkLabel(
+        self.model_label = ctk.CTkLabel(
             bottom,
-            text="Enter отправляет, Shift+Enter переносит строку",
+            text="модель не выбрана",
             anchor="w",
             text_color=MUTED,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 0))
+            font=("Segoe UI", 11),
+        )
+        self.model_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 0))
         self.attach_label = ctk.CTkLabel(bottom, text="", anchor="w", text_color=MUTED)
-        self.attach_label.grid(row=3, column=0, sticky="w", padx=8, pady=8)
-        self.image_button = quiet_button(bottom, "Изображение", self.attach_image, width=110)
-        self.image_button.grid(row=3, column=1, padx=4, pady=8)
-        self.send_button = quiet_button(bottom, "Отправить", self.send, width=110, primary=True)
-        self.send_button.grid(row=3, column=2, padx=4, pady=8)
-        self.stop_button = quiet_button(bottom, "Стоп", self.stop, width=80)
-        self.stop_button.grid(row=3, column=3, padx=(4, 8), pady=8)
+        self.attach_label.grid(row=3, column=0, sticky="w", padx=12, pady=(4, 4))
+        self.image_button = ctk.CTkButton(
+            bottom,
+            text="",
+            image=glyph("plus"),
+            width=40,
+            height=40,
+            corner_radius=20,
+            border_width=1,
+            border_color=BORDER,
+            fg_color=BUTTON,
+            hover_color=BUTTON_HOVER,
+            command=self.attach_image,
+        )
+        self.image_button.grid(row=3, column=1, padx=4, pady=(4, 4))
+        self.stop_button = quiet_button(bottom, "Стоп", self.stop, width=96, mark="stop")
+        self.stop_button.grid(row=3, column=2, padx=4, pady=(4, 4))
+        self.send_button = quiet_button(bottom, "", self.send, round_mark=True)
+        self.send_button.grid(row=3, column=3, padx=(4, 12), pady=(4, 4))
         self.stop_button.configure(state="disabled")
         self.status_label = ctk.CTkLabel(bottom, text="Готово", anchor="w", text_color=MUTED)
         self.status_label.grid(row=4, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
@@ -662,6 +866,35 @@ class App(ctk.CTk):
             return
         self.editor_width = max(240, total - left)
 
+    def _place_composer_sash(self, tries: int = 0) -> None:
+        total = self.stack.winfo_height()
+        if total < 200:
+            if tries < 8:
+                self.after(50, lambda: self._place_composer_sash(tries + 1))
+            return
+        natural = max(188, self.bottom.winfo_reqheight())
+        wanted = self.prompt_height or natural
+        wanted = max(natural, min(wanted, total - 140))
+        try:
+            self.stack.sash_place(0, 1, max(140, total - wanted))
+        except tk.TclError:
+            return
+
+    def _remember_prompt_height(self, _event=None) -> None:
+        total = self.stack.winfo_height()
+        try:
+            _left, top = self.stack.sash_coord(0)
+        except tk.TclError:
+            return
+        height = max(160, total - int(top))
+        if height == self.prompt_height:
+            return
+        self.prompt_height = height
+        try:
+            save_prompt_height(height)
+        except Exception as exc:
+            self.write_chat(f"Не удалось сохранить высоту поля: {exc}")
+
     def _save_editor(self) -> None:
         if not self.editor_open or self.project is None:
             return
@@ -723,11 +956,64 @@ class App(ctk.CTk):
 
     def open_settings(self) -> None:
         window = self._settings_window
-        if window is not None and window.winfo_exists():
-            window.lift()
-            window.focus()
+        if self._window_alive(window):
+            try:
+                if str(window.state()) == "withdrawn":
+                    window.deiconify()
+                window.lift()
+                window.focus()
+                return
+            except tk.TclError:
+                self._settings_window = None
+        else:
+            self._settings_window = None
+        try:
+            self._settings_window = SettingsWindow(self)
+        except Exception as exc:
+            self._settings_window = None
+            self.write_chat(f"Не удалось открыть настройки: {exc}")
+
+    def _window_alive(self, window) -> bool:
+        if window is None:
+            return False
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _restore_theme_windows(self) -> None:
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
             return
-        self._settings_window = SettingsWindow(self)
+        self._unhide(self)
+        window = self._settings_window
+        if window is None:
+            return
+        if not self._window_alive(window):
+            self._settings_window = None
+            return
+        try:
+            hidden = str(window.state()) == "withdrawn"
+        except tk.TclError:
+            self._settings_window = None
+            return
+        self._unhide(window)
+        if not hidden:
+            return
+        try:
+            window.focus()
+        except tk.TclError:
+            self._settings_window = None
+
+    def _unhide(self, window) -> None:
+        try:
+            if str(window.state()) == "withdrawn":
+                window.deiconify()
+            window.lift()
+        except tk.TclError:
+            return
 
     def _field(self, parent, text: str) -> None:
         ctk.CTkLabel(parent, text=text, anchor="w", text_color=MUTED).pack(fill="x", padx=8, pady=(8, 0))
@@ -743,13 +1029,16 @@ class App(ctk.CTk):
             border_color=BORDER,
             text_color=TEXT,
             placeholder_text_color=MUTED,
-            height=32,
+            height=36,
+            corner_radius=12,
         )
         entry.pack(fill="x", padx=8, pady=4)
 
     def _load(self) -> None:
         data, error = load_config()
         self._apply_theme(data["theme"])
+        self.prompt_height = int(data.get("prompt_height") or 0)
+        self.after(50, self._place_composer_sash)
         self.profiles = list(data["profiles"])
         self.active_profile = data["active_profile"]
         self._apply_ai(data)
@@ -767,8 +1056,12 @@ class App(ctk.CTk):
         if self.theme_var.get() != label:
             self.theme_var.set(label)
         ctk.set_appearance_mode(theme)
+        self._restore_theme_windows()
+        self.after(60, self._restore_theme_windows)
         if hasattr(self, "work"):
             self.work.configure(bg=_tone(INK))
+        if hasattr(self, "stack"):
+            self.stack.configure(bg=_tone(INK))
         if hasattr(self, "tree"):
             self._style_tree()
         if hasattr(self, "chat"):
@@ -794,6 +1087,11 @@ class App(ctk.CTk):
         self.image_model_var.set(fields["image_model"])
         self.image_url_var.set(fields["image_base_url"])
         self.image_key_var.set(fields["image_api_key"])
+        self._show_model()
+
+    def _show_model(self) -> None:
+        name = self.model_var.get().strip()
+        self.model_label.configure(text=name or "модель не выбрана")
 
     def _ai_snapshot(self) -> dict:
         try:
@@ -833,8 +1131,9 @@ class App(ctk.CTk):
         self._persist("Профиль выбран")
 
     def save_profile(self) -> None:
-        dialog = ctk.CTkInputDialog(title="Профиль", text="Имя профиля")
-        name = " ".join(str(dialog.get_input() or "").split())
+        dialog = NameDialog(self)
+        self.wait_window(dialog)
+        name = " ".join(str(dialog.result or "").split())
         if not name:
             return
         if len(name) > 80 or name == _NO_PROFILE:
@@ -880,10 +1179,12 @@ class App(ctk.CTk):
         settings["profiles"] = list(self.profiles)
         settings["mcp_servers"] = self._servers_for_save()
         settings["theme"] = self.theme
+        settings["prompt_height"] = self.prompt_height
         return settings
 
     def save_settings(self) -> None:
         self._persist("Настройки сохранены")
+        self._show_model()
 
     def _capture_active_profile(self) -> None:
         name = self.active_profile
