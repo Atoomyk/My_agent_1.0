@@ -535,7 +535,9 @@ class ContextAttachTests(unittest.TestCase):
         from project_agent.context_attach import (
             at_token_at_end,
             compose_user_text,
+            find_at_targets,
             load_context_files,
+            load_explicit_context,
             merge_paths,
             parse_at_paths,
         )
@@ -545,20 +547,41 @@ class ContextAttachTests(unittest.TestCase):
         self.assertIsNone(at_token_at_end("без упоминания"))
         self.assertEqual(merge_paths(["a.py", "b.py"], ["a.py", "c.py"], limit=2), ["a.py", "b.py"])
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "proj"
-            root.mkdir()
-            (root / "a.py").write_text("print(1)\n", encoding="utf-8")
-            (root / "secret.bin").write_bytes(b"\x00\x01\x02")
-            vault = SecretVault()
-            block, loaded, errors = load_context_files(root, ["a.py", "missing.py", "secret.bin"], vault)
-            self.assertIn("a.py", loaded)
-            self.assertIn("### a.py", block)
-            self.assertIn("print(1)", block)
-            self.assertTrue(any("missing.py" in item for item in errors))
-            self.assertTrue(any("secret.bin" in item for item in errors))
-            text = compose_user_text("исправь", block)
-            self.assertIn("исправь", text)
-            self.assertIn("Приложенные файлы", text)
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                (root / "a.py").write_text("print(1)\n", encoding="utf-8")
+                (root / "secret.bin").write_bytes(b"\x00\x01\x02")
+                src = root / "src"
+                src.mkdir()
+                (src / "main.py").write_text("x=1\n", encoding="utf-8")
+                vault = SecretVault()
+                block, loaded, errors = load_context_files(root, ["a.py", "missing.py", "secret.bin"], vault)
+                self.assertIn("a.py", loaded)
+                self.assertIn("### a.py", block)
+                self.assertIn("print(1)", block)
+                self.assertTrue(any("missing.py" in item for item in errors))
+                self.assertTrue(any("secret.bin" in item for item in errors))
+                text = compose_user_text("исправь", block)
+                self.assertIn("исправь", text)
+                self.assertIn("Приложенные файлы", text)
+                from project_agent.index_store import build_index
+
+                build_index(root)
+                mixed, files, dirs, mixed_errors = load_explicit_context(root, ["a.py", "src"], vault)
+                self.assertIn("a.py", files)
+                self.assertTrue(any(item.rstrip("/") == "src" for item in dirs))
+                self.assertIn("Приложенные папки", mixed)
+                self.assertIn("main.py", mixed)
+                targets = find_at_targets(root, "src", limit=8)
+                self.assertTrue(any(item.rstrip("/") == "src" or item.startswith("src/") for item in targets))
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
 
 
 class ProjectRulesTests(unittest.TestCase):

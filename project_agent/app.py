@@ -26,18 +26,21 @@ from project_agent.config import (
     save_theme,
 )
 from project_agent.context_attach import (
+    MAX_CONTEXT_DIRS,
     MAX_CONTEXT_FILES,
     at_token_at_end,
     compose_user_text,
-    load_context_files,
+    find_at_targets,
+    load_explicit_context,
     merge_paths,
     parse_at_paths,
+    save_clipboard_image,
 )
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
 from project_agent.paths import PathError, list_entries, read_text_file, relative_posix, resolve_inside
 from project_agent.secrets import Scrubber, SecretVault, literals_from_settings
-from project_agent.index_store import build_index, find_paths, index_summary
+from project_agent.index_store import build_index, index_summary
 from project_agent.rules import rules_summary
 from project_agent.testing import (
     LABEL_BY_PRESET,
@@ -784,6 +787,7 @@ class App(ctk.CTk):
         self.project: Path | None = None
         self.attached: list[str] = []
         self.context_files: list[str] = []
+        self.context_dirs: list[str] = []
         self._at_popup: tk.Toplevel | None = None
         self._at_list: tk.Listbox | None = None
         self._at_start: str | None = None
@@ -1053,7 +1057,8 @@ class App(ctk.CTk):
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
         inner = self.task._textbox
-        inner.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
+        inner.bind("<Control-KeyPress>", self._on_task_clipboard, add="+")
+        inner.bind("<<Paste>>", self._on_task_paste_event, add="+")
         self.placeholder = tk.Label(
             inner,
             text="Спросите что угодно…",
@@ -1958,8 +1963,9 @@ class App(ctk.CTk):
             font=self._px_font(12),
         )
         menu.add_command(label="Файл проекта…", command=self.attach_project_file)
+        menu.add_command(label="Папка проекта…", command=self.attach_project_dir)
         menu.add_command(label="Изображение…", command=self.attach_image)
-        if self.context_files or self.attached:
+        if self.context_files or self.context_dirs or self.attached:
             menu.add_separator()
             menu.add_command(label="Очистить вложения", command=self.clear_attachments)
         try:
@@ -1988,11 +1994,44 @@ class App(ctk.CTk):
         if not full.is_file():
             self.write_chat("Нужен файл, не папка.")
             return
-        self._add_context_file(rel)
+        self._add_context_path(rel)
 
-    def _add_context_file(self, relative: str) -> None:
-        path = str(relative or "").replace("\\", "/").strip().strip("/")
-        if not path:
+    def attach_project_dir(self) -> None:
+        if self.project is None:
+            self.write_chat("Сначала выберите папку проекта.")
+            return
+        if len(self.context_dirs) >= MAX_CONTEXT_DIRS:
+            self.write_chat(f"Можно вложить не больше {MAX_CONTEXT_DIRS} папок.")
+            return
+        selected = filedialog.askdirectory(initialdir=str(self.project))
+        if not selected:
+            return
+        try:
+            full = resolve_inside(self.project, selected)
+            rel = relative_posix(self.project, full)
+        except PathError as exc:
+            self.write_chat(f"Папка вне проекта: {exc}")
+            return
+        if not full.is_dir():
+            self.write_chat("Нужна папка.")
+            return
+        self._add_context_path(rel + "/")
+
+    def _add_context_path(self, relative: str) -> None:
+        path = str(relative or "").replace("\\", "/").strip()
+        is_dir = path.endswith("/")
+        path = path.strip("/")
+        if not path and not is_dir:
+            return
+        if is_dir or (self.project is not None and (self.project / path).is_dir()):
+            if path in self.context_dirs:
+                self._refresh_attach()
+                return
+            if len(self.context_dirs) >= MAX_CONTEXT_DIRS:
+                self.write_chat(f"Можно вложить не больше {MAX_CONTEXT_DIRS} папок.")
+                return
+            self.context_dirs.append(path)
+            self._refresh_attach()
             return
         if path in self.context_files:
             self._refresh_attach()
@@ -2003,9 +2042,13 @@ class App(ctk.CTk):
         self.context_files.append(path)
         self._refresh_attach()
 
+    def _add_context_file(self, relative: str) -> None:
+        self._add_context_path(relative)
+
     def clear_attachments(self) -> None:
         self.attached.clear()
         self.context_files.clear()
+        self.context_dirs.clear()
         self._refresh_attach()
 
     def attach_image(self) -> None:
@@ -2019,8 +2062,42 @@ class App(ctk.CTk):
             self.attached.append(selected)
             self._refresh_attach()
 
+    def _paste_clipboard_image(self) -> bool:
+        if len(self.attached) >= 4:
+            self.write_chat("Можно приложить не больше 4 изображений.")
+            return True
+        path = save_clipboard_image()
+        if path is None:
+            return False
+        self.attached.append(str(path))
+        self._refresh_attach()
+        self.set_status("Изображение из буфера")
+        return True
+
+    def _on_task_clipboard(self, event):
+        if not (int(getattr(event, "state", 0) or 0) & 0x4):
+            return
+        action = clipboard_action(str(event.keysym), int(getattr(event, "keycode", 0) or 0))
+        if not action:
+            return
+        if action == "paste":
+            if self._paste_clipboard_image():
+                return "break"
+            apply_layout_clipboard(event.widget, "paste")
+            return "break"
+        apply_layout_clipboard(event.widget, action)
+        return "break"
+
+    def _on_task_paste_event(self, _event=None):
+        if self._paste_clipboard_image():
+            return "break"
+        return None
+
     def _refresh_attach(self) -> None:
         parts: list[str] = []
+        if self.context_dirs:
+            names = ", ".join(Path(path).name + "/" for path in self.context_dirs)
+            parts.append(f"Папки: {names}")
         if self.context_files:
             names = ", ".join(Path(path).name for path in self.context_files)
             parts.append(f"Файлы: {names}")
@@ -2036,7 +2113,8 @@ class App(ctk.CTk):
         row = self.tree.identify_row(event.y)
         if not row or self.project is None:
             return None
-        if "file" not in self.tree.item(row, "tags"):
+        tags = self.tree.item(row, "tags")
+        if "file" not in tags and "dir" not in tags:
             return None
         self.tree.selection_set(row)
         menu = tk.Menu(
@@ -2049,7 +2127,11 @@ class App(ctk.CTk):
             activeforeground=_tone(TEXT),
             font=self._px_font(12),
         )
-        menu.add_command(label="Вложить в запрос", command=lambda: self._add_context_file(str(row)))
+        if "dir" in tags:
+            target = "." if row == "." else str(row)
+            menu.add_command(label="Вложить папку в запрос", command=lambda: self._add_context_path(target + "/"))
+        else:
+            menu.add_command(label="Вложить в запрос", command=lambda: self._add_context_path(str(row)))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2068,7 +2150,7 @@ class App(ctk.CTk):
             return
         query, start = token
         try:
-            found, _meta = find_paths(self.project, query, limit=8)
+            found = find_at_targets(self.project, query, limit=8)
         except Exception:
             found = []
         if not found:
@@ -2172,7 +2254,7 @@ class App(ctk.CTk):
             pass
         self._hide_at_popup()
         if path:
-            self._add_context_file(path)
+            self._add_context_path(path)
             if inner.get("1.0", "end-1c").strip():
                 self.placeholder.place_forget()
             else:
@@ -2245,7 +2327,12 @@ class App(ctk.CTk):
         self._hide_at_popup()
         text = self.task.get("1.0", "end").strip()
         images = list(self.attached)
-        context_paths = merge_paths(self.context_files, parse_at_paths(text))
+        context_paths = merge_paths(
+            self.context_files,
+            self.context_dirs,
+            parse_at_paths(text),
+            limit=MAX_CONTEXT_FILES + MAX_CONTEXT_DIRS,
+        )
         if self.project is None:
             self.write_chat("Сначала выберите папку проекта.")
             return
@@ -2272,8 +2359,11 @@ class App(ctk.CTk):
                 return
         context_block = ""
         loaded_files: list[str] = []
+        loaded_dirs: list[str] = []
         if context_paths:
-            context_block, loaded_files, errors = load_context_files(self.project, context_paths, self.vault)
+            context_block, loaded_files, loaded_dirs, errors = load_explicit_context(
+                self.project, context_paths, self.vault
+            )
             for item in errors:
                 self.write_chat(f"Вложение: {item}")
         model_text = compose_user_text(text, context_block)
@@ -2282,8 +2372,13 @@ class App(ctk.CTk):
         self.task.delete("1.0", "end")
         self.attached.clear()
         self.context_files.clear()
+        self.context_dirs.clear()
         self._refresh_attach()
-        note = text or ("(файлы)" if loaded_files else "(только изображение)")
+        note = text or (
+            "(контекст)" if (loaded_files or loaded_dirs) else "(только изображение)"
+        )
+        if loaded_dirs:
+            note += f"\n(папки: {', '.join(loaded_dirs)})"
         if loaded_files:
             note += f"\n(файлы: {', '.join(loaded_files)})"
         if images:
