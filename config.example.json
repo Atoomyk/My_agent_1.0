@@ -10,6 +10,9 @@
   "project_dir": "",
   "theme": "",
   "prompt_height": 0,
+  "test_preset": "",
+  "test_timeout": 120,
+  "test_fix_rounds": 3,
   "active_profile": "",
   "profiles": [],
   "mcp_servers": []

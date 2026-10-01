@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 CONFIG_NAME = "config.json"
@@ -30,6 +31,9 @@ def default_config() -> dict:
         "project_dir": "",
         "theme": "dark",
         "prompt_height": 0,
+        "test_preset": "",
+        "test_timeout": 120,
+        "test_fix_rounds": 3,
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
@@ -125,11 +129,46 @@ def _theme(raw) -> str:
     return "dark"
 
 
+def _test_preset(raw) -> str:
+    from project_agent.testing import normalize_preset
+
+    return normalize_preset(raw)
+
+
+def _test_timeout(raw) -> int:
+    from project_agent.testing import normalize_timeout
+
+    return normalize_timeout(raw)
+
+
+def _test_fix_rounds(raw) -> int:
+    from project_agent.testing import normalize_fix_rounds
+
+    return normalize_fix_rounds(raw)
+
+
 def _write_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    temporary.write_text(text, encoding="utf-8")
+    last_error: OSError | None = None
+    for attempt in range(6):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt < 5:
+                time.sleep(0.05 * (attempt + 1))
+    try:
+        path.write_text(text, encoding="utf-8")
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except OSError as exc:
+        raise last_error or exc from exc
 
 
 def _profile_name(raw) -> str:
@@ -178,6 +217,9 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["mcp_servers"] = _servers(data.get("mcp_servers"))
     merged["theme"] = _theme(data.get("theme"))
     merged["prompt_height"] = _prompt_height(data.get("prompt_height"))
+    merged["test_preset"] = _test_preset(data.get("test_preset"))
+    merged["test_timeout"] = _test_timeout(data.get("test_timeout"))
+    merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     return merged, None
 
 
@@ -193,6 +235,9 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["mcp_servers"] = _servers(data.get("mcp_servers"))
     payload["theme"] = _theme(data.get("theme"))
     payload["prompt_height"] = _prompt_height(data.get("prompt_height"))
+    payload["test_preset"] = _test_preset(data.get("test_preset"))
+    payload["test_timeout"] = _test_timeout(data.get("test_timeout"))
+    payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     _write_config(path, payload)
 
 

@@ -20,6 +20,17 @@ from project_agent.paths import (
 )
 from project_agent.providers import request_image
 from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is_secret_blob, literals_from_settings
+from project_agent.testing import LABEL_BY_PRESET, normalize_fix_rounds, normalize_preset, normalize_timeout, run_preset
+from project_agent.index_store import build_index, find_paths, index_summary, load_index, touch_file
+from project_agent.gitops import (
+    GitError,
+    git_commit,
+    git_diff,
+    git_log,
+    git_status,
+    parse_commit_paths,
+    preview_unified,
+)
 from project_agent.websearch import web_search
 
 MAX_READ_LINES = 400
@@ -112,6 +123,42 @@ TOOL_SPECS = [
         ),
     },
     {
+        "name": "project_index",
+        "description": "Индекс путей файлов проекта (не содержимое). action=summary|refresh|find. Для find укажи query — подстрока пути.",
+        "parameters": _schema(
+            {
+                "action": _string("summary, refresh или find."),
+                "query": _string("Подстрока пути для find, например app.py или tests/."),
+            },
+            ["action"],
+        ),
+    },
+    {
+        "name": "run_tests",
+        "description": "Запустить пресет тестов из настроек (unittest или pytest). Нужно подтверждение. Произвольные команды запрещены.",
+        "parameters": _schema(
+            {"summary": _string("Короткая причина запуска без секретов.")},
+            [],
+        ),
+    },
+    {
+        "name": "git",
+        "description": "Git в корне проекта. action=status|diff|log|commit. Нет push/reset/shell. commit только после подтверждения; для staging укажи paths или add_all=true.",
+        "parameters": _schema(
+            {
+                "action": _string("status, diff, log или commit."),
+                "path": _string("Для diff: путь файла (необязательно)."),
+                "staged": {"type": "boolean", "description": "Для diff: показывать staged."},
+                "limit": {"type": "integer", "description": "Для log: число коммитов, до 20."},
+                "message": _string("Для commit: сообщение."),
+                "paths": _string("Для commit: пути через пробел/запятую для git add."),
+                "add_all": {"type": "boolean", "description": "Для commit: git add -A."},
+                "summary": _string("Короткая причина commit без секретов."),
+            },
+            ["action"],
+        ),
+    },
+    {
         "name": "list_mcp_tools",
         "description": "Список инструментов подключённых MCP-серверов.",
         "parameters": _schema({}, []),
@@ -148,12 +195,23 @@ class Toolbox:
         self.stop = None
         self.image_request = request_image
         self._image_http = None
+        self._test_holder: dict = {}
+        self._test_runs = 0
+        self._last_fail_key = ""
 
     def set_root(self, root: Path | None) -> None:
         self.root = root
 
+    def begin_turn(self) -> None:
+        self._test_runs = 0
+        self._last_fail_key = ""
+
     def cancel(self) -> None:
-        return None
+        process = self._test_holder.get("process")
+        if process is not None:
+            from project_agent.testing import kill_process
+
+            kill_process(process)
 
     def execute(self, name: str, arguments) -> ToolOutcome:
         try:
@@ -312,16 +370,30 @@ class Toolbox:
             raise ValueError("content должен быть строкой")
         if len(raw) > MAX_WRITE_CHARS:
             raise ValueError("содержимое слишком большое")
+        content = self.vault.restore(raw)
+        before = ""
+        if full.exists() and full.is_file():
+            try:
+                before = full.read_text(encoding="utf-8-sig")
+            except OSError:
+                before = ""
         hidden = self.vault.count(raw)
-        summary = self._summary(args.get("summary"), f"Запись, {raw.count(chr(10)) + 1} строк", hidden)
-        if self._stopped() or not self.confirm(rel, summary):
+        if before:
+            summary = self._summary(args.get("summary"), f"Запись, правка файла", hidden)
+        else:
+            summary = self._summary(args.get("summary"), f"Запись, новый файл, {content.count(chr(10)) + 1} строк", hidden)
+        detail = preview_unified(self._scrub(before, full), self._scrub(content, full), rel)
+        if self._stopped() or not self._confirm(rel, summary, detail):
             return ToolOutcome(
                 "Пользователь отказался записывать файл. Не повторяй эту запись без новой причины.",
                 f"write_file {rel}: отказ",
             )
-        content = self.vault.restore(raw)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8", newline="\n")
+        try:
+            touch_file(self.root, rel)
+        except Exception:
+            pass
         return ToolOutcome("Файл записан. Содержимое в ответ не входит.", f"write_file {rel}: записано")
 
     def _tool_apply_patch(self, args: dict) -> ToolOutcome:
@@ -349,12 +421,17 @@ class Toolbox:
         plus, minus = _diff_stat(original, updated)
         hidden = self.vault.count(diff)
         summary = self._summary(args.get("summary"), f"Правка +{plus} -{minus}", hidden)
-        if self._stopped() or not self.confirm(rel, summary):
+        detail = preview_unified(self._scrub(original, full), self._scrub(updated, full), rel)
+        if self._stopped() or not self._confirm(rel, summary, detail):
             return ToolOutcome(
                 "Пользователь отказался применять правку. Не повторяй её без новой причины.",
                 f"apply_patch {rel}: отказ",
             )
         full.write_text(updated, encoding="utf-8", newline="\n")
+        try:
+            touch_file(self.root, rel)
+        except Exception:
+            pass
         return ToolOutcome("Правка записана. Содержимое в ответ не входит.", f"apply_patch {rel}: записано")
 
     def _tool_view_image(self, args: dict) -> ToolOutcome:
@@ -420,6 +497,167 @@ class Toolbox:
         final.write_bytes(raw)
         return ToolOutcome(f"Изображение сохранено: {rel}", f"generate_image {rel}: сохранено")
 
+    def _tool_project_index(self, args: dict) -> ToolOutcome:
+        root = self._require_root()
+        action = str(args.get("action") or "").strip().lower()
+        if action in {"summary", "status"}:
+            data = load_index(root)
+            if not data.get("built_at"):
+                data = build_index(root)
+            text = index_summary(root)
+            if data.get("truncated"):
+                text += f" Лимит индекса: больше {len(data.get('files') or [])} файлов не взято."
+            return ToolOutcome(text, "project_index: summary")
+        if action in {"refresh", "rebuild", "update"}:
+            data = build_index(root)
+            text = index_summary(root)
+            return ToolOutcome(text, f"project_index: refresh {len(data.get('files') or [])}")
+        if action == "find":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome("Для find нужна подстрока query.", "project_index: find пусто")
+            found, data = find_paths(root, query)
+            if not found:
+                return ToolOutcome(
+                    f"По «{query}» в индексе ничего нет. Файлов в индексе: {len(data.get('files') or [])}.",
+                    "project_index: find 0",
+                )
+            body = "\n".join(found)
+            if len(found) >= 80:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: find {len(found)}")
+        return ToolOutcome("action: summary, refresh или find.", "project_index: неизвестно")
+
+    def _tool_run_tests(self, args: dict) -> ToolOutcome:
+        root = self._require_root()
+        settings = self.settings() or {}
+        preset = normalize_preset(settings.get("test_preset"))
+        if not preset:
+            return ToolOutcome(
+                "Пресет тестов выключен. Включите unittest или pytest в настройках → Проект.",
+                "run_tests: выключено",
+            )
+        rounds = normalize_fix_rounds(settings.get("test_fix_rounds"))
+        if self._test_runs >= rounds:
+            return ToolOutcome(
+                f"Лимит запусков тестов за этот ход ({rounds}). Кратко опиши, что осталось, и остановись.",
+                f"run_tests: лимит {rounds}",
+            )
+        timeout = normalize_timeout(settings.get("test_timeout"))
+        label = LABEL_BY_PRESET.get(preset, preset)
+        summary = self._summary(
+            args.get("summary"),
+            f"Запуск тестов ({label}), {self._test_runs + 1}/{rounds}, таймаут {timeout} с",
+            0,
+        )
+        if self._stopped() or not self.confirm("тесты", summary):
+            return ToolOutcome(
+                "Пользователь отказался запускать тесты. Не повторяй запуск без новой причины.",
+                "run_tests: отказ",
+            )
+        if self._stopped():
+            return ToolOutcome("Остановлено.", "run_tests: остановлено")
+        try:
+            result = run_preset(root, preset, timeout, self.stop, self._test_holder)
+        except ValueError as exc:
+            return ToolOutcome(str(exc), "run_tests: ошибка")
+        if result.stopped or self._stopped():
+            return ToolOutcome("Запуск тестов остановлен.", "run_tests: остановлено")
+        self._test_runs += 1
+        if result.timed_out:
+            body = (
+                f"Таймаут {timeout} с. Запуск {self._test_runs}/{rounds}.\n"
+                f"Команда: {' '.join(result.command)}\n\n{result.output}"
+            ).strip()
+            return ToolOutcome(body, f"run_tests {label}: таймаут {self._test_runs}/{rounds}")
+        code = 0 if result.code is None else int(result.code)
+        status = "OK" if code == 0 else f"FAIL ({code})"
+        fail_key = ""
+        if code != 0:
+            tail = "\n".join(result.output.splitlines()[-40:])
+            fail_key = f"{code}:{tail}"
+            if fail_key and fail_key == self._last_fail_key:
+                body = (
+                    f"{status} — то же падение, что в предыдущем запуске. "
+                    f"Запуск {self._test_runs}/{rounds}. Не повторяй тот же патч; опиши проблему человеку.\n"
+                    f"Команда: {' '.join(result.command)}\n\n{result.output}"
+                ).strip()
+                return ToolOutcome(body, f"run_tests {label}: повтор {self._test_runs}/{rounds}")
+            self._last_fail_key = fail_key
+        else:
+            self._last_fail_key = ""
+        body = (
+            f"{status}. Запуск {self._test_runs}/{rounds}.\n"
+            f"Команда: {' '.join(result.command)}\n\n{result.output}"
+        ).strip()
+        return ToolOutcome(body, f"run_tests {label}: {status} {self._test_runs}/{rounds}")
+
+    def _tool_git(self, args: dict) -> ToolOutcome:
+        root = self._require_root()
+        action = str(args.get("action") or "").strip().lower()
+        if action == "status":
+            try:
+                result = git_status(root)
+            except GitError as exc:
+                return ToolOutcome(str(exc), "git status: ошибка")
+            body = result.output or "(чисто)"
+            return ToolOutcome(self._scrub(body), f"git status: code {result.code}")
+        if action == "diff":
+            path = str(args.get("path") or "").strip() or None
+            staged = bool(args.get("staged"))
+            try:
+                result = git_diff(root, path=path, staged=staged)
+            except (GitError, PathError) as exc:
+                return ToolOutcome(str(exc), "git diff: ошибка")
+            body = result.output or "(нет изменений)"
+            return ToolOutcome(self._scrub(body), f"git diff: code {result.code}")
+        if action == "log":
+            try:
+                result = git_log(root, args.get("limit"))
+            except GitError as exc:
+                return ToolOutcome(str(exc), "git log: ошибка")
+            body = result.output or "(пусто)"
+            return ToolOutcome(self._scrub(body), f"git log: code {result.code}")
+        if action == "commit":
+            message = self._public_text(str(args.get("message") or "")).strip()
+            if not message:
+                return ToolOutcome("Нужен message для commit.", "git commit: нет message")
+            add_all = bool(args.get("add_all"))
+            paths = parse_commit_paths(args.get("paths"))
+            if not add_all and not paths:
+                return ToolOutcome(
+                    "Укажи paths (файлы для git add) или add_all=true. Push нет.",
+                    "git commit: нет staging",
+                )
+            try:
+                status = git_status(root)
+                preview = git_diff(root, staged=False)
+            except GitError as exc:
+                return ToolOutcome(str(exc), "git commit: ошибка")
+            summary = self._summary(args.get("summary"), f"git commit: {message[:80]}", 0)
+            detail_parts = [
+                f"message:\n{message}",
+                f"stage: {'add -A' if add_all else ', '.join(paths)}",
+                "status:\n" + (status.output or "(чисто)"),
+            ]
+            if preview.output:
+                detail_parts.append("diff (unstaged, обрезка):\n" + "\n".join(preview.output.splitlines()[:60]))
+            detail = self._scrub("\n\n".join(detail_parts))
+            if self._stopped() or not self._confirm("git commit", summary, detail):
+                return ToolOutcome(
+                    "Пользователь отказался от commit. Не повторяй без новой причины.",
+                    "git commit: отказ",
+                )
+            if self._stopped():
+                return ToolOutcome("Остановлено.", "git commit: остановлено")
+            try:
+                result = git_commit(root, message, paths=paths, add_all=add_all)
+            except (GitError, PathError) as exc:
+                return ToolOutcome(str(exc), "git commit: ошибка")
+            body = result.output or "Commit создан."
+            return ToolOutcome(self._scrub(body), "git commit: ok")
+        return ToolOutcome("action: status, diff, log или commit.", "git: неизвестно")
+
     def _tool_list_mcp_tools(self, args: dict) -> ToolOutcome:
         text = self.mcp.list_tools()
         count = 0 if text.startswith("MCP-серверы не настроены") else len([line for line in text.splitlines() if line.strip()])
@@ -443,6 +681,13 @@ class Toolbox:
             journal = f"mcp {server}.{tool}: ошибка"
             text = "Ошибка MCP. " + text
         return ToolOutcome(text[:30_000], journal, images)
+
+    def _confirm(self, path: str, summary: str, detail: str = "") -> bool:
+        try:
+            return bool(self.confirm(path, summary, detail))
+        except TypeError:
+            body = summary if not detail else f"{summary}\n\n{detail[:4000]}"
+            return bool(self.confirm(path, body))
 
     def _summary(self, given, fallback: str, hidden: int) -> str:
         text = str(given or "").strip() or fallback

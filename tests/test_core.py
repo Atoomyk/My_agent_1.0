@@ -20,6 +20,13 @@ from project_agent.patching import apply_diff
 from project_agent.paths import MAX_FILE_BYTES, PathError, list_entries, read_text_file, resolve_inside
 from project_agent.providers import OpenAIProvider
 from project_agent.secrets import Scrubber, SecretVault, looks_like_literal_secret, scrub_outbound
+from project_agent.testing import (
+    clip_output,
+    normalize_fix_rounds,
+    normalize_preset,
+    normalize_timeout,
+    preset_command,
+)
 from project_agent.tools import Toolbox
 from project_agent.websearch import parse_ddg
 
@@ -151,17 +158,19 @@ class ChatMarkupTests(unittest.TestCase):
 
 class ClipboardTests(unittest.TestCase):
     def test_russian_layout_copies_and_english_keys_stay(self):
-        from project_agent.app import apply_layout_clipboard, clipboard_action
+        from project_agent.app import apply_layout_clipboard, clipboard_action, set_clipboard
 
-        self.assertIsNone(clipboard_action("c", 67))
-        self.assertIsNone(clipboard_action("v", 86))
-        self.assertIsNone(clipboard_action("x", 88))
+        self.assertEqual(clipboard_action("c", 67), "copy")
+        self.assertEqual(clipboard_action("v", 86), "paste")
+        self.assertEqual(clipboard_action("x", 88), "cut")
         self.assertEqual(clipboard_action("a", 65), "select")
         self.assertEqual(clipboard_action("Cyrillic_es", 67), "copy")
         self.assertEqual(clipboard_action("Cyrillic_em", 86), "paste")
         self.assertEqual(clipboard_action("Cyrillic_che", 88), "cut")
         self.assertEqual(clipboard_action("Cyrillic_ef", 65), "select")
         self.assertEqual(clipboard_action("Cyrillic_a", 67), "copy")
+        self.assertEqual(clipboard_action("unknown", 67), "copy")
+        self.assertEqual(clipboard_action("unknown", 86), "paste")
         import tkinter as tk
 
         root = tk.Tk()
@@ -179,6 +188,14 @@ class ClipboardTests(unittest.TestCase):
             self.assertEqual(target.get("1.0", "end-1c"), "привет")
             apply_layout_clipboard(target, "select")
             self.assertEqual(target.get("sel.first", "sel.last"), "привет")
+            # Как после ПКМ: выделение уже сброшено, текст передан явно.
+            source.tag_remove("sel", "1.0", "end")
+            apply_layout_clipboard(source, "copy", "ответ ИИ")
+            root.update()
+            self.assertEqual(root.clipboard_get(), "ответ ИИ")
+            set_clipboard(source, "буфер")
+            root.update()
+            self.assertEqual(root.clipboard_get(), "буфер")
         finally:
             root.destroy()
 
@@ -312,6 +329,265 @@ class ToolTests(unittest.TestCase):
         self.assertNotIn(SECRET, prompts[0])
         self.assertTrue((self.root / "pic.png").exists())
         self.assertIn("сохранено", saved.journal)
+
+
+class TestRunnerTests(unittest.TestCase):
+    def test_preset_and_clip(self):
+        self.assertEqual(normalize_preset("pytest"), "pytest")
+        self.assertEqual(normalize_preset("rm -rf"), "")
+        self.assertEqual(normalize_timeout(5), 15)
+        self.assertEqual(normalize_timeout(900), 600)
+        self.assertEqual(normalize_fix_rounds(0), 1)
+        self.assertEqual(normalize_fix_rounds(99), 10)
+        command = preset_command("unittest")
+        self.assertIn("-m", command)
+        self.assertIn("unittest", command)
+        with self.assertRaises(ValueError):
+            preset_command("")
+        long = "a" * 20_000 + "MID" + "b" * 20_000
+        clipped = clip_output(long, 100)
+        self.assertLessEqual(len(clipped), 110)
+        self.assertIn("…", clipped)
+
+    def test_run_tests_tool_whitelist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "tests").mkdir()
+            (root / "tests" / "test_ok.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            notes = []
+            settings = {
+                "test_preset": "",
+                "test_timeout": 60,
+                "api_key": "",
+                "mcp_servers": [],
+            }
+            box = Toolbox(
+                SecretVault(),
+                lambda path, summary: notes.append((path, summary)) or True,
+                McpHub(),
+                lambda: settings,
+            )
+            box.set_root(root)
+            disabled = box.execute("run_tests", {})
+            self.assertIn("выключен", disabled.model_text.lower())
+            settings["test_preset"] = "unittest"
+            box2 = Toolbox(SecretVault(), lambda *_: False, McpHub(), lambda: settings)
+            box2.set_root(root)
+            refused = box2.execute("run_tests", {"summary": "check"})
+            self.assertIn("отказался", refused.model_text)
+            ok = box.execute("run_tests", {"summary": "check"})
+            self.assertTrue(notes)
+            self.assertIn("OK", ok.model_text)
+            self.assertIn("run_tests", ok.journal)
+
+    def test_run_tests_respects_round_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "tests").mkdir()
+            (root / "tests" / "test_ok.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            settings = {
+                "test_preset": "unittest",
+                "test_timeout": 60,
+                "test_fix_rounds": 2,
+                "api_key": "",
+                "mcp_servers": [],
+            }
+            box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: settings)
+            box.set_root(root)
+            box.begin_turn()
+            self.assertIn("OK", box.execute("run_tests", {}).model_text)
+            self.assertIn("OK", box.execute("run_tests", {}).model_text)
+            limited = box.execute("run_tests", {})
+            self.assertIn("Лимит", limited.model_text)
+            self.assertIn("лимит", limited.journal)
+
+
+class GitOpsTests(unittest.TestCase):
+    def test_status_diff_log_and_commit_confirm(self):
+        import shutil
+        import subprocess
+
+        from project_agent.gitops import git_diff, git_log, git_status, preview_unified
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            git = shutil.which("git")
+            if not git:
+                self.skipTest("git not installed")
+            flags = {"cwd": str(root), "check": True, "capture_output": True, "text": True}
+            subprocess.run([git, "init"], **flags)
+            subprocess.run([git, "config", "user.email", "t@example.com"], **flags)
+            subprocess.run([git, "config", "user.name", "Test"], **flags)
+            (root / "a.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run([git, "add", "a.txt"], **flags)
+            subprocess.run([git, "commit", "-m", "init"], **flags)
+            (root / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+            status = git_status(root)
+            self.assertEqual(status.code, 0)
+            self.assertIn("a.txt", status.output)
+            diff = git_diff(root, "a.txt")
+            self.assertIn("+two", diff.output)
+            log = git_log(root, 5)
+            self.assertIn("init", log.output)
+            preview = preview_unified("one\n", "one\ntwo\n", "a.txt")
+            self.assertIn("+two", preview)
+            notes = []
+            box = Toolbox(
+                SecretVault(),
+                lambda path, summary, detail="": notes.append((path, summary, detail)) or True,
+                McpHub(),
+                lambda: {"api_key": "", "mcp_servers": []},
+            )
+            box.set_root(root)
+            refused = Toolbox(
+                SecretVault(),
+                lambda *_args, **_kw: False,
+                McpHub(),
+                lambda: {"api_key": "", "mcp_servers": []},
+            )
+            refused.set_root(root)
+            deny = refused.execute("git", {"action": "commit", "message": "x", "add_all": True})
+            self.assertIn("отказался", deny.model_text)
+            ok = box.execute(
+                "git",
+                {"action": "commit", "message": "add two", "paths": "a.txt", "summary": "save"},
+            )
+            self.assertTrue(notes)
+            self.assertIn("git commit", notes[0][0])
+            self.assertIn("add two", notes[0][2])
+            self.assertIn("git commit: ok", ok.journal)
+            clean = box.execute("git", {"action": "status"})
+            self.assertNotIn("a.txt", clean.model_text)
+
+
+class IndexStoreTests(unittest.TestCase):
+    def test_build_find_and_touch(self):
+        from project_agent.index_store import build_index, find_paths, index_summary, load_index, touch_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                (root / "src").mkdir()
+                (root / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+                (root / "readme.md").write_text("hi\n", encoding="utf-8")
+                (root / ".venv").mkdir()
+                (root / ".venv" / "x.py").write_text("skip\n", encoding="utf-8")
+                (root / "node_modules").mkdir()
+                (root / "node_modules" / "pkg.js").write_text("skip\n", encoding="utf-8")
+                data = build_index(root)
+                paths = {item["path"] for item in data["files"]}
+                self.assertIn("src/app.py", paths)
+                self.assertIn("readme.md", paths)
+                self.assertNotIn(".venv/x.py", paths)
+                self.assertNotIn("node_modules/pkg.js", paths)
+                found, _data = find_paths(root, "app.py")
+                self.assertEqual(found, ["src/app.py"])
+                self.assertIn("файлов", index_summary(root))
+                (root / "src" / "app.py").write_text("print(2)\n", encoding="utf-8")
+                touch_file(root, "src/app.py")
+                loaded = load_index(root)
+                entry = next(item for item in loaded["files"] if item["path"] == "src/app.py")
+                self.assertEqual(entry["size"], (root / "src" / "app.py").stat().st_size)
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
+    def test_project_index_tool(self):
+        from project_agent.index_store import build_index
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                (root / "a.py").write_text("x\n", encoding="utf-8")
+                build_index(root)
+                box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {"api_key": "", "mcp_servers": []})
+                box.set_root(root)
+                summary = box.execute("project_index", {"action": "summary"})
+                self.assertIn("файлов", summary.model_text)
+                found = box.execute("project_index", {"action": "find", "query": "a.py"})
+                self.assertIn("a.py", found.model_text)
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
+
+class ContextAttachTests(unittest.TestCase):
+    def test_parse_and_load_context(self):
+        from project_agent.context_attach import (
+            at_token_at_end,
+            compose_user_text,
+            load_context_files,
+            merge_paths,
+            parse_at_paths,
+        )
+
+        self.assertEqual(parse_at_paths("смотри @src/a.py и @\"docs/x y.md\""), ["src/a.py", "docs/x y.md"])
+        self.assertEqual(at_token_at_end("привет @util"), ("util", 7))
+        self.assertIsNone(at_token_at_end("без упоминания"))
+        self.assertEqual(merge_paths(["a.py", "b.py"], ["a.py", "c.py"], limit=2), ["a.py", "b.py"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "a.py").write_text("print(1)\n", encoding="utf-8")
+            (root / "secret.bin").write_bytes(b"\x00\x01\x02")
+            vault = SecretVault()
+            block, loaded, errors = load_context_files(root, ["a.py", "missing.py", "secret.bin"], vault)
+            self.assertIn("a.py", loaded)
+            self.assertIn("### a.py", block)
+            self.assertIn("print(1)", block)
+            self.assertTrue(any("missing.py" in item for item in errors))
+            self.assertTrue(any("secret.bin" in item for item in errors))
+            text = compose_user_text("исправь", block)
+            self.assertIn("исправь", text)
+            self.assertIn("Приложенные файлы", text)
+
+
+class ProjectRulesTests(unittest.TestCase):
+    def test_load_agents_and_dir_rules(self):
+        from project_agent.rules import load_project_rules, rules_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            self.assertEqual(rules_summary(root), "Правила не найдены (AGENTS.md или .projectagent/rules).")
+            (root / "AGENTS.md").write_text("Пиши кратко.\n", encoding="utf-8")
+            rules_dir = root / ".projectagent" / "rules"
+            rules_dir.mkdir(parents=True)
+            (rules_dir / "style.md").write_text("Без эмодзи.\n", encoding="utf-8")
+            (rules_dir / "extra.txt").write_text("Тесты обязательны.\n", encoding="utf-8")
+            block, sources = load_project_rules(root)
+            self.assertIn("AGENTS.md", sources)
+            self.assertIn(".projectagent/rules/extra.txt", sources)
+            self.assertIn(".projectagent/rules/style.md", sources)
+            self.assertIn("Пиши кратко.", block)
+            self.assertIn("Без эмодзи.", block)
+            self.assertTrue(rules_summary(root).startswith("Правила:"))
+            from project_agent.agent import Agent
+
+            agent = Agent(SecretVault(), Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {}), McpHub(), lambda *_: None, lambda *_: None, lambda *_: None)
+            agent.set_root(root)
+            system = agent._system()
+            self.assertIn("Правила проекта", system)
+            self.assertIn("Пиши кратко.", system)
 
 
 class McpTests(unittest.TestCase):
@@ -467,6 +743,21 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(loaded["model"], "openrouter/free")
             self.assertEqual(loaded["max_steps"], 10)
             self.assertEqual(len(loaded["profiles"]), 1)
+            data["test_preset"] = "unittest"
+            data["test_timeout"] = 90
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["test_preset"], "unittest")
+            self.assertEqual(loaded["test_timeout"], 90)
+            data["test_preset"] = "rm -rf /"
+            data["test_timeout"] = 9999
+            data["test_fix_rounds"] = 0
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertEqual(loaded["test_preset"], "")
+            self.assertEqual(loaded["test_timeout"], 600)
+            self.assertEqual(loaded["test_fix_rounds"], 1)
             self.assertEqual(loaded["project_dir"], "")
         example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         self.assertEqual(set(example), set(default_config()))
@@ -519,6 +810,31 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_theme("light", bad)
             self.assertEqual(bad.read_text(encoding="utf-8"), "{")
+
+    def test_write_retries_locked_replace(self):
+        from unittest import mock
+
+        import project_agent.config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            data = default_config()
+            data["model"] = "retry-me"
+            calls = {"n": 0}
+            real_replace = os.replace
+
+            def flaky(src, dst):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError(5, "Отказано в доступе")
+                return real_replace(src, dst)
+
+            with mock.patch.object(config_mod.os, "replace", flaky):
+                save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["model"], "retry-me")
+            self.assertGreaterEqual(calls["n"], 3)
 
     def test_sources_have_no_live_keys(self):
         import re

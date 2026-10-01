@@ -4,16 +4,23 @@ import threading
 from pathlib import Path
 
 from project_agent.providers import ApiError, Stopped, build_provider
+from project_agent.rules import load_project_rules
 from project_agent.secrets import Scrubber, literals_from_settings
 from project_agent.tools import TOOL_SPECS
 
 SYSTEM = """Ты помощник по файлам проекта. Корень: {root}
 Весь проект в контекст не входит: нужные файлы читай инструментами.
+Человек может явно приложить файлы (@путь или вложение): их содержимое уже в запросе — не читай их снова без нужды.
+Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
 Метки вида [[SEC:...:N]] заменяют пароли и ключи. Копируй метку целиком, если значение нужно сохранить. Не пытайся её раскрыть.
 Не вставляй секреты в web_search, generate_image и аргументы MCP: оттуда метки будут удалены.
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
-Запись файла и генерация изображения выполняются только после подтверждения человека. Если он отказал, не повторяй то же действие.
-Можно смотреть изображения проекта, искать в интернете, генерировать картинки и вызывать настроенные MCP-инструменты.
+Запись файла, генерация изображения и запуск тестов выполняются только после подтверждения человека. Если он отказал, не повторяй то же действие.
+Можно смотреть изображения проекта, искать в интернете, генерировать картинки, запускать пресет тестов из настроек (run_tests), смотреть индекс путей (project_index), работать с git (status/diff/log; commit только после подтверждения) и вызывать настроенные MCP-инструменты.
+Push, reset --hard и произвольный shell недоступны.
+Чтобы быстро найти файл по имени или фрагменту пути, используй project_index с action=find. Это не содержимое файлов — только пути.
+После правок кода, если тесты включены в настройках, запускай run_tests и по выводу решай, нужна ли ещё правка.
+Лимит запусков тестов за один ход задан в настройках; при лимите или повторном том же FAIL остановись и опиши результат человеку.
 Отвечай на языке пользователя. Когда задача сделана, ответь текстом без инструментов.
 """
 
@@ -56,12 +63,17 @@ class Agent:
 
     def _system(self) -> str:
         root = str(self.root) if self.root else ""
-        return SYSTEM.replace("{root}", root)
+        base = SYSTEM.replace("{root}", root)
+        block, _sources = load_project_rules(self.root)
+        if block:
+            return f"{base}\n{block}"
+        return base
 
     def run_turn(self, text: str, images: list, settings: dict, stop: threading.Event) -> None:
         self.stop = stop
         self.toolbox.stop = stop
         self.toolbox.settings = lambda: settings
+        self.toolbox.begin_turn()
         if self.root is None:
             self.on_chat("Сначала выберите папку проекта.")
             return
@@ -75,6 +87,7 @@ class Agent:
             if previous is not None:
                 self.on_chat("Контекст модели сброшен: сменился провайдер.")
         self.provider.configure(settings)
+        self.provider.set_system(self._system())
         scrubber = Scrubber(self.vault, literals_from_settings(settings))
         self.provider.add_user(scrubber(text), images)
         max_steps = int(settings.get("max_steps") or 25)

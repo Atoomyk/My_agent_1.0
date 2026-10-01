@@ -12,7 +12,7 @@ from tkinter import filedialog, ttk
 from tkinter import font as tkfont
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from project_agent.agent import Agent
 from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
@@ -25,10 +25,27 @@ from project_agent.config import (
     save_prompt_height,
     save_theme,
 )
+from project_agent.context_attach import (
+    MAX_CONTEXT_FILES,
+    at_token_at_end,
+    compose_user_text,
+    load_context_files,
+    merge_paths,
+    parse_at_paths,
+)
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
-from project_agent.paths import PathError, list_entries, read_text_file, resolve_inside
+from project_agent.paths import PathError, list_entries, read_text_file, relative_posix, resolve_inside
 from project_agent.secrets import Scrubber, SecretVault, literals_from_settings
+from project_agent.index_store import build_index, find_paths, index_summary
+from project_agent.rules import rules_summary
+from project_agent.testing import (
+    LABEL_BY_PRESET,
+    PRESET_LABELS,
+    normalize_fix_rounds,
+    normalize_preset,
+    normalize_timeout,
+)
 from project_agent.tools import Toolbox
 
 PROVIDER_LABELS = {
@@ -51,6 +68,7 @@ BUTTON_HOVER = ("#e6dfd6", "#3a342e")
 BORDER = ("#ddd4c8", "#4a433c")
 TEXT = ("#2c2824", "#f3eee6")
 MUTED = ("#8d847a", "#a3988c")
+HINT = ("#c2bbb2", "#5c564f")
 USER_TEXT = ("#4a3c30", "#f7f0e4")
 USER_BG = ("#e8e0d5", "#322d28")
 SELECT = ("#e4dcd2", "#3a342e")
@@ -147,7 +165,7 @@ _RU_CLIPBOARD = {
     "Cyrillic_EF": "select",
 }
 _KEY_CLIPBOARD = {67: "copy", 86: "paste", 88: "cut", 65: "select"}
-_LATIN_CLIPBOARD = {"c", "v", "x", "a"}
+_LATIN_CLIPBOARD = {"c": "copy", "v": "paste", "x": "cut", "a": "select"}
 _CHAT_FREE = {
     "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
     "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
@@ -162,10 +180,9 @@ def clipboard_action(keysym: str, keycode: int) -> str | None:
         return _RU_CLIPBOARD[symbol]
     lowered = symbol.lower()
     if lowered in _LATIN_CLIPBOARD:
-        return "select" if lowered == "a" else None
-    if symbol.startswith("Cyrillic"):
-        return _KEY_CLIPBOARD.get(int(keycode))
-    return None
+        return _LATIN_CLIPBOARD[lowered]
+    # Физическая клавиша (C/V/X/A) при любой раскладке — по keycode Windows.
+    return _KEY_CLIPBOARD.get(int(keycode or 0))
 
 
 def _selection(widget) -> str | None:
@@ -177,7 +194,19 @@ def _selection(widget) -> str | None:
         return None
 
 
-def apply_layout_clipboard(widget, action: str) -> None:
+def set_clipboard(widget, text: str) -> None:
+    """Надёжная запись в буфер Windows: clear+append без update часто теряется."""
+    if text is None:
+        return
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+        widget.update_idletasks()
+    except tk.TclError:
+        return
+
+
+def apply_layout_clipboard(widget, action: str, text: str | None = None) -> None:
     try:
         if action in {"paste", "cut"} and str(widget) in _READONLY_TEXT:
             return
@@ -190,26 +219,27 @@ def apply_layout_clipboard(widget, action: str) -> None:
                 widget.icursor("end")
             return
         if action in {"copy", "cut"}:
-            selected = _selection(widget)
+            selected = text if text is not None else _selection(widget)
             if selected is None:
                 return
-            widget.clipboard_clear()
-            widget.clipboard_append(selected)
+            set_clipboard(widget, selected)
             if action == "cut":
                 widget.delete("sel.first", "sel.last")
             return
         if action == "paste":
-            text = widget.clipboard_get()
+            pasted = widget.clipboard_get()
             try:
                 widget.delete("sel.first", "sel.last")
             except tk.TclError:
                 pass
-            widget.insert("insert", text)
+            widget.insert("insert", pasted)
     except tk.TclError:
         return
 
 
 def _on_layout_clipboard(event):
+    if not (int(getattr(event, "state", 0) or 0) & 0x4):
+        return
     action = clipboard_action(str(event.keysym), int(getattr(event, "keycode", 0) or 0))
     if not action:
         return
@@ -305,6 +335,11 @@ def _paint_dots(draw: ImageDraw.ImageDraw, color: str) -> None:
         draw.ellipse((x - 2, 14, x + 2, 18), fill=color)
 
 
+def _paint_copy(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.rounded_rectangle((11, 7, 24, 20), radius=2, outline=color, width=2)
+    draw.rounded_rectangle((7, 11, 20, 25), radius=2, outline=color, width=2)
+
+
 _PAINT = {
     "folder": _paint_folder,
     "sliders": _paint_sliders,
@@ -320,6 +355,7 @@ _PAINT = {
     "halt": _paint_halt,
     "gear": _paint_gear,
     "dots": _paint_dots,
+    "copy": _paint_copy,
 }
 
 
@@ -408,24 +444,45 @@ def quiet_menu(parent, variable, values, command=None):
 
 
 class ConfirmDialog(ctk.CTkToplevel):
-    def __init__(self, master, path: str, summary: str) -> None:
+    def __init__(self, master, path: str, summary: str, detail: str = "") -> None:
         super().__init__(master)
         self.result = False
         self._closed = False
         self.title("Подтверждение")
-        self.geometry("520x220")
-        self.resizable(False, False)
+        tall = bool((detail or "").strip())
+        self.geometry("560x420" if tall else "520x220")
+        self.minsize(480, 200)
+        self.resizable(True, True)
         self.configure(fg_color=INK)
         self.transient(master)
         self.grab_set()
-        ctk.CTkLabel(self, text=path, wraplength=480, justify="left", anchor="w", text_color=TEXT).pack(
-            padx=16, pady=(16, 8), fill="x"
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2 if tall else 1, weight=1)
+        ctk.CTkLabel(self, text=path, wraplength=520, justify="left", anchor="w", text_color=TEXT).grid(
+            row=0, column=0, sticky="ew", padx=16, pady=(16, 8)
         )
-        ctk.CTkLabel(self, text=summary, wraplength=480, justify="left", anchor="w", text_color=MUTED).pack(
-            padx=16, pady=4, fill="x"
+        ctk.CTkLabel(self, text=summary, wraplength=520, justify="left", anchor="w", text_color=MUTED).grid(
+            row=1, column=0, sticky="ew", padx=16, pady=4
         )
+        if tall:
+            box = ctk.CTkTextbox(
+                self,
+                fg_color=FIELD,
+                text_color=TEXT,
+                border_width=1,
+                border_color=BORDER,
+                corner_radius=10,
+                font=("Consolas", 11),
+                wrap="none",
+            )
+            box.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
+            box.insert("1.0", detail.strip())
+            box.configure(state="disabled")
+            button_row = 3
+        else:
+            button_row = 2
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(pady=16)
+        row.grid(row=button_row, column=0, pady=(8, 16))
         quiet_button(row, "Нет", self.refuse, width=110, mark="close").pack(side="left", padx=8)
         quiet_button(row, "Да", self.allow, width=110, primary=True, mark="check").pack(side="left", padx=8)
         self.protocol("WM_DELETE_WINDOW", self.refuse)
@@ -497,55 +554,168 @@ class NameDialog(ctk.CTkToplevel):
 
 
 class SettingsWindow(ctk.CTkToplevel):
+    _SECTIONS = ("Внешний вид", "Модель", "Изображения", "Проект", "MCP", "Безопасность")
+
     def __init__(self, app: "App") -> None:
         super().__init__(app)
         self.app = app
+        self._pages: dict[str, ctk.CTkScrollableFrame] = {}
+        self._nav_buttons: dict[str, ctk.CTkButton] = {}
         self.title("Настройки")
-        self.geometry("440x760")
-        self.minsize(400, 520)
+        self.geometry("640x720")
+        self.minsize(560, 520)
         self.configure(fg_color=INK)
         self.transient(app)
-        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        settings = ctk.CTkScrollableFrame(
-            self,
-            fg_color=PANEL,
-            corner_radius=16,
-            scrollbar_button_color=BUTTON,
-            scrollbar_button_hover_color=BUTTON_HOVER,
+
+        nav = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=16, width=168)
+        nav.grid(row=0, column=0, sticky="nsw", padx=(12, 6), pady=12)
+        nav.grid_propagate(False)
+        nav.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(nav, text="Разделы", anchor="w", text_color=MUTED, font=("Segoe UI", 11)).grid(
+            row=0, column=0, sticky="ew", padx=12, pady=(12, 8)
         )
-        settings.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-        app._field(settings, "Тема")
-        quiet_menu(settings, app.theme_var, list(THEME_LABELS), app._on_theme_pick).pack(fill="x", padx=8, pady=4)
-        app._field(settings, "Профиль")
-        app.profile_menu = quiet_menu(settings, app.profile_var, [_NO_PROFILE], app._on_profile_pick)
+        for index, name in enumerate(self._SECTIONS, start=1):
+            button = ctk.CTkButton(
+                nav,
+                text=name,
+                anchor="w",
+                height=34,
+                corner_radius=10,
+                border_width=0,
+                fg_color="transparent",
+                hover_color=BUTTON_HOVER,
+                text_color=TEXT,
+                font=("Segoe UI", 12),
+                command=lambda section=name: self._show(section),
+            )
+            button.grid(row=index, column=0, sticky="ew", padx=8, pady=2)
+            self._nav_buttons[name] = button
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        for name in self._SECTIONS:
+            page = ctk.CTkScrollableFrame(
+                body,
+                fg_color=PANEL,
+                corner_radius=16,
+                scrollbar_button_color=BUTTON,
+                scrollbar_button_hover_color=BUTTON_HOVER,
+            )
+            page.grid(row=0, column=0, sticky="nsew")
+            self._pages[name] = page
+
+        self._fill_appearance(self._pages["Внешний вид"])
+        self._fill_model(self._pages["Модель"])
+        self._fill_images(self._pages["Изображения"])
+        self._fill_project(self._pages["Проект"])
+        self._fill_mcp(self._pages["MCP"])
+        self._fill_security(self._pages["Безопасность"])
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
+        quiet_button(footer, "Сохранить", app.save_settings, width=160, primary=True, mark="check").pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _event: self._close())
+        self._show("Модель")
+        self.after(50, self.focus)
+
+    def _fill_appearance(self, page) -> None:
+        app = self.app
+        ctk.CTkLabel(page, text="Внешний вид", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+        app._field(page, "Тема")
+        quiet_menu(page, app.theme_var, list(THEME_LABELS), app._on_theme_pick).pack(fill="x", padx=8, pady=4)
+
+    def _fill_model(self, page) -> None:
+        app = self.app
+        ctk.CTkLabel(page, text="Модель и профили", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+        app._field(page, "Профиль")
+        app.profile_menu = quiet_menu(page, app.profile_var, [_NO_PROFILE], app._on_profile_pick)
         app.profile_menu.pack(fill="x", padx=8, pady=4)
         app._sync_profile_menu()
-        profile_row = ctk.CTkFrame(settings, fg_color="transparent")
+        profile_row = ctk.CTkFrame(page, fg_color="transparent")
         profile_row.pack(fill="x", padx=8, pady=4)
-        quiet_button(profile_row, "Сохранить профиль", app.save_profile, width=188, mark="save").pack(side="left", padx=(0, 4))
+        quiet_button(profile_row, "Сохранить профиль", app.save_profile, width=188, mark="save").pack(
+            side="left", padx=(0, 4)
+        )
         quiet_button(profile_row, "Удалить", app.delete_profile, width=112, mark="trash").pack(side="left")
-        app._field(settings, "Провайдер")
-        quiet_menu(settings, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=4)
-        app._entry(settings, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic")
-        app._entry(settings, "Модель", app.model_var, "имя модели")
-        app._entry(settings, "Ключ", app.api_key_var, "", secret=True)
-        app._entry(settings, "Лимит шагов", app.steps_var, "25")
-        app._entry(settings, "Модель изображений", app.image_model_var, "пусто — генерация выключена")
-        app._entry(settings, "URL изображений", app.image_url_var, "пусто — URL API")
-        app._entry(settings, "Ключ изображений", app.image_key_var, "пусто — основной ключ", secret=True)
+        app._field(page, "Провайдер")
+        quiet_menu(page, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=4)
+        app._entry(page, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic")
+        app._entry(page, "Модель", app.model_var, "имя модели")
+        app._entry(page, "Ключ", app.api_key_var, "", secret=True)
+        app._entry(page, "Лимит шагов", app.steps_var, "25")
+
+    def _fill_images(self, page) -> None:
+        app = self.app
+        ctk.CTkLabel(page, text="Изображения", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
         ctk.CTkLabel(
-            settings,
-            text="Ключ хранится только в %APPDATA%\\ProjectAgent\\config.json",
-            wraplength=360,
+            page,
+            text="Пустые поля — генерация выключена или берутся значения из раздела «Модель».",
+            wraplength=400,
             justify="left",
             text_color=MUTED,
-        ).pack(fill="x", padx=8, pady=(4, 8))
-        quiet_button(settings, "Сохранить", app.save_settings, width=160, primary=True, mark="check").pack(fill="x", padx=8, pady=4)
-        ctk.CTkLabel(settings, text="MCP-серверы", anchor="w", text_color=TEXT).pack(fill="x", padx=8, pady=(12, 0))
+        ).pack(fill="x", padx=8, pady=(0, 8))
+        app._entry(page, "Модель изображений", app.image_model_var, "пусто — генерация выключена")
+        app._entry(page, "URL изображений", app.image_url_var, "пусто — URL API")
+        app._entry(page, "Ключ изображений", app.image_key_var, "пусто — основной ключ", secret=True)
+
+    def _fill_project(self, page) -> None:
+        app = self.app
+        ctk.CTkLabel(page, text="Проект и тесты", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+        ctk.CTkLabel(
+            page,
+            text="Агент может запускать только выбранный пресет. Произвольный терминал недоступен. Каждый запуск спрашивает подтверждение.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+        ).pack(fill="x", padx=8, pady=(0, 8))
+        app._field(page, "Пресет тестов")
+        quiet_menu(page, app.test_preset_var, list(PRESET_LABELS), app._on_test_preset_pick).pack(
+            fill="x", padx=8, pady=4
+        )
+        app._entry(page, "Таймаут тестов (сек)", app.test_timeout_var, "120")
+        app._entry(page, "Лимит запусков тестов за ход", app.test_fix_rounds_var, "3")
+        app._field(page, "Правила проекта")
+        app.rules_label = ctk.CTkLabel(
+            page,
+            text="Правила не найдены (AGENTS.md или .projectagent/rules).",
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            text_color=MUTED,
+        )
+        app.rules_label.pack(fill="x", padx=8, pady=4)
+        app._field(page, "Индекс файлов")
+        app.index_label = ctk.CTkLabel(page, text="Индекс ещё не построен.", anchor="w", text_color=MUTED)
+        app.index_label.pack(fill="x", padx=8, pady=4)
+        quiet_button(page, "Обновить индекс", app.refresh_index, width=180, mark="refresh").pack(
+            fill="x", padx=8, pady=4
+        )
+        app._refresh_rules_label()
+        app._refresh_index_label()
+
+    def _fill_mcp(self, page) -> None:
+        app = self.app
+        ctk.CTkLabel(page, text="MCP-серверы", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
         app.mcp_list = ctk.CTkTextbox(
-            settings,
-            height=90,
+            page,
+            height=120,
             fg_color=FIELD,
             text_color=TEXT,
             border_color=BORDER,
@@ -554,19 +724,52 @@ class SettingsWindow(ctk.CTkToplevel):
         app.mcp_list.pack(fill="x", padx=8, pady=4)
         app.mcp_list.configure(state="disabled")
         app._render_mcp()
-        app._entry(settings, "Имя MCP", app.mcp_name_var, "filesystem")
-        app._entry(settings, "Команда MCP", app.mcp_command_var, "python -m server")
-        mcp_row = ctk.CTkFrame(settings, fg_color="transparent")
+        app._entry(page, "Имя MCP", app.mcp_name_var, "filesystem")
+        app._entry(page, "Команда MCP", app.mcp_command_var, "python -m server")
+        mcp_row = ctk.CTkFrame(page, fg_color="transparent")
         mcp_row.pack(fill="x", padx=8, pady=4)
         quiet_button(mcp_row, "Добавить", app.add_mcp, width=124, mark="plus").pack(side="left", padx=(0, 4))
         quiet_button(mcp_row, "Удалить", app.remove_mcp, width=112, mark="trash").pack(side="left")
-        self.protocol("WM_DELETE_WINDOW", self._close)
-        self.bind("<Escape>", lambda _event: self._close())
-        self.after(50, self.focus)
+        ctk.CTkLabel(
+            page,
+            text="Переменные env для сервера дописываются в config.json вручную.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+        ).pack(fill="x", padx=8, pady=(8, 4))
+
+    def _fill_security(self, page) -> None:
+        ctk.CTkLabel(page, text="Безопасность", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+        notes = (
+            "Ключ и настройки хранятся только в %APPDATA%\\ProjectAgent\\config.json — в программу они не зашиты.\n\n"
+            "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
+            "Запись файла, генерация изображения и запуск тестов всегда спрашивают подтверждение.\n\n"
+            "Команд произвольного терминала нет. Тесты — только пресет unittest или pytest из настроек.\n\n"
+            "Агент не выходит за выбранную папку проекта."
+        )
+        ctk.CTkLabel(page, text=notes, wraplength=400, justify="left", anchor="w", text_color=MUTED).pack(
+            fill="x", padx=8, pady=4
+        )
+
+    def _show(self, name: str) -> None:
+        if name not in self._pages:
+            return
+        for section, page in self._pages.items():
+            if section == name:
+                page.grid()
+            else:
+                page.grid_remove()
+        for section, button in self._nav_buttons.items():
+            active = section == name
+            button.configure(fg_color=BUTTON if active else "transparent", hover_color=BUTTON_HOVER if active else SELECT)
 
     def _close(self) -> None:
         self.app.mcp_list = None
         self.app.profile_menu = None
+        self.app.index_label = None
+        self.app.rules_label = None
         self.app._settings_window = None
         self.destroy()
 
@@ -580,6 +783,10 @@ class App(ctk.CTk):
         self.configure(fg_color=INK)
         self.project: Path | None = None
         self.attached: list[str] = []
+        self.context_files: list[str] = []
+        self._at_popup: tk.Toplevel | None = None
+        self._at_list: tk.Listbox | None = None
+        self._at_start: str | None = None
         self.mcp_servers: list[dict] = []
         self.saved_servers: list[dict] = []
         self.stop_event = threading.Event()
@@ -588,6 +795,8 @@ class App(ctk.CTk):
         self._settings_window: SettingsWindow | None = None
         self.mcp_list: ctk.CTkTextbox | None = None
         self.profile_menu: ctk.CTkOptionMenu | None = None
+        self.index_label: ctk.CTkLabel | None = None
+        self.rules_label: ctk.CTkLabel | None = None
         self.profiles: list[dict] = []
         self.active_profile = ""
         self.profile_var = ctk.StringVar(value=_NO_PROFILE)
@@ -625,6 +834,10 @@ class App(ctk.CTk):
         self.image_key_var = ctk.StringVar()
         self.mcp_name_var = ctk.StringVar()
         self.mcp_command_var = ctk.StringVar()
+        self.test_preset = ""
+        self.test_preset_var = ctk.StringVar(value="Выключено")
+        self.test_timeout_var = ctk.StringVar(value="120")
+        self.test_fix_rounds_var = ctk.StringVar(value="3")
         self._build()
         self._load()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -720,6 +933,7 @@ class App(ctk.CTk):
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.bind("<<TreeviewOpen>>", self._tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_click)
+        self.tree.bind("<Button-3>", self._file_menu)
         self.chat_tree = ttk.Treeview(self.chat_pane, show="tree", selectmode="browse", style="Chats.Treeview")
         self.chat_tree.grid(row=0, column=0, sticky="nsew")
         chat_scroll = ctk.CTkScrollbar(
@@ -784,6 +998,8 @@ class App(ctk.CTk):
         self.chat.bind("<<Paste>>", lambda _event: "break")
         self.chat.bind("<<Cut>>", lambda _event: "break")
         self.chat.bind("<Key>", self._chat_key)
+        self.chat._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
+        self.chat._textbox.bind("<Button-3>", self._chat_text_menu)
         _READONLY_TEXT.add(str(self.chat._textbox))
 
         self.editor_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
@@ -808,6 +1024,7 @@ class App(ctk.CTk):
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
         self.editor_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.editor_box._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
 
         bottom = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
         self.bottom = bottom
@@ -836,6 +1053,7 @@ class App(ctk.CTk):
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
         inner = self.task._textbox
+        inner.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.placeholder = tk.Label(
             inner,
             text="Спросите что угодно…",
@@ -843,21 +1061,32 @@ class App(ctk.CTk):
             bd=0,
             padx=0,
             pady=0,
-            font=self._font(13),
-            fg=_tone(MUTED),
+            font=self._font(11),
+            fg=_tone(HINT),
             bg=_tone(FIELD),
             cursor="xterm",
+            takefocus=0,
         )
-        self.placeholder.bind("<Button-1>", lambda _event: self.task.focus_set())
+        self.placeholder.bind("<Button-1>", self._focus_task)
+        self.card.bind("<Button-1>", self._focus_task, add="+")
+        self.task.bind("<Button-1>", self._focus_task, add="+")
+        inner.bind("<FocusIn>", self._task_focus_in, add="+")
+        inner.bind("<FocusOut>", self._task_focus_out, add="+")
         inner.bind("<<Modified>>", self._on_task_modified, add="+")
         self._sync_placeholder()
-        self.image_button = icon_button(card, "plus", self.attach_image, size=32)
+        self.image_button = icon_button(card, "plus", self._attach_menu, size=32)
         self.image_button.grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
         self.attach_label = ctk.CTkLabel(card, text="", anchor="w", text_color=MUTED, font=self._font(11))
         self.attach_label.grid(row=1, column=1, sticky="ew", padx=4)
+        self.attach_label.bind("<Button-1>", lambda _e: self.clear_attachments())
         self.send_button = quiet_button(card, "", self._send_or_stop, round_mark=True)
         self.send_button.configure(width=34, height=34, corner_radius=17)
         self.send_button.grid(row=1, column=2, padx=(4, 8), pady=8, sticky="e")
+        inner.bind("<KeyRelease>", self._on_task_key, add="+")
+        inner.bind("<Escape>", self._hide_at_popup, add="+")
+        inner.bind("<Down>", self._at_move, add="+")
+        inner.bind("<Up>", self._at_move, add="+")
+        inner.bind("<Tab>", self._at_accept_key, add="+")
         footer = ctk.CTkFrame(bottom, fg_color="transparent")
         self.footer = footer
         footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 8))
@@ -933,6 +1162,56 @@ class App(ctk.CTk):
         self._fit_labels()
         self._refresh_tree()
         self._refresh_chat_list()
+        self._refresh_index_label()
+        self._refresh_rules_label()
+
+    def _refresh_rules_label(self) -> None:
+        label = self.rules_label
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+        except tk.TclError:
+            self.rules_label = None
+            return
+        if self.project is None:
+            label.configure(text="Выберите папку проекта.")
+            return
+        try:
+            label.configure(text=rules_summary(self.project))
+        except Exception as exc:
+            label.configure(text=f"Правила недоступны: {exc}")
+
+    def _refresh_index_label(self) -> None:
+        label = self.index_label
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+        except tk.TclError:
+            self.index_label = None
+            return
+        if self.project is None:
+            label.configure(text="Выберите папку проекта.")
+            return
+        try:
+            label.configure(text=index_summary(self.project))
+        except Exception as exc:
+            label.configure(text=f"Индекс недоступен: {exc}")
+
+    def refresh_index(self) -> None:
+        if self.project is None:
+            self.write_chat("Сначала выберите папку проекта.")
+            return
+        try:
+            data = build_index(self.project)
+        except Exception as exc:
+            self.write_chat(f"Индекс не обновлён: {exc}")
+            return
+        self._refresh_index_label()
+        self.set_status(f"Индекс: {len(data.get('files') or [])} файлов")
 
     def _show_side_tab(self, name: str) -> None:
         if name == "Файлы":
@@ -965,18 +1244,61 @@ class App(ctk.CTk):
         self.card.grid_configure(padx=pad)
         self.footer.grid_configure(padx=pad)
 
+    def _focus_task(self, _event=None):
+        if not hasattr(self, "task"):
+            return None
+        inner = self.task._textbox
+        try:
+            self.placeholder.place_forget()
+            inner.focus_set()
+            if not self.task.get("1.0", "end-1c"):
+                inner.mark_set("insert", "1.0")
+        except tk.TclError:
+            return None
+        return None
+
+    def _task_focus_in(self, _event=None) -> None:
+        try:
+            self.placeholder.place_forget()
+        except tk.TclError:
+            return
+
+    def _task_focus_out(self, _event=None) -> None:
+        self.after(10, self._sync_placeholder)
+        self.after(120, self._hide_at_if_unfocused)
+
+    def _hide_at_if_unfocused(self) -> None:
+        if not self._at_popup_alive():
+            return
+        try:
+            focus = self.focus_get()
+        except tk.TclError:
+            focus = None
+        if focus is self._at_list:
+            return
+        self._hide_at_popup()
+
     def _on_task_modified(self, _event=None) -> None:
         inner = self.task._textbox
         try:
             inner.edit_modified(False)
         except tk.TclError:
             return
-        self._sync_placeholder()
+        if self.task.get("1.0", "end-1c"):
+            self.placeholder.place_forget()
+        else:
+            self._sync_placeholder()
 
     def _sync_placeholder(self) -> None:
-        empty = not self.task.get("1.0", "end-1c")
-        if empty:
-            self.placeholder.place(x=1, y=1)
+        if not hasattr(self, "task") or not hasattr(self, "placeholder"):
+            return
+        try:
+            empty = not self.task.get("1.0", "end-1c")
+            focused = self.focus_get() is self.task._textbox
+        except tk.TclError:
+            return
+        if empty and not focused:
+            self.placeholder.place(x=4, y=4)
         else:
             self.placeholder.place_forget()
 
@@ -1264,13 +1586,52 @@ class App(ctk.CTk):
     def _chat_key(self, event):
         if event.keysym in _CHAT_FREE:
             return
-        if event.keysym == "Insert" and event.state & 0x4:
-            return
         if event.state & 0x4:
             action = clipboard_action(str(event.keysym), int(getattr(event, "keycode", 0) or 0))
-            if event.keysym.lower() in {"c", "a", "insert"} or action in {"copy", "select"}:
-                return
+            if action in {"copy", "select"}:
+                apply_layout_clipboard(event.widget, action)
+                return "break"
+            if action in {"paste", "cut"}:
+                return "break"
+            if event.keysym == "Insert":
+                apply_layout_clipboard(event.widget, "copy")
+                return "break"
+            return "break"
         return "break"
+
+    def _chat_text_menu(self, event) -> str | None:
+        inner = self.chat._textbox
+        # Текст снимаем до tk_popup: на Windows выделение сбрасывается при grab меню.
+        selected = _selection(inner)
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(
+            label="Копировать",
+            state="normal" if selected else "disabled",
+            command=lambda text=selected: apply_layout_clipboard(inner, "copy", text),
+        )
+        menu.add_command(label="Выделить всё", command=self._chat_select_all)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _chat_select_all(self) -> None:
+        inner = self.chat._textbox
+        apply_layout_clipboard(inner, "select")
+        try:
+            inner.focus_set()
+        except tk.TclError:
+            return
 
     def open_settings(self) -> None:
         window = self._settings_window
@@ -1361,6 +1722,10 @@ class App(ctk.CTk):
         self.active_profile = data["active_profile"]
         self._sync_profile_menu()
         self._apply_ai(data)
+        self.test_preset = normalize_preset(data.get("test_preset"))
+        self.test_preset_var.set(LABEL_BY_PRESET.get(self.test_preset, "Выключено"))
+        self.test_timeout_var.set(str(normalize_timeout(data.get("test_timeout"))))
+        self.test_fix_rounds_var.set(str(normalize_fix_rounds(data.get("test_fix_rounds"))))
         self.mcp_servers = list(data["mcp_servers"])
         self.saved_servers = list(data["mcp_servers"])
         self._render_mcp()
@@ -1385,8 +1750,9 @@ class App(ctk.CTk):
             self._style_tree()
         if hasattr(self, "chat"):
             self._tag_chat()
+            self._copy_photo_cache = None
         if hasattr(self, "placeholder"):
-            self.placeholder.configure(fg=_tone(MUTED), bg=_tone(FIELD))
+            self.placeholder.configure(fg=_tone(HINT), bg=_tone(FIELD), font=self._font(11))
 
     def _on_theme_pick(self, label: str) -> None:
         theme = THEME_LABELS.get(label, "dark")
@@ -1397,6 +1763,9 @@ class App(ctk.CTk):
             save_theme(theme)
         except Exception as exc:
             self.write_chat(f"Не удалось сохранить тему: {exc}")
+
+    def _on_test_preset_pick(self, label: str) -> None:
+        self.test_preset = PRESET_LABELS.get(label, "")
 
     def _apply_ai(self, data: dict) -> None:
         fields = ai_settings(data)
@@ -1504,6 +1873,9 @@ class App(ctk.CTk):
         settings["mcp_servers"] = self._servers_for_save()
         settings["theme"] = self.theme
         settings["prompt_height"] = self.prompt_height
+        settings["test_preset"] = PRESET_LABELS.get(self.test_preset_var.get(), self.test_preset)
+        settings["test_timeout"] = normalize_timeout(self.test_timeout_var.get())
+        settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
         return settings
 
     def save_settings(self) -> None:
@@ -1552,11 +1924,18 @@ class App(ctk.CTk):
         self._show_folder()
         self.agent.set_root(self.project)
         self._clear_box(self.chat)
+        try:
+            build_index(self.project)
+            self._refresh_index_label()
+        except Exception as exc:
+            self.write_chat(f"Индекс не построен: {exc}")
         self._persist("Папка выбрана")
 
     def new_chat(self) -> None:
         if self.running:
             return
+        self._hide_at_popup()
+        self.clear_attachments()
         self._store_chat()
         self.chat_id = None
         self.chat_title = ""
@@ -1566,6 +1945,68 @@ class App(ctk.CTk):
         self._refresh_chat_list()
         self._fit_labels()
         self.set_status("Новый чат")
+
+    def _attach_menu(self) -> None:
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(label="Файл проекта…", command=self.attach_project_file)
+        menu.add_command(label="Изображение…", command=self.attach_image)
+        if self.context_files or self.attached:
+            menu.add_separator()
+            menu.add_command(label="Очистить вложения", command=self.clear_attachments)
+        try:
+            x = self.image_button.winfo_rootx()
+            y = self.image_button.winfo_rooty() + self.image_button.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def attach_project_file(self) -> None:
+        if self.project is None:
+            self.write_chat("Сначала выберите папку проекта.")
+            return
+        if len(self.context_files) >= MAX_CONTEXT_FILES:
+            self.write_chat(f"Можно вложить не больше {MAX_CONTEXT_FILES} файлов.")
+            return
+        selected = filedialog.askopenfilename(initialdir=str(self.project))
+        if not selected:
+            return
+        try:
+            full = resolve_inside(self.project, selected)
+            rel = relative_posix(self.project, full)
+        except PathError as exc:
+            self.write_chat(f"Файл вне проекта: {exc}")
+            return
+        if not full.is_file():
+            self.write_chat("Нужен файл, не папка.")
+            return
+        self._add_context_file(rel)
+
+    def _add_context_file(self, relative: str) -> None:
+        path = str(relative or "").replace("\\", "/").strip().strip("/")
+        if not path:
+            return
+        if path in self.context_files:
+            self._refresh_attach()
+            return
+        if len(self.context_files) >= MAX_CONTEXT_FILES:
+            self.write_chat(f"Можно вложить не больше {MAX_CONTEXT_FILES} файлов.")
+            return
+        self.context_files.append(path)
+        self._refresh_attach()
+
+    def clear_attachments(self) -> None:
+        self.attached.clear()
+        self.context_files.clear()
+        self._refresh_attach()
 
     def attach_image(self) -> None:
         if len(self.attached) >= 4:
@@ -1579,11 +2020,163 @@ class App(ctk.CTk):
             self._refresh_attach()
 
     def _refresh_attach(self) -> None:
-        if not self.attached:
+        parts: list[str] = []
+        if self.context_files:
+            names = ", ".join(Path(path).name for path in self.context_files)
+            parts.append(f"Файлы: {names}")
+        if self.attached:
+            names = ", ".join(Path(path).name for path in self.attached)
+            parts.append(f"Изображения: {names}")
+        if parts:
+            self.attach_label.configure(text=" · ".join(parts) + "  (клик — очистить)")
+        else:
             self.attach_label.configure(text="")
+
+    def _file_menu(self, event) -> str | None:
+        row = self.tree.identify_row(event.y)
+        if not row or self.project is None:
+            return None
+        if "file" not in self.tree.item(row, "tags"):
+            return None
+        self.tree.selection_set(row)
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(label="Вложить в запрос", command=lambda: self._add_context_file(str(row)))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _on_task_key(self, _event=None) -> None:
+        if self.project is None:
+            self._hide_at_popup()
             return
-        names = ", ".join(Path(path).name for path in self.attached)
-        self.attach_label.configure(text=f"Изображения: {names}")
+        inner = self.task._textbox
+        before = inner.get("1.0", "insert")
+        token = at_token_at_end(before)
+        if token is None:
+            self._hide_at_popup()
+            return
+        query, start = token
+        try:
+            found, _meta = find_paths(self.project, query, limit=8)
+        except Exception:
+            found = []
+        if not found:
+            self._hide_at_popup()
+            return
+        self._at_start = f"1.0+{start}c"
+        self._show_at_popup(found)
+
+    def _at_popup_alive(self) -> bool:
+        popup = self._at_popup
+        return popup is not None and bool(popup.winfo_exists())
+
+    def _show_at_popup(self, paths: list[str]) -> None:
+        if not self._at_popup_alive():
+            popup = tk.Toplevel(self)
+            popup.overrideredirect(True)
+            popup.attributes("-topmost", True)
+            listbox = tk.Listbox(
+                popup,
+                height=min(8, max(1, len(paths))),
+                activestyle="dotbox",
+                bg=_tone(PANEL),
+                fg=_tone(TEXT),
+                selectbackground=_tone(SELECT),
+                selectforeground=_tone(TEXT),
+                font=self._px_font(11),
+                borderwidth=1,
+                highlightthickness=0,
+                relief="solid",
+            )
+            listbox.pack(fill="both", expand=True)
+            listbox.bind("<ButtonRelease-1>", lambda _e: self._at_accept())
+            self._at_popup = popup
+            self._at_list = listbox
+        listbox = self._at_list
+        popup = self._at_popup
+        if listbox is None or popup is None:
+            return
+        listbox.delete(0, "end")
+        for path in paths:
+            listbox.insert("end", path)
+        listbox.selection_set(0)
+        listbox.activate(0)
+        listbox.configure(height=min(8, max(1, len(paths))))
+        try:
+            x, y, _w, h = self.task._textbox.bbox("insert")
+            abs_x = self.task._textbox.winfo_rootx() + x
+            abs_y = self.task._textbox.winfo_rooty() + y + h + 2
+        except Exception:
+            abs_x = self.card.winfo_rootx() + 12
+            abs_y = self.card.winfo_rooty() + 40
+        popup.geometry(f"360x{min(8, len(paths)) * 22 + 4}+{abs_x}+{abs_y}")
+        popup.deiconify()
+
+    def _hide_at_popup(self, _event=None):
+        popup = self._at_popup
+        if popup is not None and popup.winfo_exists():
+            popup.destroy()
+        self._at_popup = None
+        self._at_list = None
+        self._at_start = None
+        return "break" if _event is not None else None
+
+    def _at_move(self, event):
+        if not self._at_popup_alive() or self._at_list is None:
+            return None
+        size = self._at_list.size()
+        if size <= 0:
+            return "break"
+        current = self._at_list.curselection()
+        index = int(current[0]) if current else 0
+        if event.keysym == "Down":
+            index = min(size - 1, index + 1)
+        else:
+            index = max(0, index - 1)
+        self._at_list.selection_clear(0, "end")
+        self._at_list.selection_set(index)
+        self._at_list.activate(index)
+        self._at_list.see(index)
+        return "break"
+
+    def _at_accept_key(self, _event=None):
+        if not self._at_popup_alive():
+            return None
+        self._at_accept()
+        return "break"
+
+    def _at_accept(self) -> None:
+        if not self._at_popup_alive() or self._at_list is None or self._at_start is None:
+            self._hide_at_popup()
+            return
+        selected = self._at_list.curselection()
+        if not selected:
+            self._hide_at_popup()
+            return
+        path = str(self._at_list.get(selected[0]) or "").strip()
+        inner = self.task._textbox
+        try:
+            inner.delete(self._at_start, "insert")
+        except tk.TclError:
+            pass
+        self._hide_at_popup()
+        if path:
+            self._add_context_file(path)
+            if inner.get("1.0", "end-1c").strip():
+                self.placeholder.place_forget()
+            else:
+                self._sync_placeholder()
 
     def add_mcp(self) -> None:
         name = self.mcp_name_var.get().strip()
@@ -1640,14 +2233,19 @@ class App(ctk.CTk):
     def _send_key(self, event=None):
         if event is not None and event.state & 0x0001:
             return None
+        if self._at_popup_alive():
+            self._at_accept()
+            return "break"
         self.send()
         return "break"
 
     def send(self) -> None:
         if self.running:
             return
+        self._hide_at_popup()
         text = self.task.get("1.0", "end").strip()
         images = list(self.attached)
+        context_paths = merge_paths(self.context_files, parse_at_paths(text))
         if self.project is None:
             self.write_chat("Сначала выберите папку проекта.")
             return
@@ -1658,7 +2256,7 @@ class App(ctk.CTk):
         if needs_api_key(settings["provider"], settings["base_url"], settings["api_key"]):
             self.write_chat("Укажите API-ключ.")
             return
-        if not text and not images:
+        if not text and not images and not context_paths:
             return
         try:
             save_config(settings)
@@ -1672,10 +2270,22 @@ class App(ctk.CTk):
             except Exception as exc:
                 self.write_chat(f"Изображение не прочитано: {exc}")
                 return
+        context_block = ""
+        loaded_files: list[str] = []
+        if context_paths:
+            context_block, loaded_files, errors = load_context_files(self.project, context_paths, self.vault)
+            for item in errors:
+                self.write_chat(f"Вложение: {item}")
+        model_text = compose_user_text(text, context_block)
+        if not model_text and not prepared:
+            return
         self.task.delete("1.0", "end")
         self.attached.clear()
+        self.context_files.clear()
         self._refresh_attach()
-        note = text or "(только изображение)"
+        note = text or ("(файлы)" if loaded_files else "(только изображение)")
+        if loaded_files:
+            note += f"\n(файлы: {', '.join(loaded_files)})"
         if images:
             note += f"\n(изображений: {len(images)})"
         created = self.chat_id is None
@@ -1691,7 +2301,7 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self._show_running(True)
         self.set_status("Запрос отправлен")
-        thread = threading.Thread(target=self._turn, args=(text, prepared, settings), daemon=True)
+        thread = threading.Thread(target=self._turn, args=(model_text, prepared, settings), daemon=True)
         thread.start()
 
     def _turn(self, text: str, images: list, settings: dict) -> None:
@@ -1721,7 +2331,7 @@ class App(ctk.CTk):
         self._reload_clean_editor()
         self._refresh_chat_list()
 
-    def confirm(self, path: str, summary: str) -> bool:
+    def confirm(self, path: str, summary: str, detail: str = "") -> bool:
         if self.stop_event.is_set():
             return False
         done = threading.Event()
@@ -1729,7 +2339,7 @@ class App(ctk.CTk):
 
         def ask() -> None:
             try:
-                dialog = ConfirmDialog(self, path, summary)
+                dialog = ConfirmDialog(self, path, summary, detail)
                 self._dialog = dialog
                 self.wait_window(dialog)
                 holder["ok"] = bool(dialog.result)
@@ -1893,9 +2503,53 @@ class App(ctk.CTk):
             spacing1=0,
             spacing3=0,
         )
+        inner.tag_configure(
+            "copyrow",
+            lmargin1=12,
+            lmargin2=12,
+            rmargin=56,
+            spacing1=0,
+            spacing3=8,
+        )
         inner.configure(pady=8)
         if self._chat_pad:
             inner.configure(padx=self._chat_pad)
+
+    def _copy_photo(self) -> ImageTk.PhotoImage:
+        cached = getattr(self, "_copy_photo_cache", None)
+        if cached is not None:
+            return cached
+        image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        _paint_copy(ImageDraw.Draw(image), _tone(MUTED))
+        image = image.resize((14, 14), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(image)
+        self._copy_photo_cache = photo
+        return photo
+
+    def _make_copy_chip(self, body: str) -> tk.Label:
+        photo = self._copy_photo()
+        chip = tk.Label(
+            self.chat._textbox,
+            image=photo,
+            bd=0,
+            padx=2,
+            pady=1,
+            bg=_tone(INK),
+            cursor="hand2",
+            takefocus=0,
+        )
+        chip.image = photo
+        chip.bind("<Button-1>", lambda _event, text=body: self._copy_agent_message(text))
+        chip.bind("<Enter>", lambda _event: chip.configure(bg=_tone(PANEL)))
+        chip.bind("<Leave>", lambda _event: chip.configure(bg=_tone(INK)))
+        return chip
+
+    def _copy_agent_message(self, text: str) -> None:
+        body = (text or "").rstrip()
+        if not body:
+            return
+        set_clipboard(self.chat._textbox, body)
+        self.set_status("Скопировано")
 
     def _insert_block(self, box, text: str) -> None:
         inner = box._textbox
@@ -1909,7 +2563,15 @@ class App(ctk.CTk):
             inner.insert("end", "Ассистент\n", ("label",))
             for chunk, tag in chat_segments(body):
                 inner.insert("end", chunk, (tag,) if tag else ())
-            inner.insert("end", "\n\n")
+            if body.strip():
+                inner.insert("end", "\n")
+                mark = inner.index("end-1c")
+                chip = self._make_copy_chip(body)
+                inner.window_create("end", window=chip, padx=0, pady=2)
+                inner.insert("end", "\n\n")
+                inner.tag_add("copyrow", mark, inner.index("end-1c"))
+            else:
+                inner.insert("end", "\n\n")
         else:
             inner.insert("end", body + "\n\n")
         inner.tag_add(role, start, inner.index("end-1c"))
