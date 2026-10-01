@@ -85,8 +85,8 @@ class McpClient:
         self._tools = tools
         return tools
 
-    def call(self, name: str, arguments: dict) -> dict:
-        return self.rpc("tools/call", {"name": name, "arguments": arguments or {}}, timeout=60)
+    def call(self, name: str, arguments: dict, timeout: float = 60) -> dict:
+        return self.rpc("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
 
     def rpc(self, method: str, params: dict | None, timeout: float) -> dict:
         if self._closed or self.proc is None:
@@ -272,11 +272,11 @@ class McpHub:
         text = "\n".join(lines)
         return text[:20_000]
 
-    def call(self, server: str, tool: str, arguments: dict) -> dict:
+    def call(self, server: str, tool: str, arguments: dict, timeout: float | None = None) -> dict:
         spec = self._spec(server)
         if spec is None:
             raise McpError(f"MCP-сервер не найден: {server}")
-        return self._client(spec).call(tool, arguments)
+        return self._client(spec).call(tool, arguments, timeout=60 if timeout is None else timeout)
 
     def _spec(self, name: str) -> dict | None:
         with self._lock:

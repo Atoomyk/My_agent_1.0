@@ -732,10 +732,15 @@ class SettingsWindow(ctk.CTkToplevel):
         mcp_row = ctk.CTkFrame(page, fg_color="transparent")
         mcp_row.pack(fill="x", padx=8, pady=4)
         quiet_button(mcp_row, "Добавить", app.add_mcp, width=124, mark="plus").pack(side="left", padx=(0, 4))
-        quiet_button(mcp_row, "Удалить", app.remove_mcp, width=112, mark="trash").pack(side="left")
+        quiet_button(mcp_row, "Удалить", app.remove_mcp, width=112, mark="trash").pack(side="left", padx=(0, 4))
+        quiet_button(mcp_row, "Браузер Playwright", app.add_browser_mcp, width=168).pack(side="left")
         ctk.CTkLabel(
             page,
-            text="Переменные env для сервера дописываются в config.json вручную.",
+            text=(
+                "Браузер — через MCP Playwright (кнопка выше), не встроенный Chrome. "
+                "Нужен Node.js (npx). Агент вызывает инструмент browser: открыть → snapshot → клик.\n"
+                "Переменные env для сервера дописываются в config.json вручную."
+            ),
             wraplength=400,
             justify="left",
             text_color=MUTED,
@@ -750,6 +755,7 @@ class SettingsWindow(ctk.CTkToplevel):
             "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
             "Запись файла, генерация изображения и запуск тестов всегда спрашивают подтверждение.\n\n"
             "Команд произвольного терминала нет. Тесты — только пресет unittest или pytest из настроек.\n\n"
+            "Браузер не встроен: только MCP Playwright из настроек (если добавлен).\n\n"
             "Агент не выходит за выбранную папку проекта."
         )
         ctk.CTkLabel(page, text=notes, wraplength=400, justify="left", anchor="w", text_color=MUTED).pack(
@@ -2279,6 +2285,24 @@ class App(ctk.CTk):
         self.mcp_name_var.set("")
         self.mcp_command_var.set("")
         self._render_mcp()
+
+    def add_browser_mcp(self) -> None:
+        from project_agent.browser_mcp import PLAYWRIGHT_SERVER
+
+        name = PLAYWRIGHT_SERVER["name"]
+        self.mcp_servers = [item for item in self.mcp_servers if item["name"] != name]
+        self.mcp_servers.append(
+            {
+                "name": name,
+                "command": PLAYWRIGHT_SERVER["command"],
+                "args": list(PLAYWRIGHT_SERVER["args"]),
+                "env": {},
+            }
+        )
+        self._render_mcp()
+        self.write_chat(
+            "Добавлен MCP playwright (npx @playwright/mcp@latest). Нужен Node.js. Сохраните настройки."
+        )
 
     def remove_mcp(self) -> None:
         name = self.mcp_name_var.get().strip()

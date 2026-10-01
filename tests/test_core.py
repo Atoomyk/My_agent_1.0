@@ -707,6 +707,52 @@ class McpTests(unittest.TestCase):
             finally:
                 hub.close()
 
+    def test_browser_preset_and_tool_routing(self):
+        from project_agent.browser_mcp import (
+            PLAYWRIGHT_SERVER,
+            find_browser_server_name,
+            map_browser_arguments,
+        )
+
+        self.assertEqual(PLAYWRIGHT_SERVER["command"], "npx")
+        self.assertIn("@playwright/mcp", PLAYWRIGHT_SERVER["args"][0])
+        self.assertEqual(
+            find_browser_server_name([{"name": "playwright"}, {"name": "other"}]),
+            "playwright",
+        )
+        self.assertIsNone(find_browser_server_name([{"name": "filesystem"}]))
+        tool, payload = map_browser_arguments("navigate", {"url": "https://example.com"})
+        self.assertEqual(tool, "browser_navigate")
+        self.assertEqual(payload, {"url": "https://example.com"})
+        tool2, payload2 = map_browser_arguments("click", {"ref": "e5", "element": "Submit"})
+        self.assertEqual(tool2, "browser_click")
+        self.assertEqual(payload2["ref"], "e5")
+
+        class FakeHub:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, server, tool, arguments, timeout=None):
+                self.calls.append((server, tool, arguments, timeout))
+                return {"content": [{"type": "text", "text": "snapshot ok"}]}
+
+            def list_tools(self):
+                return "playwright/browser_navigate: go"
+
+        hub = FakeHub()
+        settings = {
+            "api_key": "",
+            "mcp_servers": [dict(PLAYWRIGHT_SERVER)],
+        }
+        box = Toolbox(SecretVault(), lambda *_: True, hub, lambda: settings)
+        missing = Toolbox(SecretVault(), lambda *_: True, FakeHub(), lambda: {"api_key": "", "mcp_servers": []})
+        self.assertIn("не настроен", missing.execute("browser", {"action": "navigate", "url": "https://x"}).model_text)
+        out = box.execute("browser", {"action": "snapshot"})
+        self.assertIn("snapshot ok", out.model_text)
+        self.assertEqual(hub.calls[0][0], "playwright")
+        self.assertEqual(hub.calls[0][1], "browser_snapshot")
+        self.assertIn("browser snapshot", out.journal)
+
 
 class ProviderTests(unittest.TestCase):
     def test_openai_request_hides_secret(self):

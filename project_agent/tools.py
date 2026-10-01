@@ -39,6 +39,12 @@ from project_agent.gitops import (
     preview_unified,
 )
 from project_agent.websearch import web_search
+from project_agent.browser_mcp import (
+    BROWSER_CALL_TIMEOUT,
+    find_browser_server_name,
+    map_browser_arguments,
+)
+from project_agent.mcp_client import McpError
 
 MAX_READ_LINES = 400
 DEFAULT_READ_LINES = 200
@@ -180,6 +186,32 @@ TOOL_SPECS = [
                 "arguments": {"type": "object", "description": "Аргументы инструмента."},
             },
             ["server", "tool"],
+        ),
+    },
+    {
+        "name": "browser",
+        "description": (
+            "Браузер через MCP Playwright (не встроенный Chrome). "
+            "Нужен сервер playwright в настройках → MCP. "
+            "Типичный цикл: navigate → snapshot → click/type по ref из снимка."
+        ),
+        "parameters": _schema(
+            {
+                "action": _string(
+                    "navigate|snapshot|click|type|fill|press|hover|select|tabs|back|close|screenshot|wait|…"
+                ),
+                "url": _string("Для navigate."),
+                "ref": _string("ref элемента из snapshot."),
+                "element": _string("Краткое описание элемента (для click/type)."),
+                "text": _string("Текст для type/wait."),
+                "key": _string("Клавиша для press."),
+                "tabs_action": _string("Для tabs: list|new|close|select."),
+                "index": {"type": "number", "description": "Индекс вкладки для tabs select."},
+                "fields": {"type": "array", "description": "Для fill: поля формы."},
+                "submit": {"type": "boolean", "description": "Для type: отправить Enter."},
+                "time": {"type": "number", "description": "Для wait: секунды."},
+            },
+            ["action"],
         ),
     },
 ]
@@ -724,12 +756,44 @@ class Toolbox:
         if not isinstance(arguments, dict):
             raise ValueError("arguments должен быть объектом")
         hidden_args = _scrub_json(arguments, lambda value: self._scrub(value))
-        result = self.mcp.call(server, tool, hidden_args)
+        try:
+            result = self.mcp.call(server, tool, hidden_args)
+        except McpError as exc:
+            return ToolOutcome(f"Ошибка MCP. {exc}", f"mcp {server}.{tool}: ошибка")
         text, images = _mcp_result(result)
         journal = f"mcp {server}.{tool}: выполнено"
         if isinstance(result, dict) and result.get("isError"):
             journal = f"mcp {server}.{tool}: ошибка"
             text = "Ошибка MCP. " + text
+        return ToolOutcome(text[:30_000], journal, images)
+
+    def _tool_browser(self, args: dict) -> ToolOutcome:
+        settings = self.settings() or {}
+        server = find_browser_server_name(settings.get("mcp_servers") or [])
+        if not server:
+            return ToolOutcome(
+                "Браузер MCP не настроен. В настройках → MCP нажмите «Браузер Playwright» "
+                "(нужен Node.js / npx), сохраните настройки и повторите.",
+                "browser: нет MCP",
+            )
+        action = str(args.get("action") or "").strip()
+        try:
+            tool, payload = map_browser_arguments(action, args)
+        except ValueError as exc:
+            return ToolOutcome(str(exc), "browser: неизвестный action")
+        hidden = _scrub_json(payload, lambda value: self._scrub(value))
+        try:
+            result = self.mcp.call(server, tool, hidden, timeout=BROWSER_CALL_TIMEOUT)
+        except McpError as exc:
+            return ToolOutcome(
+                f"Ошибка браузера MCP ({server}.{tool}): {exc}",
+                f"browser {action}: ошибка",
+            )
+        text, images = _mcp_result(result)
+        journal = f"browser {action}: ok"
+        if isinstance(result, dict) and result.get("isError"):
+            journal = f"browser {action}: ошибка"
+            text = "Ошибка браузера. " + text
         return ToolOutcome(text[:30_000], journal, images)
 
     def _confirm(self, path: str, summary: str, detail: str = "") -> bool:
