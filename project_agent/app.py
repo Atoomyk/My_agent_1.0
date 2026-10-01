@@ -52,6 +52,7 @@ BORDER = ("#ddd4c8", "#4a433c")
 TEXT = ("#2c2824", "#f3eee6")
 MUTED = ("#8d847a", "#a3988c")
 USER_TEXT = ("#4a3c30", "#f7f0e4")
+USER_BG = ("#e8e0d5", "#322d28")
 SELECT = ("#e4dcd2", "#3a342e")
 SEND = ("#3c3631", "#efe6da")
 SEND_HOVER = ("#2b2724", "#f7f1e8")
@@ -62,6 +63,26 @@ CHAT_COLUMN = 820
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
+
+
+def chat_role(text: str) -> str:
+    body = text.lstrip()
+    if body.startswith("Вы:"):
+        return "user"
+    if body.startswith("·"):
+        return "tool"
+    return "agent"
+
+
+def chat_body(text: str, role: str | None = None) -> str:
+    body = text.rstrip()
+    role = role or chat_role(body)
+    if role != "user":
+        return body
+    stripped = body.lstrip()
+    if stripped.startswith("Вы:"):
+        return stripped[3:].lstrip()
+    return body
 
 
 def chat_segments(text: str) -> list[tuple[str, str]]:
@@ -1826,18 +1847,39 @@ class App(ctk.CTk):
         self.after(0, lambda: self.status_label.configure(text=text))
 
     def _role(self, text: str) -> str:
-        body = text.lstrip()
-        if body.startswith("Вы:"):
-            return "user"
-        if body.startswith("·"):
-            return "tool"
-        return "agent"
+        return chat_role(text)
 
     def _tag_chat(self) -> None:
         inner = self.chat._textbox
-        inner.tag_configure("user", lmargin1=48, lmargin2=48, rmargin=18, foreground=_tone(USER_TEXT), spacing1=8, spacing3=10)
-        inner.tag_configure("agent", lmargin1=12, lmargin2=12, rmargin=48, foreground=_tone(TEXT), spacing1=4, spacing3=10)
-        inner.tag_configure("tool", lmargin1=28, lmargin2=28, rmargin=28, foreground=_tone(MUTED), spacing1=2, spacing3=4)
+        inner.tag_configure(
+            "user",
+            lmargin1=56,
+            lmargin2=56,
+            rmargin=12,
+            foreground=_tone(USER_TEXT),
+            background=_tone(USER_BG),
+            spacing1=8,
+            spacing3=10,
+        )
+        inner.tag_configure(
+            "agent",
+            lmargin1=12,
+            lmargin2=12,
+            rmargin=56,
+            foreground=_tone(TEXT),
+            spacing1=4,
+            spacing3=10,
+        )
+        inner.tag_configure(
+            "tool",
+            lmargin1=28,
+            lmargin2=28,
+            rmargin=28,
+            foreground=_tone(MUTED),
+            spacing1=2,
+            spacing3=4,
+        )
+        inner.tag_configure("label", font=self._px_font(11), foreground=_tone(MUTED), spacing1=0, spacing3=2)
         inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
         inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
         inner.tag_configure(
@@ -1859,12 +1901,17 @@ class App(ctk.CTk):
         inner = box._textbox
         start = inner.index("end-1c")
         role = self._role(text)
-        if role == "agent":
-            for chunk, tag in chat_segments(text.rstrip()):
+        body = chat_body(text, role)
+        if role == "user":
+            inner.insert("end", "Вы\n", ("label",))
+            inner.insert("end", body + "\n\n")
+        elif role == "agent":
+            inner.insert("end", "Ассистент\n", ("label",))
+            for chunk, tag in chat_segments(body):
                 inner.insert("end", chunk, (tag,) if tag else ())
             inner.insert("end", "\n\n")
         else:
-            inner.insert("end", text.rstrip() + "\n\n")
+            inner.insert("end", body + "\n\n")
         inner.tag_add(role, start, inner.index("end-1c"))
 
     def _show_transcript(self) -> None:

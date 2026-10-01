@@ -138,6 +138,16 @@ class ChatMarkupTests(unittest.TestCase):
         self.assertEqual(elide("D:\\PythonProject\\GameProject", 10, len), "D:\\Python…")
         self.assertEqual(elide("abc", 0, len), "abc")
 
+    def test_chat_role_and_body(self):
+        from project_agent.app import chat_body, chat_role
+
+        self.assertEqual(chat_role("Вы: привет"), "user")
+        self.assertEqual(chat_role("· list_dir"), "tool")
+        self.assertEqual(chat_role("готово"), "agent")
+        self.assertEqual(chat_body("Вы: привет"), "привет")
+        self.assertEqual(chat_body("  Вы:  задача\nвторая"), "задача\nвторая")
+        self.assertEqual(chat_body("ответ модели"), "ответ модели")
+
 
 class ClipboardTests(unittest.TestCase):
     def test_russian_layout_copies_and_english_keys_stay(self):
