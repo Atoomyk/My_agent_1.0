@@ -111,6 +111,34 @@ class PathTests(unittest.TestCase):
                     read_text_file(root, relative)
 
 
+class ChatMarkupTests(unittest.TestCase):
+    def test_code_fences_inline_code_and_bold(self):
+        from project_agent.app import chat_segments
+
+        text = "Сделайте так:\n```js\nconst X = 2.4;\n```\nСм. `game.js` и **важно**."
+        self.assertEqual(
+            chat_segments(text),
+            [
+                ("Сделайте так:\n", ""),
+                ("const X = 2.4;\n", "codeblock"),
+                ("См. ", ""),
+                ("game.js", "code"),
+                (" и ", ""),
+                ("важно", "bold"),
+                (".", ""),
+            ],
+        )
+        self.assertEqual(chat_segments("без разметки"), [("без разметки", "")])
+        self.assertEqual(chat_segments("```\n`не код`\n"), [("`не код`\n\n", "codeblock")])
+
+    def test_elide_fits_width(self):
+        from project_agent.app import elide
+
+        self.assertEqual(elide("короткий", 100, len), "короткий")
+        self.assertEqual(elide("D:\\PythonProject\\GameProject", 10, len), "D:\\Python…")
+        self.assertEqual(elide("abc", 0, len), "abc")
+
+
 class ClipboardTests(unittest.TestCase):
     def test_russian_layout_copies_and_english_keys_stay(self):
         from project_agent.app import apply_layout_clipboard, clipboard_action

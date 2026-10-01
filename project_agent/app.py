@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 import multiprocessing
+import re
 import shlex
 import threading
 import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
+from tkinter import font as tkfont
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw
@@ -53,7 +56,58 @@ SELECT = ("#e4dcd2", "#3a342e")
 SEND = ("#3c3631", "#efe6da")
 SEND_HOVER = ("#2b2724", "#f7f1e8")
 ON_SEND = ("#f6f1ea", "#1c1916")
+CODE_BG = ("#efe9e1", "#24201c")
+CODE_TEXT = ("#0f7b8a", "#6cc7d3")
+CHAT_COLUMN = 820
 _ICONS: dict[str, ctk.CTkImage] = {}
+_FENCE = re.compile(r"^\s*```")
+_INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
+
+
+def chat_segments(text: str) -> list[tuple[str, str]]:
+    parts: list[tuple[str, str]] = []
+    fenced = False
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        tail = "\n" if index < len(lines) - 1 else ""
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            parts.append((line + "\n", "codeblock"))
+            continue
+        position = 0
+        for match in _INLINE.finditer(line):
+            if match.start() > position:
+                parts.append((line[position:match.start()], ""))
+            if match.group(1) is not None:
+                parts.append((match.group(1), "code"))
+            else:
+                parts.append((match.group(2), "bold"))
+            position = match.end()
+        parts.append((line[position:] + tail, ""))
+    merged: list[tuple[str, str]] = []
+    for chunk, tag in parts:
+        if not chunk:
+            continue
+        if merged and merged[-1][1] == tag:
+            merged[-1] = (merged[-1][0] + chunk, tag)
+        else:
+            merged.append((chunk, tag))
+    return merged
+
+
+def elide(text: str, width: int, measure) -> str:
+    if width <= 0 or measure(text) <= width:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if measure(text[:middle] + "…") <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + "…"
 
 
 def _tone(color: tuple[str, str]) -> str:
@@ -204,6 +258,32 @@ def _paint_check(draw: ImageDraw.ImageDraw, color: str) -> None:
     draw.line((8, 17, 14, 23, 24, 10), fill=color, width=2)
 
 
+def _paint_halt(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.rounded_rectangle((10, 10, 22, 22), radius=2, fill=color)
+
+
+def _paint_gear(draw: ImageDraw.ImageDraw, color: str) -> None:
+    for step in range(8):
+        angle = math.pi * step / 4
+        draw.line(
+            (
+                16 + 7 * math.cos(angle),
+                16 + 7 * math.sin(angle),
+                16 + 11 * math.cos(angle),
+                16 + 11 * math.sin(angle),
+            ),
+            fill=color,
+            width=3,
+        )
+    draw.ellipse((9, 9, 23, 23), outline=color, width=2)
+    draw.ellipse((13, 13, 19, 19), outline=color, width=2)
+
+
+def _paint_dots(draw: ImageDraw.ImageDraw, color: str) -> None:
+    for x in (8, 16, 24):
+        draw.ellipse((x - 2, 14, x + 2, 18), fill=color)
+
+
 _PAINT = {
     "folder": _paint_folder,
     "sliders": _paint_sliders,
@@ -216,6 +296,9 @@ _PAINT = {
     "send": _paint_send,
     "stop": _paint_stop,
     "check": _paint_check,
+    "halt": _paint_halt,
+    "gear": _paint_gear,
+    "dots": _paint_dots,
 }
 
 
@@ -264,6 +347,21 @@ def quiet_button(parent, text, command, width=96, primary=False, mark=None, roun
         hover_color=SEND_HOVER if primary else BUTTON_HOVER,
         text_color=ON_SEND if primary else TEXT,
         font=("Segoe UI", 12),
+        command=command,
+    )
+
+
+def icon_button(parent, mark, command, size=32, fg=None):
+    return ctk.CTkButton(
+        parent,
+        text="",
+        image=glyph(mark),
+        width=size,
+        height=size,
+        corner_radius=size // 2,
+        border_width=0,
+        fg_color=fg or "transparent",
+        hover_color=BUTTON_HOVER,
         command=command,
     )
 
@@ -472,7 +570,8 @@ class App(ctk.CTk):
         self.profiles: list[dict] = []
         self.active_profile = ""
         self.profile_var = ctk.StringVar(value=_NO_PROFILE)
-        self._folder_wrap = 0
+        self.footer_profile_menu: ctk.CTkOptionMenu | None = None
+        self._chat_pad = 0
         self.chat_id: str | None = None
         self.chat_title = ""
         self.transcript: list[str] = []
@@ -513,34 +612,81 @@ class App(ctk.CTk):
     def _build(self) -> None:
         self.bind_class("Text", "<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.bind_class("Entry", "<Control-KeyPress>", _on_layout_clipboard, add="+")
-        self.grid_columnconfigure(0, weight=0, minsize=260)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=56)
+        self.grid_columnconfigure(1, weight=0, minsize=1)
+        self.grid_columnconfigure(2, weight=0, minsize=248)
+        self.grid_columnconfigure(3, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        top = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
-        top.grid(row=0, column=0, columnspan=2, sticky="ew")
-        top.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(top, text="Папка", anchor="w", text_color=MUTED).grid(row=0, column=0, padx=(12, 8), pady=8)
-        self.folder_label = ctk.CTkLabel(top, text="не выбрана", anchor="w", justify="left", text_color=TEXT)
-        self.folder_label.grid(row=0, column=1, sticky="ew", padx=4, pady=8)
-        self.folder_label.bind("<Configure>", self._fit_folder)
-        self.folder_button = quiet_button(top, "Выбрать", self.choose_folder, width=112, mark="folder")
-        self.folder_button.grid(row=0, column=2, padx=4, pady=8)
-        quiet_button(top, "Настройки", self.open_settings, width=124, mark="sliders").grid(row=0, column=3, padx=4, pady=8)
-        quiet_button(top, "Новый чат", self.new_chat, width=128, mark="plus").grid(row=0, column=4, padx=(4, 12), pady=8)
+        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=56)
+        rail.grid(row=0, column=0, sticky="nsew")
+        rail.grid_rowconfigure(1, weight=1)
+        self.project_badge = ctk.CTkButton(
+            rail,
+            text="·",
+            width=36,
+            height=36,
+            corner_radius=10,
+            border_width=1,
+            border_color=BORDER,
+            fg_color=BUTTON,
+            hover_color=BUTTON_HOVER,
+            text_color=TEXT,
+            font=self._font(14, weight="bold"),
+            command=self.choose_folder,
+        )
+        self.project_badge.grid(row=0, column=0, padx=10, pady=(12, 0))
+        icon_button(rail, "gear", self.open_settings, size=36).grid(row=2, column=0, padx=10, pady=(0, 12))
+        ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
 
-        side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
-        side.grid(row=1, column=0, sticky="nsew")
+        side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=248)
+        side.grid(row=0, column=2, sticky="nsew")
+        side.grid_propagate(False)
         side.grid_columnconfigure(0, weight=1)
-        side.grid_rowconfigure(1, weight=3)
-        side.grid_rowconfigure(3, weight=2)
-        side_top = ctk.CTkFrame(side, fg_color="transparent")
-        side_top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        side_top.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(side_top, text="Структура", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w")
-        quiet_button(side_top, "Обновить", self._refresh_tree, width=118, mark="refresh").grid(row=0, column=1, padx=(8, 0))
-        tree_holder = ctk.CTkFrame(side, fg_color="transparent")
-        tree_holder.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        side.grid_rowconfigure(3, weight=1)
+        head = ctk.CTkFrame(side, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=(12, 8))
+        head.grid_columnconfigure(0, weight=1)
+        self.folder_name = ctk.CTkLabel(head, text="", anchor="w", text_color=TEXT, font=self._font(13, weight="bold"))
+        self.folder_name.grid(row=0, column=0, sticky="ew")
+        self.folder_path = ctk.CTkLabel(head, text="", anchor="w", text_color=MUTED, font=self._font(11))
+        self.folder_path.grid(row=1, column=0, sticky="ew")
+        self.folder_name.bind("<Configure>", lambda _event: self._fit_labels())
+        self.folder_path.bind("<Configure>", lambda _event: self._fit_labels())
+        icon_button(head, "dots", self.choose_folder, size=28).grid(row=0, column=1, rowspan=2, padx=(4, 0))
+        quiet_button(side, "Новый чат", self.new_chat, mark="plus").grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self.side_tabs = ctk.CTkSegmentedButton(
+            side,
+            values=["Чаты", "Файлы"],
+            command=self._show_side_tab,
+            height=30,
+            corner_radius=10,
+            fg_color=BUTTON_HOVER,
+            selected_color=BUTTON,
+            selected_hover_color=BUTTON,
+            unselected_color=BUTTON_HOVER,
+            unselected_hover_color=SELECT,
+            text_color=TEXT,
+            font=self._font(12),
+        )
+        self.side_tabs.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.chat_pane = ctk.CTkFrame(side, fg_color="transparent")
+        self.chat_pane.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.chat_pane.grid_columnconfigure(0, weight=1)
+        self.chat_pane.grid_rowconfigure(0, weight=1)
+        self.file_pane = ctk.CTkFrame(side, fg_color="transparent")
+        self.file_pane.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.file_pane.grid_columnconfigure(0, weight=1)
+        self.file_pane.grid_rowconfigure(1, weight=1)
+        files_top = ctk.CTkFrame(self.file_pane, fg_color="transparent")
+        files_top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        files_top.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(files_top, text="Структура", anchor="w", text_color=MUTED, font=self._font(12)).grid(
+            row=0, column=0, sticky="w", padx=(6, 0)
+        )
+        icon_button(files_top, "refresh", self._refresh_tree, size=28).grid(row=0, column=1)
+        tree_holder = ctk.CTkFrame(self.file_pane, fg_color="transparent")
+        tree_holder.grid(row=1, column=0, sticky="nsew")
         tree_holder.grid_columnconfigure(0, weight=1)
         tree_holder.grid_rowconfigure(0, weight=1)
         self._style_tree()
@@ -553,23 +699,17 @@ class App(ctk.CTk):
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.bind("<<TreeviewOpen>>", self._tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_click)
-        chat_top = ctk.CTkFrame(side, fg_color="transparent")
-        chat_top.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
-        chat_top.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(chat_top, text="Чаты", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w")
-        quiet_button(chat_top, "Удалить", self.delete_selected_chat, width=112, mark="trash").grid(row=0, column=1, padx=(8, 0))
-        chat_holder = ctk.CTkFrame(side, fg_color="transparent")
-        chat_holder.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        chat_holder.grid_columnconfigure(0, weight=1)
-        chat_holder.grid_rowconfigure(0, weight=1)
-        self.chat_tree = ttk.Treeview(chat_holder, show="tree", selectmode="browse", style="Project.Treeview")
+        self.chat_tree = ttk.Treeview(self.chat_pane, show="tree", selectmode="browse", style="Chats.Treeview")
         self.chat_tree.grid(row=0, column=0, sticky="nsew")
         chat_scroll = ctk.CTkScrollbar(
-            chat_holder, command=self.chat_tree.yview, fg_color=PANEL, button_color=BUTTON, button_hover_color=BUTTON_HOVER
+            self.chat_pane, command=self.chat_tree.yview, fg_color=PANEL, button_color=BUTTON, button_hover_color=BUTTON_HOVER
         )
         chat_scroll.grid(row=0, column=1, sticky="ns", padx=(4, 0))
         self.chat_tree.configure(yscrollcommand=chat_scroll.set)
         self.chat_tree.bind("<<TreeviewSelect>>", self._on_chat_select)
+        self.chat_tree.bind("<Button-3>", self._chat_menu)
+        self.side_tabs.set("Чаты")
+        self._show_side_tab("Чаты")
 
         self.work = tk.PanedWindow(
             self,
@@ -580,12 +720,17 @@ class App(ctk.CTk):
             bg=_tone(INK),
             sashcursor="sb_h_double_arrow",
         )
-        self.work.grid(row=1, column=1, sticky="nsew")
+        self.work.grid(row=0, column=3, sticky="nsew")
         self.work.bind("<ButtonRelease-1>", self._remember_editor_width)
         self.center = ctk.CTkFrame(self.work, fg_color=INK, corner_radius=0)
         self.center.grid_columnconfigure(0, weight=1)
-        self.center.grid_rowconfigure(0, weight=1)
+        self.center.grid_rowconfigure(1, weight=1)
         self.work.add(self.center, stretch="always", minsize=360, sticky="nsew")
+        self.chat_head = ctk.CTkLabel(
+            self.center, text="Новый чат", anchor="w", text_color=TEXT, font=self._font(13, weight="bold")
+        )
+        self.chat_head.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 6))
+        self.chat_head.bind("<Configure>", lambda _event: self._fit_labels())
         self.stack = tk.PanedWindow(
             self.center,
             orient="vertical",
@@ -595,7 +740,7 @@ class App(ctk.CTk):
             bg=_tone(INK),
             sashcursor="sb_v_double_arrow",
         )
-        self.stack.grid(row=0, column=0, sticky="nsew")
+        self.stack.grid(row=1, column=0, sticky="nsew")
         self.stack.bind("<ButtonRelease-1>", self._remember_prompt_height)
         chat_holder = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
         chat_holder.grid_columnconfigure(0, weight=1)
@@ -611,9 +756,10 @@ class App(ctk.CTk):
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.chat.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        self.chat.grid(row=0, column=0, sticky="nsew", padx=(8, 0))
         self.stack.add(chat_holder, stretch="always", minsize=140, sticky="nsew")
         self._tag_chat()
+        self.chat._textbox.bind("<Configure>", self._center_chat, add="+")
         self.chat.bind("<<Paste>>", lambda _event: "break")
         self.chat.bind("<<Cut>>", lambda _event: "break")
         self.chat.bind("<Key>", self._chat_key)
@@ -642,73 +788,206 @@ class App(ctk.CTk):
         )
         self.editor_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        bottom = ctk.CTkFrame(self.stack, fg_color=FIELD, corner_radius=18, border_width=1, border_color=BORDER)
+        bottom = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
         self.bottom = bottom
         bottom.grid_columnconfigure(0, weight=1)
-        bottom.grid_rowconfigure(1, weight=1)
-        self.stack.add(bottom, stretch="never", minsize=188, sticky="nsew")
-        ctk.CTkLabel(bottom, text="Задача", anchor="w", text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
+        bottom.grid_rowconfigure(0, weight=1)
+        self.stack.add(bottom, stretch="never", minsize=150, sticky="nsew")
+        bottom.bind("<Configure>", self._center_composer, add="+")
+        card = ctk.CTkFrame(bottom, fg_color=FIELD, corner_radius=16, border_width=1, border_color=BORDER)
+        self.card = card
+        card.grid(row=0, column=0, sticky="nsew", padx=24, pady=(6, 0))
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_rowconfigure(0, weight=1)
         self.task = ctk.CTkTextbox(
-            bottom,
-            height=72,
+            card,
+            height=56,
             fg_color=FIELD,
             text_color=TEXT,
-            border_color=BORDER,
-            border_width=1,
-            corner_radius=12,
+            border_width=0,
+            corner_radius=0,
             font=("Segoe UI", 13),
+            scrollbar_button_color=BUTTON,
+            scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.task.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=(4, 0))
+        self.task.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=10, pady=(10, 0))
         self.task.bind("<Return>", self._send_key)
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
+        inner = self.task._textbox
+        self.placeholder = tk.Label(
+            inner,
+            text="Спросите что угодно…",
+            anchor="w",
+            bd=0,
+            padx=0,
+            pady=0,
+            font=self._font(13),
+            fg=_tone(MUTED),
+            bg=_tone(FIELD),
+            cursor="xterm",
+        )
+        self.placeholder.bind("<Button-1>", lambda _event: self.task.focus_set())
+        inner.bind("<<Modified>>", self._on_task_modified, add="+")
+        self._sync_placeholder()
+        self.image_button = icon_button(card, "plus", self.attach_image, size=32)
+        self.image_button.grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
+        self.attach_label = ctk.CTkLabel(card, text="", anchor="w", text_color=MUTED, font=self._font(11))
+        self.attach_label.grid(row=1, column=1, sticky="ew", padx=4)
+        self.send_button = quiet_button(card, "", self._send_or_stop, round_mark=True)
+        self.send_button.configure(width=34, height=34, corner_radius=17)
+        self.send_button.grid(row=1, column=2, padx=(4, 8), pady=8, sticky="e")
+        footer = ctk.CTkFrame(bottom, fg_color="transparent")
+        self.footer = footer
+        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 8))
+        footer.grid_columnconfigure(2, weight=1)
+        self.footer_profile_menu = ctk.CTkOptionMenu(
+            footer,
+            variable=self.profile_var,
+            values=[_NO_PROFILE],
+            command=self._on_profile_pick,
+            height=26,
+            width=60,
+            corner_radius=8,
+            dynamic_resizing=True,
+            fg_color=INK,
+            button_color=INK,
+            button_hover_color=BUTTON_HOVER,
+            text_color=MUTED,
+            font=self._font(12),
+            dropdown_fg_color=PANEL,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=SELECT,
+            dropdown_font=self._font(12),
+        )
+        self.footer_profile_menu.grid(row=0, column=0, sticky="w")
         self.model_label = ctk.CTkLabel(
-            bottom,
+            footer,
             text="модель не выбрана",
             anchor="w",
             text_color=MUTED,
-            font=("Segoe UI", 11),
+            font=self._font(11),
         )
-        self.model_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 0))
-        self.attach_label = ctk.CTkLabel(bottom, text="", anchor="w", text_color=MUTED)
-        self.attach_label.grid(row=3, column=0, sticky="w", padx=12, pady=(4, 4))
-        self.image_button = ctk.CTkButton(
-            bottom,
-            text="",
-            image=glyph("plus"),
-            width=40,
-            height=40,
-            corner_radius=20,
-            border_width=1,
-            border_color=BORDER,
-            fg_color=BUTTON,
-            hover_color=BUTTON_HOVER,
-            command=self.attach_image,
-        )
-        self.image_button.grid(row=3, column=1, padx=4, pady=(4, 4))
-        self.stop_button = quiet_button(bottom, "Стоп", self.stop, width=96, mark="stop")
-        self.stop_button.grid(row=3, column=2, padx=4, pady=(4, 4))
-        self.send_button = quiet_button(bottom, "", self.send, round_mark=True)
-        self.send_button.grid(row=3, column=3, padx=(4, 12), pady=(4, 4))
-        self.stop_button.configure(state="disabled")
-        self.status_label = ctk.CTkLabel(bottom, text="Готово", anchor="w", text_color=MUTED)
-        self.status_label.grid(row=4, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+        self.model_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.status_label = ctk.CTkLabel(footer, text="Готово", anchor="e", text_color=MUTED, font=self._font(11))
+        self.status_label.grid(row=0, column=2, sticky="e")
 
-    def _fit_folder(self, event=None) -> None:
-        width = event.width if event is not None else self.folder_label.winfo_width()
-        width = max(120, width - 8)
-        if width == self._folder_wrap:
+    def _font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
+        return (family, size, weight)
+
+    def _px_font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
+        scale = ctk.ScalingTracker.get_widget_scaling(self)
+        return (family, -round(size * scale), weight)
+
+    def _measure(self, size: int, weight: str = "normal"):
+        key = (size, weight)
+        cache = self.__dict__.setdefault("_measure_fonts", {})
+        font = cache.get(key)
+        if font is None:
+            font = tkfont.Font(font=self._px_font(size, weight=weight))
+            cache[key] = font
+        return font.measure
+
+    def _fit_labels(self) -> None:
+        if not hasattr(self, "chat_head"):
             return
-        self._folder_wrap = width
-        self.folder_label.configure(wraplength=width)
+        if self.project is None:
+            name, path = "Папка не выбрана", "нажмите «…», чтобы выбрать"
+        else:
+            name, path = self.project.name or str(self.project), str(self.project)
+        title = self.chat_title or "Новый чат"
+        for label, text, size, weight in (
+            (self.folder_name, name, 13, "bold"),
+            (self.folder_path, path, 11, "normal"),
+            (self.chat_head, title, 13, "bold"),
+        ):
+            width = label.winfo_width() - 4
+            shown = elide(text, width, self._measure(size, weight)) if width > 20 else text
+            if label.cget("text") != shown:
+                label.configure(text=shown)
 
     def _show_folder(self) -> None:
-        if self.project is None:
-            self.folder_label.configure(text="не выбрана")
-        else:
-            self.folder_label.configure(text=str(self.project))
+        letter = (self.project.name[:1] if self.project is not None else "") or "·"
+        self.project_badge.configure(text=letter.upper())
+        self._fit_labels()
         self._refresh_tree()
         self._refresh_chat_list()
+
+    def _show_side_tab(self, name: str) -> None:
+        if name == "Файлы":
+            self.chat_pane.grid_remove()
+            self.file_pane.grid()
+        else:
+            self.file_pane.grid_remove()
+            self.chat_pane.grid()
+
+    def _column_pad(self, width: int, least: int) -> int:
+        scale = ctk.ScalingTracker.get_widget_scaling(self)
+        column = round(CHAT_COLUMN * scale)
+        return max(least, (width - column) // 2)
+
+    def _center_chat(self, event=None) -> None:
+        width = event.width if event is not None else self.chat._textbox.winfo_width()
+        pad = self._column_pad(width, 16)
+        if pad == self._chat_pad:
+            return
+        self._chat_pad = pad
+        self.chat._textbox.configure(padx=pad)
+
+    def _center_composer(self, event=None) -> None:
+        scale = ctk.ScalingTracker.get_widget_scaling(self)
+        width = event.width if event is not None else self.bottom.winfo_width()
+        pad = round(self._column_pad(width, round(24 * scale)) / scale)
+        if getattr(self, "_composer_pad", None) == pad:
+            return
+        self._composer_pad = pad
+        self.card.grid_configure(padx=pad)
+        self.footer.grid_configure(padx=pad)
+
+    def _on_task_modified(self, _event=None) -> None:
+        inner = self.task._textbox
+        try:
+            inner.edit_modified(False)
+        except tk.TclError:
+            return
+        self._sync_placeholder()
+
+    def _sync_placeholder(self) -> None:
+        empty = not self.task.get("1.0", "end-1c")
+        if empty:
+            self.placeholder.place(x=1, y=1)
+        else:
+            self.placeholder.place_forget()
+
+    def _send_or_stop(self) -> None:
+        if self.running:
+            self.stop()
+        else:
+            self.send()
+
+    def _show_running(self, running: bool) -> None:
+        self.send_button.configure(image=glyph("halt" if running else "send", invert=True))
+
+    def _chat_menu(self, event) -> str | None:
+        row = self.chat_tree.identify_row(event.y)
+        if not row or self.running:
+            return None
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(label="Удалить", command=lambda: self.delete_chat_item(str(row)))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _style_tree(self) -> None:
         style = ttk.Style()
@@ -725,6 +1004,24 @@ class App(ctk.CTk):
         )
         style.map(
             "Project.Treeview",
+            background=[("selected", _tone(SELECT))],
+            foreground=[("selected", _tone(TEXT))],
+        )
+        style.configure(
+            "Chats.Treeview",
+            background=_tone(PANEL),
+            fieldbackground=_tone(PANEL),
+            foreground=_tone(TEXT),
+            borderwidth=0,
+            rowheight=32,
+            indent=0,
+            font=("Segoe UI", 10),
+        )
+        style.layout("Chats.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.layout("Project.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.layout("Chats.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [("Treeitem.text", {"sticky": "nswe"})]})])
+        style.map(
+            "Chats.Treeview",
             background=[("selected", _tone(SELECT))],
             foreground=[("selected", _tone(TEXT))],
         )
@@ -872,7 +1169,7 @@ class App(ctk.CTk):
             if tries < 8:
                 self.after(50, lambda: self._place_composer_sash(tries + 1))
             return
-        natural = max(188, self.bottom.winfo_reqheight())
+        natural = max(150, self.bottom.winfo_reqheight())
         wanted = self.prompt_height or natural
         wanted = max(natural, min(wanted, total - 140))
         try:
@@ -886,7 +1183,7 @@ class App(ctk.CTk):
             _left, top = self.stack.sash_coord(0)
         except tk.TclError:
             return
-        height = max(160, total - int(top))
+        height = max(150, total - int(top))
         if height == self.prompt_height:
             return
         self.prompt_height = height
@@ -1041,6 +1338,7 @@ class App(ctk.CTk):
         self.after(50, self._place_composer_sash)
         self.profiles = list(data["profiles"])
         self.active_profile = data["active_profile"]
+        self._sync_profile_menu()
         self._apply_ai(data)
         self.mcp_servers = list(data["mcp_servers"])
         self.saved_servers = list(data["mcp_servers"])
@@ -1066,6 +1364,8 @@ class App(ctk.CTk):
             self._style_tree()
         if hasattr(self, "chat"):
             self._tag_chat()
+        if hasattr(self, "placeholder"):
+            self.placeholder.configure(fg=_tone(MUTED), bg=_tone(FIELD))
 
     def _on_theme_pick(self, label: str) -> None:
         theme = THEME_LABELS.get(label, "dark")
@@ -1112,16 +1412,19 @@ class App(ctk.CTk):
         )
 
     def _sync_profile_menu(self) -> None:
-        menu = self.profile_menu
         names = [item["name"] for item in self.profiles] or [_NO_PROFILE]
         current = self.active_profile if self.active_profile in names else names[0]
         self.profile_var.set(current)
-        if menu is not None and menu.winfo_exists():
-            menu.configure(values=names)
-            menu.set(current)
+        for menu in (self.profile_menu, self.footer_profile_menu):
+            if menu is not None and menu.winfo_exists():
+                menu.configure(values=names)
+                menu.set(current)
 
     def _on_profile_pick(self, name: str) -> None:
         if name == _NO_PROFILE or name == self.active_profile:
+            return
+        if self.running:
+            self._sync_profile_menu()
             return
         profile = next((item for item in self.profiles if item["name"] == name), None)
         if profile is None:
@@ -1240,6 +1543,7 @@ class App(ctk.CTk):
         self._clear_box(self.chat)
         self.agent.reset_session(announce=False)
         self._refresh_chat_list()
+        self._fit_labels()
         self.set_status("Новый чат")
 
     def attach_image(self) -> None:
@@ -1361,10 +1665,10 @@ class App(ctk.CTk):
         self.write_chat(f"Вы: {note}")
         if created:
             self._refresh_chat_list()
+            self._fit_labels()
         self.running = True
         self.stop_event = threading.Event()
-        self.send_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
+        self._show_running(True)
         self.set_status("Запрос отправлен")
         thread = threading.Thread(target=self._turn, args=(text, prepared, settings), daemon=True)
         thread.start()
@@ -1387,8 +1691,7 @@ class App(ctk.CTk):
 
     def _finish(self) -> None:
         self.running = False
-        self.send_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        self._show_running(False)
         if self.stop_event.is_set():
             self.set_status("Остановлено")
         else:
@@ -1491,15 +1794,11 @@ class App(ctk.CTk):
         self._show_transcript()
         self.agent.reset_session(announce=False)
         self._refresh_chat_list()
+        self._fit_labels()
         self.set_status("Чат открыт. Модель начинает заново.")
 
-    def delete_selected_chat(self) -> None:
-        if self.running:
-            return
-        selected = self.chat_tree.selection()
-        chat_id = str(selected[0]) if selected else (self.chat_id or "")
-        if not chat_id:
-            self.write_chat("Чат не выбран.")
+    def delete_chat_item(self, chat_id: str) -> None:
+        if self.running or not chat_id:
             return
         title = self.chat_tree.item(chat_id, "text") if self.chat_tree.exists(chat_id) else self.chat_title
         dialog = ConfirmDialog(self, title or "Чат", "Удалить этот чат?")
@@ -1520,6 +1819,7 @@ class App(ctk.CTk):
             self._clear_box(self.chat)
             self.agent.reset_session(announce=False)
         self._refresh_chat_list()
+        self._fit_labels()
         self.set_status("Чат удалён")
 
     def set_status(self, text: str) -> None:
@@ -1538,13 +1838,34 @@ class App(ctk.CTk):
         inner.tag_configure("user", lmargin1=48, lmargin2=48, rmargin=18, foreground=_tone(USER_TEXT), spacing1=8, spacing3=10)
         inner.tag_configure("agent", lmargin1=12, lmargin2=12, rmargin=48, foreground=_tone(TEXT), spacing1=4, spacing3=10)
         inner.tag_configure("tool", lmargin1=28, lmargin2=28, rmargin=28, foreground=_tone(MUTED), spacing1=2, spacing3=4)
-        inner.configure(padx=10, pady=8)
+        inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
+        inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
+        inner.tag_configure(
+            "codeblock",
+            font=self._px_font(12, "Consolas"),
+            background=_tone(CODE_BG),
+            foreground=_tone(TEXT),
+            lmargin1=24,
+            lmargin2=24,
+            rmargin=24,
+            spacing1=0,
+            spacing3=0,
+        )
+        inner.configure(pady=8)
+        if self._chat_pad:
+            inner.configure(padx=self._chat_pad)
 
     def _insert_block(self, box, text: str) -> None:
         inner = box._textbox
         start = inner.index("end-1c")
-        inner.insert("end", text.rstrip() + "\n\n")
-        inner.tag_add(self._role(text), start, inner.index("end-1c"))
+        role = self._role(text)
+        if role == "agent":
+            for chunk, tag in chat_segments(text.rstrip()):
+                inner.insert("end", chunk, (tag,) if tag else ())
+            inner.insert("end", "\n\n")
+        else:
+            inner.insert("end", text.rstrip() + "\n\n")
+        inner.tag_add(role, start, inner.index("end-1c"))
 
     def _show_transcript(self) -> None:
         box = self.chat
