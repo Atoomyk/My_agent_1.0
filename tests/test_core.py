@@ -409,6 +409,63 @@ class TestRunnerTests(unittest.TestCase):
             self.assertIn("Лимит", limited.model_text)
             self.assertIn("лимит", limited.journal)
 
+    def test_fail_fingerprint_stable_and_repeat_locks(self):
+        from project_agent.testing import fail_fingerprint
+
+        out_a = (
+            "test_x (tests.test_mod.T) ... FAIL\n"
+            "======================================================================\n"
+            "FAIL: test_x (tests.test_mod.T)\n"
+            "----------------------------------------------------------------------\n"
+            "Traceback (most recent call last):\n"
+            '  File "tests/test_mod.py", line 4, in test_x\n'
+            "AssertionError: 1 != 2\n"
+            "Ran 1 test in 0.012s\n"
+        )
+        out_b = out_a.replace("0.012s", "0.991s")
+        self.assertEqual(fail_fingerprint(out_a, 1), fail_fingerprint(out_b, 1))
+        self.assertIn("FAIL", fail_fingerprint(out_a, 1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "tests").mkdir()
+            bad = root / "tests" / "test_bad.py"
+            bad.write_text(
+                "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(1, 2)\n",
+                encoding="utf-8",
+            )
+            settings = {
+                "test_preset": "unittest",
+                "test_timeout": 60,
+                "test_fix_rounds": 5,
+                "api_key": "",
+                "mcp_servers": [],
+            }
+            box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: settings)
+            box.set_root(root)
+            box.begin_turn()
+            first = box.execute("run_tests", {})
+            self.assertIn("FAIL", first.model_text)
+            self.assertFalse(box.fail_locked)
+            second = box.execute("run_tests", {})
+            self.assertIn("СТОП", second.model_text)
+            self.assertTrue(box.fail_locked)
+            third = box.execute("run_tests", {})
+            self.assertIn("СТОП", third.model_text)
+            self.assertIn("стоп повтор", third.journal)
+
+    def test_write_tracks_touched_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {"api_key": "", "mcp_servers": []})
+            box.set_root(root)
+            box.begin_turn()
+            out = box.execute("write_file", {"path": "a.py", "content": "x=1\n", "summary": "add"})
+            self.assertIn("Тронутые за ход: a.py", out.model_text)
+            self.assertEqual(box.touched_paths(), ["a.py"])
+
 
 class GitOpsTests(unittest.TestCase):
     def test_status_diff_log_and_commit_confirm(self):

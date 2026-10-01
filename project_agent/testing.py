@@ -65,6 +65,31 @@ def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return text[:half] + "\n…\n" + text[-half:]
 
 
+def fail_fingerprint(output: str, code: int | None = None) -> str:
+    """Стабильный ключ падения: FAIL/ERROR/AssertionError, без шума разделителей."""
+    lines = (output or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    hits: list[str] = []
+    for raw in lines:
+        line = " ".join(raw.strip().split())
+        if not line or line.startswith("====") or line.startswith("----"):
+            continue
+        upper = line.upper()
+        if (
+            upper.startswith("FAIL")
+            or upper.startswith("ERROR")
+            or "FAILED" in upper
+            or "ASSERTIONERROR" in upper
+            or "ERROR:" in upper
+            or line.startswith("E ")
+        ):
+            hits.append(line[:240])
+            if len(hits) >= 12:
+                break
+    if not hits:
+        hits = [" ".join(item.strip().split())[:200] for item in lines[-12:] if item.strip()]
+    return f"{0 if code is None else int(code)}:" + "\n".join(hits)
+
+
 def python_command() -> list[str]:
     if not getattr(sys, "frozen", False):
         return [sys.executable]

@@ -20,7 +20,14 @@ from project_agent.paths import (
 )
 from project_agent.providers import request_image
 from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is_secret_blob, literals_from_settings
-from project_agent.testing import LABEL_BY_PRESET, normalize_fix_rounds, normalize_preset, normalize_timeout, run_preset
+from project_agent.testing import (
+    LABEL_BY_PRESET,
+    fail_fingerprint,
+    normalize_fix_rounds,
+    normalize_preset,
+    normalize_timeout,
+    run_preset,
+)
 from project_agent.index_store import build_index, find_paths, index_summary, load_index, touch_file
 from project_agent.gitops import (
     GitError,
@@ -198,6 +205,8 @@ class Toolbox:
         self._test_holder: dict = {}
         self._test_runs = 0
         self._last_fail_key = ""
+        self._fail_locked = False
+        self._touched: list[str] = []
 
     def set_root(self, root: Path | None) -> None:
         self.root = root
@@ -205,6 +214,25 @@ class Toolbox:
     def begin_turn(self) -> None:
         self._test_runs = 0
         self._last_fail_key = ""
+        self._fail_locked = False
+        self._touched = []
+
+    @property
+    def fail_locked(self) -> bool:
+        return self._fail_locked
+
+    def touched_paths(self) -> list[str]:
+        return list(self._touched)
+
+    def _note_touched(self, relative: str) -> None:
+        path = str(relative or "").replace("\\", "/").strip().strip("/")
+        if path and path not in self._touched:
+            self._touched.append(path)
+
+    def _touched_suffix(self) -> str:
+        if not self._touched:
+            return ""
+        return "\nТронутые за ход: " + ", ".join(self._touched)
 
     def cancel(self) -> None:
         process = self._test_holder.get("process")
@@ -394,7 +422,11 @@ class Toolbox:
             touch_file(self.root, rel)
         except Exception:
             pass
-        return ToolOutcome("Файл записан. Содержимое в ответ не входит.", f"write_file {rel}: записано")
+        self._note_touched(rel)
+        return ToolOutcome(
+            "Файл записан. Содержимое в ответ не входит." + self._touched_suffix(),
+            f"write_file {rel}: записано",
+        )
 
     def _tool_apply_patch(self, args: dict) -> ToolOutcome:
         full = self._inside(str(args.get("path") or ""))
@@ -432,7 +464,11 @@ class Toolbox:
             touch_file(self.root, rel)
         except Exception:
             pass
-        return ToolOutcome("Правка записана. Содержимое в ответ не входит.", f"apply_patch {rel}: записано")
+        self._note_touched(rel)
+        return ToolOutcome(
+            "Правка записана. Содержимое в ответ не входит." + self._touched_suffix(),
+            f"apply_patch {rel}: записано",
+        )
 
     def _tool_view_image(self, args: dict) -> ToolOutcome:
         full = self._inside(str(args.get("path") or ""))
@@ -538,9 +574,17 @@ class Toolbox:
                 "run_tests: выключено",
             )
         rounds = normalize_fix_rounds(settings.get("test_fix_rounds"))
+        if self._fail_locked:
+            return ToolOutcome(
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests и другие инструменты; "
+                "кратко опиши проблему и перечисли тронутые файлы."
+                + self._touched_suffix(),
+                "run_tests: стоп повтор",
+            )
         if self._test_runs >= rounds:
             return ToolOutcome(
-                f"Лимит запусков тестов за этот ход ({rounds}). Кратко опиши, что осталось, и остановись.",
+                f"Лимит запусков тестов за этот ход ({rounds}). Кратко опиши, что осталось, и остановись."
+                + self._touched_suffix(),
                 f"run_tests: лимит {rounds}",
             )
         timeout = normalize_timeout(settings.get("test_timeout"))
@@ -569,20 +613,23 @@ class Toolbox:
                 f"Таймаут {timeout} с. Запуск {self._test_runs}/{rounds}.\n"
                 f"Команда: {' '.join(result.command)}\n\n{result.output}"
             ).strip()
-            return ToolOutcome(body, f"run_tests {label}: таймаут {self._test_runs}/{rounds}")
+            return ToolOutcome(body + self._touched_suffix(), f"run_tests {label}: таймаут {self._test_runs}/{rounds}")
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
-        fail_key = ""
         if code != 0:
-            tail = "\n".join(result.output.splitlines()[-40:])
-            fail_key = f"{code}:{tail}"
+            fail_key = fail_fingerprint(result.output, code)
             if fail_key and fail_key == self._last_fail_key:
+                self._fail_locked = True
                 body = (
-                    f"{status} — то же падение, что в предыдущем запуске. "
-                    f"Запуск {self._test_runs}/{rounds}. Не повторяй тот же патч; опиши проблему человеку.\n"
+                    f"СТОП: {status} — то же падение, что в предыдущем запуске. "
+                    f"Запуск {self._test_runs}/{rounds}. Больше не вызывай инструменты; "
+                    f"опиши проблему человеку и перечисли тронутые файлы.\n"
                     f"Команда: {' '.join(result.command)}\n\n{result.output}"
                 ).strip()
-                return ToolOutcome(body, f"run_tests {label}: повтор {self._test_runs}/{rounds}")
+                return ToolOutcome(
+                    body + self._touched_suffix(),
+                    f"run_tests {label}: повтор {self._test_runs}/{rounds}",
+                )
             self._last_fail_key = fail_key
         else:
             self._last_fail_key = ""
@@ -590,7 +637,10 @@ class Toolbox:
             f"{status}. Запуск {self._test_runs}/{rounds}.\n"
             f"Команда: {' '.join(result.command)}\n\n{result.output}"
         ).strip()
-        return ToolOutcome(body, f"run_tests {label}: {status} {self._test_runs}/{rounds}")
+        return ToolOutcome(
+            body + self._touched_suffix(),
+            f"run_tests {label}: {status} {self._test_runs}/{rounds}",
+        )
 
     def _tool_git(self, args: dict) -> ToolOutcome:
         root = self._require_root()
