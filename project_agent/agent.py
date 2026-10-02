@@ -23,6 +23,7 @@ SYSTEM_AGENT = """Ты помощник по файлам проекта. Реж
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
 Запись файла, генерация изображения и запуск тестов выполняются только после подтверждения человека. Если он отказал, не повторяй то же действие.
 Можно смотреть изображения проекта, искать в интернете, генерировать картинки, запускать пресет тестов из настроек (run_tests), смотреть индекс путей (project_index), работать с git (status/diff/log; commit только после подтверждения) и вызывать настроенные MCP-инструменты.
+Тесты только через run_tests и пресет в настройках → Проект: выкл / unittest / pytest / npm test. Отдельного поля «команда пресета» нет — не предлагай его менять, не предлагай scripts/run-tests.cmd и произвольный shell.
 Браузер не встроен: если в настройках MCP есть playwright — используй инструмент browser (navigate → snapshot → click/type по ref). Свой Chrome ProjectAgent не запускает.
 Push, reset --hard и произвольный shell недоступны.
 Чтобы быстро найти файл по имени или фрагменту пути, используй project_index с action=find. Это не содержимое файлов — только пути.
@@ -46,6 +47,29 @@ SYSTEM_ASK = """Ты помощник по файлам проекта. Режи
 
 # совместимость со старыми импортами/тестами
 SYSTEM = SYSTEM_AGENT
+
+
+def tool_running_label(name: str, arguments) -> str:
+    """Короткая метка для статуса/журнала, пока инструмент ещё выполняется."""
+    tool = str(name or "").strip() or "tool"
+    args = arguments if isinstance(arguments, dict) else {}
+    if tool == "browser":
+        action = str(args.get("action") or "").strip()
+        return f"browser {action}".strip() if action else "browser"
+    if tool == "call_mcp_tool":
+        server = str(args.get("server") or "").strip()
+        mcp_tool = str(args.get("tool") or "").strip()
+        if server and mcp_tool:
+            return f"{server}/{mcp_tool}"
+        return "call_mcp_tool"
+    if tool == "run_tests":
+        return "run_tests"
+    if tool in {"read_file", "write_file", "apply_patch", "view_image"}:
+        path = str(args.get("path") or "").strip()
+        if path:
+            short = path if len(path) <= 40 else "…" + path[-39:]
+            return f"{tool} {short}"
+    return tool
 
 
 class Agent:
@@ -193,6 +217,10 @@ class Agent:
                     self.on_chat("Остановлено.")
                     self._publish_context(settings)
                     return
+                running = tool_running_label(call.name, call.arguments)
+                ask_mark = " · Ask" if self._agent_mode == "ask" else ""
+                self.on_status(f"Шаг {step} из {max_steps} · {running}…{ask_mark}")
+                self.on_journal(f"{running}: выполняется…")
                 outcome = self.toolbox.execute(call.name, call.arguments)
                 self.on_journal(outcome.journal)
                 self.provider.add_tool_result(call.id, call.name, outcome.model_text, outcome.images)

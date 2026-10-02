@@ -759,11 +759,26 @@ class ProjectRulesTests(unittest.TestCase):
             system = agent._system()
             self.assertIn("Правила проекта", system)
             self.assertIn("Пиши кратко.", system)
+            self.assertIn("команда пресета", system)
+            self.assertIn("npm test", system)
             self.assertIn("Режим: Agent", system)
             agent._agent_mode = "ask"
             ask_system = agent._system()
             self.assertIn("Режим: Ask", ask_system)
             self.assertIn("Пиши кратко.", ask_system)
+
+
+class ToolRunningLabelTests(unittest.TestCase):
+    def test_tool_running_label(self):
+        from project_agent.agent import tool_running_label
+
+        self.assertEqual(tool_running_label("browser", {"action": "navigate"}), "browser navigate")
+        self.assertEqual(
+            tool_running_label("call_mcp_tool", {"server": "playwright", "tool": "browser_snapshot"}),
+            "playwright/browser_snapshot",
+        )
+        self.assertEqual(tool_running_label("run_tests", {}), "run_tests")
+        self.assertEqual(tool_running_label("read_file", {"path": "a.py"}), "read_file a.py")
 
 
 class AgentModeTests(unittest.TestCase):
@@ -1477,7 +1492,7 @@ class AgentLoopTests(unittest.TestCase):
                     },
                 )
 
-            chats, journals, contexts = [], [], []
+            chats, journals, contexts, statuses = [], [], [], []
             vault = SecretVault()
             hub = McpHub()
             box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
@@ -1487,7 +1502,7 @@ class AgentLoopTests(unittest.TestCase):
                 hub,
                 chats.append,
                 journals.append,
-                lambda _status: None,
+                statuses.append,
                 lambda used, limit, from_api=False: contexts.append((used, limit, from_api)),
             )
             try:
@@ -1515,7 +1530,9 @@ class AgentLoopTests(unittest.TestCase):
             combined = "\n".join(bodies)
             self.assertNotIn(SECRET, combined)
             self.assertNotIn(KEY, combined)
+            self.assertTrue(any("выполняется" in line for line in journals))
             self.assertTrue(any("read_file" in line for line in journals))
+            self.assertTrue(any("read_file" in line and "…" in line for line in statuses))
             self.assertTrue(any("готово" in line for line in chats))
             self.assertTrue(contexts)
             self.assertEqual(contexts[-1][1], 256000)
