@@ -31,11 +31,17 @@ MAX_FIX_ROUNDS = 10
 
 @dataclass
 class TestRun:
-    command: list[str]
+    command: list[str] | str
     code: int | None
     output: str
     timed_out: bool
     stopped: bool
+
+
+def format_command(command: list[str] | str) -> str:
+    if isinstance(command, str):
+        return command
+    return " ".join(command)
 
 
 def normalize_preset(raw) -> str:
@@ -105,14 +111,32 @@ def python_command() -> list[str]:
     raise ValueError("для exe нужен Python в PATH (python или py)")
 
 
-def npm_command() -> list[str]:
-    found = shutil.which("npm")
+def resolve_npm() -> str:
+    if os.name == "nt":
+        found = shutil.which("npm.cmd") or shutil.which("npm")
+    else:
+        found = shutil.which("npm")
     if not found:
         raise ValueError("для пресета npm test нужен npm в PATH")
-    return [found]
+    return found
 
 
-def preset_command(preset: str) -> list[str]:
+def npm_test_command() -> list[str] | str:
+    found = resolve_npm()
+    if os.name == "nt":
+        # .cmd нельзя через CreateProcess (193). Нужен cmd /c.
+        # Важно: одна строка целиком. Если передать list, Popen снова
+        # вызовет list2cmdline и экранирует кавычки в пути с пробелами.
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        return (
+            subprocess.list2cmdline([comspec, "/d", "/c"])
+            + " "
+            + subprocess.list2cmdline(["call", found, "test"])
+        )
+    return [found, "test"]
+
+
+def preset_command(preset: str) -> list[str] | str:
     preset = normalize_preset(preset)
     if not preset:
         raise ValueError("пресет тестов выключен в настройках")
@@ -121,7 +145,7 @@ def preset_command(preset: str) -> list[str]:
     if preset == "pytest":
         return [*python_command(), "-m", "pytest", "-q"]
     if preset == "npm":
-        return [*npm_command(), "test"]
+        return npm_test_command()
     raise ValueError("неизвестный пресет тестов")
 
 

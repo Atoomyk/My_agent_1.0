@@ -23,6 +23,7 @@ from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is
 from project_agent.testing import (
     LABEL_BY_PRESET,
     fail_fingerprint,
+    format_command,
     normalize_fix_rounds,
     normalize_preset,
     normalize_timeout,
@@ -676,7 +677,7 @@ class Toolbox:
         if result.timed_out:
             body = (
                 f"Таймаут {timeout} с. Запуск {self._test_runs}/{rounds}.\n"
-                f"Команда: {' '.join(result.command)}\n\n{result.output}"
+                f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
             return ToolOutcome(body + self._touched_suffix(), f"run_tests {label}: таймаут {self._test_runs}/{rounds}")
         code = 0 if result.code is None else int(result.code)
@@ -689,7 +690,7 @@ class Toolbox:
                     f"СТОП: {status} — то же падение, что в предыдущем запуске. "
                     f"Запуск {self._test_runs}/{rounds}. Больше не вызывай инструменты; "
                     f"опиши проблему человеку и перечисли тронутые файлы.\n"
-                    f"Команда: {' '.join(result.command)}\n\n{result.output}"
+                    f"Команда: {format_command(result.command)}\n\n{result.output}"
                 ).strip()
                 return ToolOutcome(
                     body + self._touched_suffix(),
@@ -700,7 +701,7 @@ class Toolbox:
             self._last_fail_key = ""
         body = (
             f"{status}. Запуск {self._test_runs}/{rounds}.\n"
-            f"Команда: {' '.join(result.command)}\n\n{result.output}"
+            f"Команда: {format_command(result.command)}\n\n{result.output}"
         ).strip()
         return ToolOutcome(
             body + self._touched_suffix(),

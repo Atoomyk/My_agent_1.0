@@ -397,13 +397,36 @@ class TestRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             preset_command("")
         from unittest import mock
+        import subprocess as sp
 
-        with mock.patch("project_agent.testing.shutil.which", return_value=r"C:\npm.cmd"):
-            npm_cmd = preset_command("npm")
-        self.assertEqual(npm_cmd, [r"C:\npm.cmd", "test"])
+        npm_path = r"C:\Program Files\nodejs\npm.cmd"
+
+        def which_win(name):
+            if name == "npm.cmd":
+                return npm_path
+            return None
+
+        with mock.patch("project_agent.testing.shutil.which", side_effect=which_win):
+            with mock.patch("project_agent.testing.os.name", "nt"):
+                with mock.patch.dict(os.environ, {"COMSPEC": r"C:\Windows\System32\cmd.exe"}, clear=False):
+                    npm_cmd = preset_command("npm")
+        self.assertIsInstance(npm_cmd, str)
+        expected = (
+            sp.list2cmdline([r"C:\Windows\System32\cmd.exe", "/d", "/c"])
+            + " "
+            + sp.list2cmdline(["call", npm_path, "test"])
+        )
+        self.assertEqual(npm_cmd, expected)
+        self.assertIn('"C:\\Program Files\\nodejs\\npm.cmd"', npm_cmd)
+        self.assertNotIn('\\"', npm_cmd)
+        with mock.patch("project_agent.testing.shutil.which", return_value="/usr/bin/npm"):
+            with mock.patch("project_agent.testing.os.name", "posix"):
+                unix_cmd = preset_command("npm")
+        self.assertEqual(unix_cmd, ["/usr/bin/npm", "test"])
         with mock.patch("project_agent.testing.shutil.which", return_value=None):
-            with self.assertRaises(ValueError):
-                preset_command("npm")
+            with mock.patch("project_agent.testing.os.name", "posix"):
+                with self.assertRaises(ValueError):
+                    preset_command("npm")
         long = "a" * 20_000 + "MID" + "b" * 20_000
         clipped = clip_output(long, 100)
         self.assertLessEqual(len(clipped), 110)
