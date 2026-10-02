@@ -52,6 +52,19 @@ class SecretTests(unittest.TestCase):
         self.assertNotIn(SECRET, hidden_env)
         self.assertIn("PORT=3000", hidden_env)
         self.assertEqual(vault.restore(hidden_env), env)
+        commented = (
+            "# just a note\n"
+            "#SFERUM_TOKEN_LRMIAC=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvcmdhbml6YXRpb25faWQiOjI5Njc1NCwidmVuZG9yIjoid\n"
+            "# API_KEY=supersecretvalue\n"
+            "# PORT=3000\n"
+        )
+        hidden_commented = vault.redact(commented, Path(".env"))
+        self.assertNotIn("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", hidden_commented)
+        self.assertNotIn(SECRET, hidden_commented)
+        self.assertIn("# just a note", hidden_commented)
+        self.assertIn("# PORT=3000", hidden_commented)
+        self.assertIn("#SFERUM_TOKEN_LRMIAC=", hidden_commented)
+        self.assertEqual(vault.restore(hidden_commented), commented)
         pem = "-----BEGIN PRIVATE KEY-----\nABCSECRET\n-----END PRIVATE KEY-----\n"
         hidden_pem = vault.redact(pem)
         self.assertNotIn("ABCSECRET", hidden_pem)
@@ -668,6 +681,38 @@ class ProjectRulesTests(unittest.TestCase):
             system = agent._system()
             self.assertIn("Правила проекта", system)
             self.assertIn("Пиши кратко.", system)
+            self.assertIn("Режим: Agent", system)
+            agent._agent_mode = "ask"
+            ask_system = agent._system()
+            self.assertIn("Режим: Ask", ask_system)
+            self.assertIn("Пиши кратко.", ask_system)
+
+
+class AgentModeTests(unittest.TestCase):
+    def test_tools_filter_and_ask_blocks_writes(self):
+        from project_agent.tools import ASK_TOOL_NAMES, normalize_agent_mode, tools_for_mode
+
+        self.assertEqual(normalize_agent_mode("ASK"), "ask")
+        self.assertEqual(normalize_agent_mode("nope"), "agent")
+        ask_names = {spec["name"] for spec in tools_for_mode("ask")}
+        self.assertEqual(ask_names, set(ASK_TOOL_NAMES))
+        self.assertNotIn("write_file", ask_names)
+        self.assertNotIn("browser", ask_names)
+        agent_names = {spec["name"] for spec in tools_for_mode("agent")}
+        self.assertIn("write_file", agent_names)
+        self.assertIn("browser", agent_names)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            settings = {"api_key": "", "mcp_servers": [], "agent_mode": "ask"}
+            box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: settings)
+            box.set_root(root)
+            blocked = box.execute("write_file", {"path": "a.py", "content": "x=1\n", "summary": "x"})
+            self.assertIn("Ask", blocked.model_text)
+            self.assertFalse((root / "a.py").exists())
+            commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
+            self.assertIn("Ask", commit.model_text)
 
 
 class McpTests(unittest.TestCase):
@@ -849,6 +894,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(loaded["api_key"], "unit-test-key-123456")
             self.assertEqual(loaded["model"], "demo")
             self.assertEqual(loaded["profiles"], [])
+            self.assertEqual(loaded["agent_mode"], "agent")
+            data["agent_mode"] = "ask"
             data["model"] = "other"
             data["active_profile"] = "OpenRouter"
             data["profiles"] = [
@@ -865,6 +912,7 @@ class ConfigTests(unittest.TestCase):
             save_config(data, path)
             loaded, error = load_config(path)
             self.assertIsNone(error)
+            self.assertEqual(loaded["agent_mode"], "ask")
             self.assertEqual(loaded["active_profile"], "OpenRouter")
             self.assertEqual(loaded["model"], "openrouter/free")
             self.assertEqual(loaded["max_steps"], 10)
@@ -1018,13 +1066,27 @@ class AgentLoopTests(unittest.TestCase):
                     }
                 else:
                     message = {"role": "assistant", "content": "готово"}
-                return httpx.Response(200, json={"choices": [{"message": message}]})
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"message": message}],
+                        "usage": {"prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240},
+                    },
+                )
 
-            chats, journals = [], []
+            chats, journals, contexts = [], [], []
             vault = SecretVault()
             hub = McpHub()
             box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
-            agent = Agent(vault, box, hub, chats.append, journals.append, lambda _status: None)
+            agent = Agent(
+                vault,
+                box,
+                hub,
+                chats.append,
+                journals.append,
+                lambda _status: None,
+                lambda used, limit, from_api=False: contexts.append((used, limit, from_api)),
+            )
             try:
                 agent.set_root(root)
                 provider = OpenAIProvider()
@@ -1034,7 +1096,14 @@ class AgentLoopTests(unittest.TestCase):
                 agent.run_turn(
                     "прочитай note.py",
                     [],
-                    {"provider": "openai", "model": "m", "api_key": "", "base_url": "http://example.test/v1", "mcp_servers": []},
+                    {
+                        "provider": "openai",
+                        "model": "m",
+                        "api_key": "",
+                        "base_url": "http://example.test/v1",
+                        "mcp_servers": [],
+                        "context_limit": 256000,
+                    },
                     threading.Event(),
                 )
             finally:
@@ -1045,6 +1114,37 @@ class AgentLoopTests(unittest.TestCase):
             self.assertNotIn(KEY, combined)
             self.assertTrue(any("read_file" in line for line in journals))
             self.assertTrue(any("готово" in line for line in chats))
+            self.assertTrue(contexts)
+            self.assertEqual(contexts[-1][1], 256000)
+
+
+class ContextUsageTests(unittest.TestCase):
+    def test_parse_estimate_and_flatten(self):
+        from project_agent.context_usage import (
+            estimate_tokens,
+            flatten_messages_for_summary,
+            format_context_detail,
+            normalize_context_limit,
+            parse_prompt_tokens,
+        )
+
+        self.assertEqual(normalize_context_limit(None), 256000)
+        self.assertEqual(normalize_context_limit(100), 8000)
+        self.assertEqual(parse_prompt_tokens({"usage": {"prompt_tokens": 321}}), 321)
+        self.assertEqual(parse_prompt_tokens({"usage": {"input_tokens": 99}}), 99)
+        self.assertIsNone(parse_prompt_tokens({"usage": {}}))
+        est = estimate_tokens("sys", [{"role": "user", "content": "привет мир"}], [{"name": "read_file"}])
+        self.assertGreater(est, 5)
+        flat = flatten_messages_for_summary(
+            [
+                {"role": "user", "content": "задача"},
+                {"role": "assistant", "content": "ок", "tool_calls": [{"function": {"name": "read_file"}}]},
+                {"role": "tool", "content": "code here"},
+            ]
+        )
+        self.assertIn("user:", flat)
+        self.assertIn("read_file", flat)
+        self.assertIn("%", format_context_detail(128000, 256000, True))
 
 
 SERVER = """

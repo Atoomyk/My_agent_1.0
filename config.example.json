@@ -15,5 +15,7 @@
   "test_fix_rounds": 3,
   "active_profile": "",
   "profiles": [],
-  "mcp_servers": []
+  "mcp_servers": [],
+  "agent_mode": "agent",
+  "context_limit": 256000
 }

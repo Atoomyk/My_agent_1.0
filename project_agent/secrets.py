@@ -12,7 +12,8 @@ PEM_RE = re.compile(
 PREFIX_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{20,}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|"
     r"gho_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9\-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
-    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,})"
+    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+)?)"
 )
 URL_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)@", re.I)
 BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9\-._~+/]{12,}={0,2})")
@@ -28,6 +29,7 @@ QUOTED_RE = re.compile(
     """
 )
 ENV_LINE_RE = re.compile(r"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(.*)$")
+ENV_COMMENT_RE = re.compile(r"^(\s*#+\s*)(.*)$")
 JSON_VALUE_RE = re.compile(r'(:\s*")((?:\\.|[^"\\])*)(")')
 
 JSON_SECRET_NAMES = {
@@ -181,8 +183,13 @@ class SecretVault:
                 body, newline = body[:-2], "\r\n"
             elif body.endswith("\n"):
                 body, newline = body[:-1], "\n"
-            matched = ENV_LINE_RE.match(body)
-            if not matched or body.lstrip().startswith("#"):
+            comment_prefix = ""
+            assignment = body
+            commented = ENV_COMMENT_RE.match(body)
+            if commented:
+                comment_prefix, assignment = commented.group(1), commented.group(2)
+            matched = ENV_LINE_RE.match(assignment)
+            if not matched:
                 lines.append(line)
                 continue
             prefix, raw = matched.group(1), matched.group(2)
@@ -195,7 +202,7 @@ class SecretVault:
             if not _should_hide_env(inner):
                 lines.append(line)
                 continue
-            lines.append(f"{prefix}{quote}{self.take(inner)}{quote}{newline}")
+            lines.append(f"{comment_prefix}{prefix}{quote}{self.take(inner)}{quote}{newline}")
         return "".join(lines)
 
     def _redact_json(self, text: str) -> str:

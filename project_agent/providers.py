@@ -27,9 +27,10 @@ class ToolCall:
 
 
 class ModelTurn:
-    def __init__(self, text: str, tool_calls: list[ToolCall]) -> None:
+    def __init__(self, text: str, tool_calls: list[ToolCall], prompt_tokens: int | None = None) -> None:
         self.text = text
         self.tool_calls = tool_calls
+        self.prompt_tokens = prompt_tokens
 
 
 def chat_url(base: str) -> str:
@@ -95,6 +96,7 @@ class _HttpProvider:
         self.system = ""
         self.messages: list[dict] = []
         self.settings: dict = {}
+        self.last_prompt_tokens: int | None = None
         self._http: httpx.Client | None = None
         self._transport = None
         self._cancel = threading.Event()
@@ -105,6 +107,7 @@ class _HttpProvider:
     def reset(self, system: str) -> None:
         self.system = system
         self.messages = []
+        self.last_prompt_tokens = None
 
     def configure(self, settings: dict) -> None:
         self.settings = settings
@@ -119,6 +122,20 @@ class _HttpProvider:
     def scrub_inplace(self, redact) -> None:
         self.system = redact(self.system)
         self.messages = scrub_outbound(self.messages, redact)
+
+    def message_count(self) -> int:
+        return len(self.messages)
+
+    def _note_usage(self, data: dict) -> int | None:
+        from project_agent.context_usage import parse_prompt_tokens
+
+        tokens = parse_prompt_tokens(data)
+        if tokens is not None:
+            self.last_prompt_tokens = tokens
+        return tokens
+
+    def summarize(self, redact) -> str:
+        raise NotImplementedError
 
     def _client(self) -> httpx.Client:
         if self._http is None or self._http.is_closed:
@@ -178,6 +195,7 @@ class OpenAIProvider(_HttpProvider):
         if key:
             headers["Authorization"] = f"Bearer {key}"
         data = self._post(chat_url(self.settings.get("base_url") or ""), payload, headers, redact)
+        prompt_tokens = self._note_usage(data)
         try:
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
@@ -197,7 +215,44 @@ class OpenAIProvider(_HttpProvider):
         if message.get("tool_calls"):
             stored["tool_calls"] = message["tool_calls"]
         self.messages.append(stored)
-        return ModelTurn(text, calls)
+        return ModelTurn(text, calls, prompt_tokens)
+
+    def summarize(self, redact) -> str:
+        from project_agent.context_usage import build_summary_user_text, flatten_messages_for_summary
+
+        if self._cancel.is_set():
+            raise Stopped()
+        if len(self.messages) < 3:
+            raise ApiError("Слишком мало истории для сжатия")
+        self.scrub_inplace(redact)
+        transcript = flatten_messages_for_summary(self.messages)
+        payload = {
+            "model": self.settings.get("model") or "",
+            "messages": [
+                {"role": "system", "content": "Ты сжимаешь историю чата для продолжения работы над проектом."},
+                {"role": "user", "content": build_summary_user_text(transcript)},
+            ],
+        }
+        headers = {"Content-Type": "application/json"}
+        key = (self.settings.get("api_key") or "").strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        data = self._post(chat_url(self.settings.get("base_url") or ""), payload, headers, redact)
+        self._note_usage(data)
+        try:
+            summary = _text_of(data["choices"][0]["message"].get("content")).strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            raise ApiError("непонятный ответ API при сжатии")
+        if not summary:
+            raise ApiError("пустая сводка")
+        self.messages = [
+            {
+                "role": "user",
+                "content": "Сводка предыдущего разговора (контекст сжат):\n\n" + summary,
+            },
+            {"role": "assistant", "content": "Принял сводку. Продолжаем с учётом неё."},
+        ]
+        return summary
 
 
 class AnthropicProvider(_HttpProvider):
@@ -240,6 +295,7 @@ class AnthropicProvider(_HttpProvider):
             "x-api-key": (self.settings.get("api_key") or "").strip(),
         }
         data = self._post(messages_url(self.settings.get("base_url") or ""), payload, headers, redact)
+        prompt_tokens = self._note_usage(data)
         blocks = data.get("content")
         if not isinstance(blocks, list):
             raise ApiError("непонятный ответ API")
@@ -256,7 +312,49 @@ class AnthropicProvider(_HttpProvider):
                     raw_input = {"value": raw_input}
                 calls.append(ToolCall(str(block.get("id") or ""), str(block.get("name") or ""), raw_input))
         self.messages.append({"role": "assistant", "content": blocks})
-        return ModelTurn("\n".join(part for part in text_parts if part), calls)
+        return ModelTurn("\n".join(part for part in text_parts if part), calls, prompt_tokens)
+
+    def summarize(self, redact) -> str:
+        from project_agent.context_usage import build_summary_user_text, flatten_messages_for_summary
+
+        if self._cancel.is_set():
+            raise Stopped()
+        if len(self.messages) < 3:
+            raise ApiError("Слишком мало истории для сжатия")
+        self.scrub_inplace(redact)
+        transcript = flatten_messages_for_summary(self.messages)
+        payload = {
+            "model": self.settings.get("model") or "",
+            "max_tokens": 2048,
+            "system": "Ты сжимаешь историю чата для продолжения работы над проектом.",
+            "messages": [{"role": "user", "content": build_summary_user_text(transcript)}],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": (self.settings.get("api_key") or "").strip(),
+        }
+        data = self._post(messages_url(self.settings.get("base_url") or ""), payload, headers, redact)
+        self._note_usage(data)
+        blocks = data.get("content")
+        if not isinstance(blocks, list):
+            raise ApiError("непонятный ответ API при сжатии")
+        summary = "\n".join(
+            str(block.get("text") or "") for block in blocks if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if not summary:
+            raise ApiError("пустая сводка")
+        self.messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Сводка предыдущего разговора (контекст сжат):\n\n" + summary}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Принял сводку. Продолжаем с учётом неё."}],
+            },
+        ]
+        return summary
 
 
 def build_provider(kind: str):

@@ -21,6 +21,7 @@ from project_agent.config import (
     config_dir,
     load_config,
     needs_api_key,
+    save_agent_mode,
     save_config,
     save_prompt_height,
     save_theme,
@@ -56,6 +57,11 @@ PROVIDER_LABELS = {
     "Anthropic": "anthropic",
 }
 LABEL_BY_PROVIDER = {value: key for key, value in PROVIDER_LABELS.items()}
+MODE_LABELS = {
+    "Agent": "agent",
+    "Ask": "ask",
+}
+LABEL_BY_MODE = {value: key for key, value in MODE_LABELS.items()}
 THEME_LABELS = {
     "Тёмная": "dark",
     "Светлая": "light",
@@ -80,6 +86,9 @@ SEND_HOVER = ("#2b2724", "#f7f1e8")
 ON_SEND = ("#f6f1ea", "#1c1916")
 CODE_BG = ("#efe9e1", "#24201c")
 CODE_TEXT = ("#0f7b8a", "#6cc7d3")
+CTX_OK = ("#5a8f6a", "#6aab7a")
+CTX_WARN = ("#c48a2e", "#d4a04a")
+CTX_FULL = ("#c45a4a", "#d46a5a")
 CHAT_COLUMN = 820
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
@@ -811,6 +820,7 @@ class App(ctk.CTk):
         self.active_profile = ""
         self.profile_var = ctk.StringVar(value=_NO_PROFILE)
         self.footer_profile_menu: ctk.CTkOptionMenu | None = None
+        self.mode_menu: ctk.CTkOptionMenu | None = None
         self._chat_pad = 0
         self.chat_id: str | None = None
         self.chat_title = ""
@@ -826,6 +836,7 @@ class App(ctk.CTk):
             self.write_chat,
             self.write_journal,
             self.set_status,
+            self._on_context,
         )
         self.theme = "dark"
         self.theme_var = ctk.StringVar(value="Тёмная")
@@ -834,6 +845,11 @@ class App(ctk.CTk):
         self.editor_saved = ""
         self.editor_width = 420
         self.prompt_height = 0
+        self.agent_mode = "agent"
+        self.agent_mode_var = ctk.StringVar(value="Agent")
+        self.context_limit = 256000
+        self.context_used = 0
+        self.context_from_api = False
         self.provider_var = ctk.StringVar(value="OpenAI-совместимый")
         self.base_url_var = ctk.StringVar()
         self.model_var = ctk.StringVar()
@@ -1101,7 +1117,7 @@ class App(ctk.CTk):
         footer = ctk.CTkFrame(bottom, fg_color="transparent")
         self.footer = footer
         footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 8))
-        footer.grid_columnconfigure(2, weight=1)
+        footer.grid_columnconfigure(4, weight=1)
         self.footer_profile_menu = ctk.CTkOptionMenu(
             footer,
             variable=self.profile_var,
@@ -1122,6 +1138,29 @@ class App(ctk.CTk):
             dropdown_font=self._font(12),
         )
         self.footer_profile_menu.grid(row=0, column=0, sticky="w")
+        self.mode_menu = ctk.CTkOptionMenu(
+            footer,
+            variable=self.agent_mode_var,
+            values=list(MODE_LABELS),
+            command=self._on_mode_pick,
+            height=26,
+            width=88,
+            corner_radius=8,
+            dynamic_resizing=False,
+            fg_color=INK,
+            button_color=INK,
+            button_hover_color=BUTTON_HOVER,
+            text_color=MUTED,
+            font=self._font(12),
+            dropdown_fg_color=PANEL,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=SELECT,
+            dropdown_font=self._font(12),
+        )
+        self.mode_menu.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        quiet_button(footer, "Сжать", self.compress_context, width=72).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
+        )
         self.model_label = ctk.CTkLabel(
             footer,
             text="модель не выбрана",
@@ -1129,9 +1168,29 @@ class App(ctk.CTk):
             text_color=MUTED,
             font=self._font(11),
         )
-        self.model_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.model_label.grid(row=0, column=3, sticky="w", padx=(10, 0))
+        ctx = ctk.CTkFrame(footer, fg_color="transparent")
+        ctx.grid(row=0, column=4, sticky="e", padx=(8, 8))
+        self.context_label = ctk.CTkLabel(
+            ctx,
+            text="0%",
+            anchor="e",
+            text_color=MUTED,
+            font=self._font(11),
+        )
+        self.context_label.pack(side="left", padx=(0, 6))
+        self.context_bar = ctk.CTkProgressBar(
+            ctx,
+            width=96,
+            height=8,
+            corner_radius=4,
+            progress_color=CTX_OK,
+            fg_color=BORDER,
+        )
+        self.context_bar.pack(side="left")
+        self.context_bar.set(0)
         self.status_label = ctk.CTkLabel(footer, text="Готово", anchor="e", text_color=MUTED, font=self._font(11))
-        self.status_label.grid(row=0, column=2, sticky="e")
+        self.status_label.grid(row=0, column=5, sticky="e")
 
     def _font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
         return (family, size, weight)
@@ -1737,6 +1796,11 @@ class App(ctk.CTk):
         self.test_preset_var.set(LABEL_BY_PRESET.get(self.test_preset, "Выключено"))
         self.test_timeout_var.set(str(normalize_timeout(data.get("test_timeout"))))
         self.test_fix_rounds_var.set(str(normalize_fix_rounds(data.get("test_fix_rounds"))))
+        self._set_agent_mode(data.get("agent_mode") or "agent", persist=False)
+        from project_agent.context_usage import normalize_context_limit
+
+        self.context_limit = normalize_context_limit(data.get("context_limit"))
+        self._apply_context(0, self.context_limit, False)
         self.mcp_servers = list(data["mcp_servers"])
         self.saved_servers = list(data["mcp_servers"])
         self._render_mcp()
@@ -1887,7 +1951,80 @@ class App(ctk.CTk):
         settings["test_preset"] = PRESET_LABELS.get(self.test_preset_var.get(), self.test_preset)
         settings["test_timeout"] = normalize_timeout(self.test_timeout_var.get())
         settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
+        settings["agent_mode"] = self.agent_mode
+        settings["context_limit"] = self.context_limit
         return settings
+
+    def _set_agent_mode(self, mode: str, persist: bool = True) -> None:
+        from project_agent.tools import normalize_agent_mode
+
+        mode = normalize_agent_mode(mode)
+        self.agent_mode = mode
+        label = LABEL_BY_MODE.get(mode, "Agent")
+        if self.agent_mode_var.get() != label:
+            self.agent_mode_var.set(label)
+        if persist:
+            try:
+                save_agent_mode(mode)
+            except Exception as exc:
+                self.write_chat(f"Не удалось сохранить режим: {exc}")
+
+    def _on_mode_pick(self, choice: str) -> None:
+        self._set_agent_mode(MODE_LABELS.get(choice, "agent"), persist=True)
+
+    def _on_context(self, used: int, limit: int, from_api: bool = False) -> None:
+        self.after(0, lambda: self._apply_context(used, limit, from_api))
+
+    def _apply_context(self, used: int, limit: int, from_api: bool) -> None:
+        from project_agent.context_usage import (
+            FULL_RATIO,
+            WARN_RATIO,
+            context_ratio,
+            format_context_detail,
+            normalize_context_limit,
+        )
+
+        self.context_limit = normalize_context_limit(limit)
+        self.context_used = max(0, int(used or 0))
+        self.context_from_api = bool(from_api)
+        ratio = context_ratio(self.context_used, self.context_limit)
+        if hasattr(self, "context_bar") and self.context_bar is not None:
+            self.context_bar.set(ratio)
+            color = CTX_OK
+            if ratio >= FULL_RATIO:
+                color = CTX_FULL
+            elif ratio >= WARN_RATIO:
+                color = CTX_WARN
+            self.context_bar.configure(progress_color=color)
+        if hasattr(self, "context_label") and self.context_label is not None:
+            self.context_label.configure(
+                text=format_context_detail(self.context_used, self.context_limit, self.context_from_api)
+            )
+
+    def compress_context(self) -> None:
+        if self.running:
+            return
+        if self.project is None:
+            self.write_chat("Сначала выберите папку проекта.")
+            return
+        settings = self.collect_settings()
+        if needs_api_key(settings["provider"], settings["base_url"], settings["api_key"]):
+            self.write_chat("Укажите API-ключ.")
+            return
+        self.running = True
+        self.stop_event = threading.Event()
+        self._show_running(True)
+        self.set_status("Сжатие контекста…")
+
+        def work() -> None:
+            try:
+                self.agent.compress_context(settings, self.stop_event)
+            except Exception as exc:
+                self.write_chat(f"Ошибка сжатия: {exc}")
+            finally:
+                self.after(0, self._finish)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def save_settings(self) -> None:
         self._persist("Настройки сохранены")
@@ -1953,6 +2090,7 @@ class App(ctk.CTk):
         self.transcript.clear()
         self._clear_box(self.chat)
         self.agent.reset_session(announce=False)
+        self._apply_context(0, self.context_limit, False)
         self._refresh_chat_list()
         self._fit_labels()
         self.set_status("Новый чат")

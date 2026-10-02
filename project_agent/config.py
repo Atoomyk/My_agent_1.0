@@ -37,6 +37,8 @@ def default_config() -> dict:
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
+        "agent_mode": "agent",
+        "context_limit": 256000,
     }
 
 
@@ -147,6 +149,18 @@ def _test_fix_rounds(raw) -> int:
     return normalize_fix_rounds(raw)
 
 
+def _agent_mode(raw) -> str:
+    from project_agent.tools import normalize_agent_mode
+
+    return normalize_agent_mode(raw)
+
+
+def _context_limit(raw) -> int:
+    from project_agent.context_usage import normalize_context_limit
+
+    return normalize_context_limit(raw)
+
+
 def _write_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -220,6 +234,8 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["test_preset"] = _test_preset(data.get("test_preset"))
     merged["test_timeout"] = _test_timeout(data.get("test_timeout"))
     merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
+    merged["context_limit"] = _context_limit(data.get("context_limit"))
     return merged, None
 
 
@@ -238,7 +254,25 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["test_preset"] = _test_preset(data.get("test_preset"))
     payload["test_timeout"] = _test_timeout(data.get("test_timeout"))
     payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
+    payload["context_limit"] = _context_limit(data.get("context_limit"))
     _write_config(path, payload)
+
+
+def save_agent_mode(mode: str, path: Path | None = None) -> None:
+    path = path or config_path()
+    mode = _agent_mode(mode)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(data, dict):
+            raise ValueError("config.json должен быть объектом")
+    else:
+        data = default_config()
+    data["agent_mode"] = mode
+    _write_config(path, data)
 
 
 def save_prompt_height(height: int, path: Path | None = None) -> None:

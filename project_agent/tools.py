@@ -216,6 +216,32 @@ TOOL_SPECS = [
     },
 ]
 
+ASK_TOOL_NAMES = frozenset(
+    {
+        "list_dir",
+        "read_file",
+        "search",
+        "view_image",
+        "web_search",
+        "project_index",
+        "git",
+        "list_mcp_tools",
+    }
+)
+AGENT_MODES = ("agent", "ask")
+
+
+def normalize_agent_mode(raw) -> str:
+    value = str(raw or "agent").strip().lower()
+    return value if value in AGENT_MODES else "agent"
+
+
+def tools_for_mode(mode: str) -> list[dict]:
+    mode = normalize_agent_mode(mode)
+    if mode != "ask":
+        return list(TOOL_SPECS)
+    return [spec for spec in TOOL_SPECS if spec["name"] in ASK_TOOL_NAMES]
+
 
 @dataclass
 class ToolOutcome:
@@ -275,12 +301,19 @@ class Toolbox:
 
     def execute(self, name: str, arguments) -> ToolOutcome:
         try:
-            arguments = _arguments(arguments)
-            handler = getattr(self, f"_tool_{name}", None)
-            if handler is None:
-                outcome = ToolOutcome(f"Неизвестный инструмент: {name}", f"{name}: неизвестный инструмент")
+            mode = normalize_agent_mode((self.settings() or {}).get("agent_mode"))
+            if mode == "ask" and name not in ASK_TOOL_NAMES:
+                outcome = ToolOutcome(
+                    f"Режим Ask: инструмент «{name}» недоступен. Переключитесь в Agent, чтобы менять проект.",
+                    f"{name}: запрещено в Ask",
+                )
             else:
-                outcome = handler(arguments)
+                arguments = _arguments(arguments)
+                handler = getattr(self, f"_tool_{name}", None)
+                if handler is None:
+                    outcome = ToolOutcome(f"Неизвестный инструмент: {name}", f"{name}: неизвестный инструмент")
+                else:
+                    outcome = handler(arguments)
         except Exception as exc:
             message = self._scrub(str(exc))[:300]
             outcome = ToolOutcome(f"Ошибка {name}: {message}", f"{name}: ошибка")
@@ -677,6 +710,11 @@ class Toolbox:
     def _tool_git(self, args: dict) -> ToolOutcome:
         root = self._require_root()
         action = str(args.get("action") or "").strip().lower()
+        if action == "commit" and normalize_agent_mode((self.settings() or {}).get("agent_mode")) == "ask":
+            return ToolOutcome(
+                "Режим Ask: git commit недоступен. Переключитесь в Agent.",
+                "git commit: запрещено в Ask",
+            )
         if action == "status":
             try:
                 result = git_status(root)
