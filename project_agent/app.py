@@ -7,6 +7,7 @@ import shlex
 import threading
 import traceback
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter import font as tkfont
@@ -94,10 +95,29 @@ _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
 _USER_ATTACH_LINE = re.compile(r"^\((?:папки|файлы): .+\)$|^\(изображений: \d+\)$")
+_CHAT_STAMP = re.compile(r"\n(\d{2}:\d{2})\s*$")
+
+
+def split_chat_stamp(text: str) -> tuple[str, str | None]:
+    body = (text or "").rstrip()
+    match = _CHAT_STAMP.search(body)
+    if not match:
+        return body, None
+    return body[: match.start()].rstrip(), match.group(1)
+
+
+def with_chat_stamp(text: str) -> str:
+    body, stamp = split_chat_stamp(text)
+    if not body:
+        return body
+    if stamp:
+        return f"{body}\n{stamp}"
+    return f"{body}\n{datetime.now().strftime('%H:%M')}"
 
 
 def chat_role(text: str) -> str:
-    body = text.lstrip()
+    body, _ = split_chat_stamp(text)
+    body = body.lstrip()
     if body.startswith("Вы:"):
         return "user"
     if body.startswith("·"):
@@ -108,7 +128,7 @@ def chat_role(text: str) -> str:
 
 
 def chat_body(text: str, role: str | None = None) -> str:
-    body = text.rstrip()
+    body, _ = split_chat_stamp(text)
     role = role or chat_role(body)
     if role != "user":
         return body
@@ -120,6 +140,7 @@ def chat_body(text: str, role: str | None = None) -> str:
 
 def user_copy_text(body: str) -> str:
     """Набранный запрос без хвостовых пометок вложений."""
+    body, _ = split_chat_stamp(body)
     lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     while lines and _USER_ATTACH_LINE.match(lines[-1].strip()):
         lines.pop()
@@ -2503,7 +2524,7 @@ class App(ctk.CTk):
         )
         self._render_mcp()
         self.write_chat(
-            "Добавлен MCP playwright (npx @playwright/mcp@latest). Нужен Node.js. Сохраните настройки."
+            "Добавлен MCP playwright (npx -y @playwright/mcp@latest). Нужен Node.js. Сохраните настройки."
         )
 
     def remove_mcp(self) -> None:
@@ -2716,13 +2737,15 @@ class App(ctk.CTk):
         return holder["ok"] and not self.stop_event.is_set()
 
     def write_chat(self, text: str) -> None:
-        self._remember(text)
-        self._append(self.chat, text)
+        line = with_chat_stamp(text)
+        self._remember(line)
+        self._append(self.chat, line)
 
     def write_retryable_error(self, text: str) -> None:
         self._can_retry = True
-        self._remember(text)
-        self.after(0, lambda line=text: self._append_error(line))
+        line = with_chat_stamp(text)
+        self._remember(line)
+        self.after(0, lambda line=line: self._append_error(line))
 
     def _forget_retry(self) -> None:
         self._retry_payload = None
@@ -2750,9 +2773,15 @@ class App(ctk.CTk):
         inner = box._textbox
         start = inner.index("end-1c")
         body = chat_body(text, "error")
+        _, stamp = split_chat_stamp(text)
         inner.insert("end", body + "\n")
         self._insert_retry_button(inner)
-        inner.tag_add("error", start, inner.index("end-1c"))
+        if stamp:
+            mark = inner.index("end-1c")
+            inner.insert("end", f"{stamp}\n\n", ("time",))
+            inner.tag_add("error", start, mark)
+        else:
+            inner.tag_add("error", start, inner.index("end-1c"))
         box.see("end")
 
     def _insert_retry_button(self, inner) -> None:
@@ -2945,6 +2974,13 @@ class App(ctk.CTk):
             spacing3=6,
         )
         inner.tag_configure("label", font=self._px_font(11), foreground=_tone(MUTED), spacing1=0, spacing3=2)
+        inner.tag_configure(
+            "time",
+            font=self._px_font(10),
+            foreground=_tone(MUTED),
+            spacing1=0,
+            spacing3=8,
+        )
         inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
         inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
         inner.tag_configure(
@@ -3017,11 +3053,18 @@ class App(ctk.CTk):
         set_clipboard(self.chat._textbox, body)
         self.set_status("Скопировано")
 
+    def _insert_time(self, inner, stamp: str | None) -> None:
+        if not stamp:
+            inner.insert("end", "\n")
+            return
+        inner.insert("end", f"{stamp}\n\n", ("time",))
+
     def _insert_block(self, box, text: str) -> None:
         inner = box._textbox
         start = inner.index("end-1c")
         role = self._role(text)
         body = chat_body(text, role)
+        _, stamp = split_chat_stamp(text)
         copy_text = ""
         if role == "user":
             inner.insert("end", "Вы\n", ("label",))
@@ -3031,10 +3074,9 @@ class App(ctk.CTk):
                 mark = inner.index("end-1c")
                 chip = self._make_copy_chip(copy_text, USER_BG)
                 inner.window_create("end", window=chip, padx=0, pady=2)
-                inner.insert("end", "\n\n")
-                inner.tag_add("usercopy", mark, inner.index("end-1c"))
-            else:
                 inner.insert("end", "\n")
+                inner.tag_add("usercopy", mark, inner.index("end-1c"))
+            self._insert_time(inner, stamp)
         elif role == "agent":
             inner.insert("end", "Ассистент\n", ("label",))
             for chunk, tag in chat_segments(body):
@@ -3044,14 +3086,15 @@ class App(ctk.CTk):
                 mark = inner.index("end-1c")
                 chip = self._make_copy_chip(body)
                 inner.window_create("end", window=chip, padx=0, pady=2)
-                inner.insert("end", "\n\n")
+                inner.insert("end", "\n")
                 inner.tag_add("copyrow", mark, inner.index("end-1c"))
-            else:
-                inner.insert("end", "\n\n")
+            self._insert_time(inner, stamp)
         elif role == "error":
-            inner.insert("end", body + "\n\n")
+            inner.insert("end", body + "\n")
+            self._insert_time(inner, stamp)
         else:
-            inner.insert("end", body + "\n\n")
+            inner.insert("end", body + "\n")
+            self._insert_time(inner, stamp)
         inner.tag_add(role, start, inner.index("end-1c"))
         if role == "user" and copy_text:
             self._user_spans.append((start, inner.index("end-1c"), copy_text))
@@ -3083,7 +3126,7 @@ class App(ctk.CTk):
         box = getattr(self, "chat", None)
         if box is None or not box.winfo_exists():
             if final and shown:
-                self._remember(shown)
+                self._remember(with_chat_stamp(shown))
             self._stream_open = False
             return
         if not shown and not self._stream_open:
@@ -3112,14 +3155,17 @@ class App(ctk.CTk):
             pass
         if final:
             if shown:
+                stamped = with_chat_stamp(shown)
+                _, stamp = split_chat_stamp(stamped)
                 inner.insert("end", "\n")
                 mark = inner.index("end-1c")
                 chip = self._make_copy_chip(shown)
                 inner.window_create("end", window=chip, padx=0, pady=2)
-                inner.insert("end", "\n\n")
+                inner.insert("end", "\n")
                 inner.tag_add("copyrow", mark, inner.index("end-1c"))
+                self._insert_time(inner, stamp)
                 inner.tag_add("agent", self._stream_origin, inner.index("end-1c"))
-                self._remember(shown)
+                self._remember(stamped)
             self._stream_open = False
         inner.see("end")
 

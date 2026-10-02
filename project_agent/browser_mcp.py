@@ -6,7 +6,7 @@ PLAYWRIGHT_SERVER_NAME = "playwright"
 PLAYWRIGHT_SERVER = {
     "name": PLAYWRIGHT_SERVER_NAME,
     "command": "npx",
-    "args": ["@playwright/mcp@latest"],
+    "args": ["-y", "@playwright/mcp@latest"],
     "env": {},
 }
 

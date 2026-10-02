@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
+
+INIT_TIMEOUT = 120
+LIST_TOOLS_TIMEOUT = 60
+STDERR_LIMIT = 4000
+NODE_CLIS = frozenset({"npx", "npm", "pnpm", "yarn"})
 
 
 class McpError(RuntimeError):
@@ -18,11 +25,14 @@ class _Waiter:
         self.error: Exception | None = None
 
     def succeed(self, message) -> None:
-        self.message = message
+        if not self.event.is_set():
+            self.message = message
         self.event.set()
 
     def fail(self, error: Exception) -> None:
-        self.error = error
+        # Не затирать уже пойманную причину (например close() → «закрыт»).
+        if self.error is None:
+            self.error = error
         self.event.set()
 
 
@@ -36,15 +46,19 @@ class McpClient:
         self._next_id = 1
         self._closed = False
         self._stderr = bytearray()
+        self._stdout_noise = bytearray()
         self._tools: list[dict] | None = None
+        self._argv_preview = ""
+        self._last_death: str | None = None
 
     def start(self) -> None:
         command = self.spec["command"]
         args = list(self.spec.get("args") or [])
-        argv = _argv(command, args)
+        argv = build_argv(command, args)
+        self._argv_preview = argv if isinstance(argv, str) else subprocess.list2cmdline(list(argv))
         env = os.environ.copy()
         env.update(self.spec.get("env") or {})
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        flags = _creation_flags(argv)
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -53,21 +67,27 @@ class McpClient:
                 stderr=subprocess.PIPE,
                 cwd=str(self.cwd) if self.cwd else None,
                 env=env,
+                bufsize=0,
                 creationflags=flags,
             )
         except OSError as exc:
             raise McpError(f"не удалось запустить сервер: {exc}") from exc
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._drain, daemon=True).start()
-        self.rpc(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "ProjectAgent", "version": "1.0"},
-            },
-            timeout=20,
-        )
+        try:
+            self.rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "ProjectAgent", "version": "1.0"},
+                },
+                timeout=INIT_TIMEOUT,
+            )
+        except McpError as exc:
+            detail = self._normalize_death(str(exc))
+            self.close()
+            raise McpError(detail) from exc
         self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def list_tools(self) -> list[dict]:
@@ -76,7 +96,7 @@ class McpClient:
         tools: list[dict] = []
         params: dict = {}
         for _ in range(10):
-            result = self.rpc("tools/list", params, timeout=30)
+            result = self.rpc("tools/list", params, timeout=LIST_TOOLS_TIMEOUT)
             tools.extend(result.get("tools") or [])
             cursor = result.get("nextCursor")
             if not cursor:
@@ -90,7 +110,7 @@ class McpClient:
 
     def rpc(self, method: str, params: dict | None, timeout: float) -> dict:
         if self._closed or self.proc is None:
-            raise McpError("MCP-сервер закрыт")
+            raise McpError(self._last_death or "MCP-сервер закрыт")
         request_id = self._next_id
         self._next_id += 1
         waiter = _Waiter()
@@ -98,10 +118,13 @@ class McpClient:
         self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
         if not waiter.event.wait(timeout):
             self._pending.pop(request_id, None)
-            raise McpError("таймаут MCP")
+            code = None if self.proc is None else self.proc.poll()
+            if code is not None:
+                raise McpError(self._death_detail(f"таймаут MCP (процесс завершился, code={code})"))
+            raise McpError(self._death_detail("таймаут MCP"))
         self._pending.pop(request_id, None)
         if waiter.error:
-            raise McpError(str(waiter.error))
+            raise McpError(self._normalize_death(str(waiter.error)))
         message = waiter.message or {}
         if "error" in message:
             error = message["error"]
@@ -114,6 +137,7 @@ class McpClient:
         self._closed = True
         proc = self.proc
         if proc is None:
+            self._fail_all(McpError(self._last_death or "MCP-сервер закрыт"))
             return
         if proc.poll() is None:
             proc.terminate()
@@ -121,6 +145,8 @@ class McpClient:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        # Сначала добрать stderr, потом закрывать трубы — иначе drain обрывается.
+        self._wait_stderr(0.6)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is None:
                 continue
@@ -128,10 +154,45 @@ class McpClient:
                 stream.close()
             except Exception:
                 pass
-        self._fail_all(McpError("MCP-сервер закрыт"))
+        self._fail_all(McpError(self._last_death or self._death_detail("MCP-сервер завершился")))
 
     def stderr_tail(self) -> str:
-        return self._stderr.decode("utf-8", "replace")[-200:]
+        err = self._stderr.decode("utf-8", "replace")[-STDERR_LIMIT:].strip()
+        out = self._stdout_noise.decode("utf-8", "replace")[-STDERR_LIMIT:].strip()
+        if err and out:
+            return f"{err}\nstdout: {out}"
+        if out and not err:
+            return f"stdout: {out}"
+        return err
+
+    def _wait_stderr(self, seconds: float = 0.5) -> None:
+        deadline = time.time() + max(0.0, seconds)
+        while time.time() < deadline:
+            time.sleep(0.05)
+            if self.proc is not None and self.proc.poll() is not None:
+                time.sleep(0.15)
+                return
+
+    def _death_detail(self, prefix: str) -> str:
+        self._wait_stderr()
+        code = None if self.proc is None else self.proc.poll()
+        tail = self.stderr_tail()
+        text = (prefix or "").strip()
+        if text.startswith("MCP-сервер закрыт"):
+            text = "MCP-сервер завершился" + text[len("MCP-сервер закрыт") :]
+        parts = [text.rstrip(" |")]
+        if code is not None and f"code={code}" not in parts[0]:
+            parts.append(f"code={code}")
+        if tail and f"stderr: {tail}" not in parts[0] and f"stdout: {tail}" not in parts[0]:
+            parts.append(f"stderr: {tail}" if not tail.startswith("stdout:") else tail)
+        elif not tail and self._argv_preview and "argv:" not in parts[0]:
+            parts.append(f"argv: {self._argv_preview[:240]}")
+        detail = " | ".join(part for part in parts if part)
+        self._last_death = detail
+        return detail
+
+    def _normalize_death(self, text: str) -> str:
+        return self._death_detail(text or "MCP-сервер завершился")
 
     def _fail_all(self, error: Exception) -> None:
         for waiter in list(self._pending.values()):
@@ -139,13 +200,15 @@ class McpClient:
         self._pending.clear()
 
     def _write(self, payload: dict) -> None:
+        """MCP stdio: одна JSON-RPC строка + \\n (не Content-Length/LSP)."""
         proc = self.proc
         if proc is None or proc.stdin is None:
             raise McpError("нет канала к MCP")
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        packet = f"Content-Length: {len(data)}\r\n\r\n".encode("ascii") + data
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if b"\n" in data:
+            raise McpError("MCP-сообщение содержит перевод строки")
         with self._write_lock:
-            proc.stdin.write(packet)
+            proc.stdin.write(data + b"\n")
             proc.stdin.flush()
 
     def _reader(self) -> None:
@@ -153,7 +216,7 @@ class McpClient:
             while not self._closed:
                 message = self._read_one()
                 if message is None:
-                    self._fail_all(McpError(self.stderr_tail() or "MCP-сервер завершился"))
+                    self._fail_all(McpError(self._death_detail("MCP-сервер завершился")))
                     return
                 if "method" in message and "id" in message:
                     self._reply(message)
@@ -186,6 +249,7 @@ class McpClient:
             line = proc.stdout.readline()
             if not line:
                 return None
+            # Совместимость со старыми серверами на Content-Length.
             if line.lower().startswith(b"content-length:"):
                 length = int(line.split(b":", 1)[1].strip())
                 while True:
@@ -197,8 +261,21 @@ class McpClient:
                     return None
                 return json.loads(body.decode("utf-8"))
             stripped = line.strip()
+            if not stripped:
+                continue
             if stripped.startswith(b"{"):
-                return json.loads(stripped.decode("utf-8"))
+                try:
+                    return json.loads(stripped.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._note_stdout(stripped)
+                    continue
+            self._note_stdout(stripped)
+
+    def _note_stdout(self, chunk: bytes) -> None:
+        self._stdout_noise.extend(chunk)
+        self._stdout_noise.extend(b"\n")
+        if len(self._stdout_noise) > STDERR_LIMIT:
+            del self._stdout_noise[:-STDERR_LIMIT]
 
     def _drain(self) -> None:
         proc = self.proc
@@ -210,16 +287,107 @@ class McpClient:
                 if not chunk:
                     return
                 self._stderr.extend(chunk)
-                if len(self._stderr) > 4000:
-                    del self._stderr[:-4000]
+                if len(self._stderr) > STDERR_LIMIT:
+                    del self._stderr[:-STDERR_LIMIT]
         except Exception:
             return
 
 
-def _argv(command: str, args: list[str]) -> list[str]:
-    if os.name == "nt" and command.lower() in {"npx", "npm", "pnpm", "yarn"}:
-        return ["cmd", "/c", command, *args]
-    return [command, *args]
+def resolve_node_cli(command: str) -> str:
+    name = str(command or "").strip()
+    if not name:
+        return name
+    if os.name == "nt" and name.lower() in NODE_CLIS:
+        found = shutil.which(f"{name.lower()}.cmd") or shutil.which(name)
+        if found:
+            return found
+    return shutil.which(name) or name
+
+
+def resolve_node_exe() -> str | None:
+    if os.name == "nt":
+        return shutil.which("node.exe") or shutil.which("node")
+    return shutil.which("node")
+
+
+def find_playwright_mcp_cli() -> str | None:
+    """Путь к cli.js глобального/локального @playwright/mcp (обход npx.cmd на Windows)."""
+    homes: list[Path] = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        homes.append(Path(appdata) / "npm" / "node_modules" / "@playwright" / "mcp" / "cli.js")
+    try:
+        npm = resolve_node_cli("npm")
+        if os.name == "nt" and npm.lower().endswith((".cmd", ".bat")):
+            comspec = os.environ.get("COMSPEC") or "cmd.exe"
+            argv: list[str] | str = [comspec, "/d", "/c", "call", npm, "root", "-g"]
+        else:
+            argv = [npm, "root", "-g"]
+        root = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if root.returncode == 0 and root.stdout.strip():
+            homes.append(Path(root.stdout.strip()) / "@playwright" / "mcp" / "cli.js")
+    except Exception:
+        pass
+    for path in homes:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def _playwright_package_args(args: list[str]) -> tuple[bool, list[str]]:
+    """True, если args — запуск @playwright/mcp; вернуть хвост аргументов после пакета."""
+    for index, item in enumerate(args):
+        token = str(item)
+        if token.startswith("@playwright/mcp"):
+            return True, [str(x) for x in args[index + 1 :]]
+    return False, []
+
+
+def build_argv(command: str, args: list[str] | None = None) -> list[str] | str:
+    """Собрать argv для MCP.
+
+    На Windows npx→@playwright/mcp по возможности через node cli.js (иначе cmd ломает stdio).
+    Остальные npx/npm — список [cmd, /d, /c, call, exe, ...], не одна строка.
+    """
+    args = list(args or [])
+    name = str(command or "").strip()
+    lowered = name.lower()
+    is_playwright, tail = _playwright_package_args(args)
+    if is_playwright and (lowered in NODE_CLIS or lowered.endswith("npx.cmd") or lowered == "npx"):
+        node = resolve_node_exe()
+        cli = find_playwright_mcp_cli()
+        if node and cli:
+            return [node, cli, *tail]
+    if os.name == "nt" and lowered in NODE_CLIS:
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        exe = resolve_node_cli(name)
+        # Список, не list2cmdline-строка: так надёжнее наследуют PIPE.
+        return [comspec, "/d", "/c", "call", exe, *args]
+    if os.name == "nt" and (lowered.endswith(".cmd") or lowered.endswith(".bat")):
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        return [comspec, "/d", "/c", "call", name, *args]
+    resolved = resolve_node_exe() if lowered == "node" else None
+    return [resolved or name, *args]
+
+
+def _creation_flags(argv: list[str] | str) -> int:
+    """Скрывать окно только для node.exe; .cmd/npx под CREATE_NO_WINDOW часто мёртвые."""
+    if os.name != "nt":
+        return 0
+    if isinstance(argv, str):
+        return 0
+    if not argv:
+        return 0
+    head = Path(str(argv[0])).name.lower()
+    if head in {"node.exe", "node"}:
+        return subprocess.CREATE_NO_WINDOW
+    return 0
 
 
 class McpHub:

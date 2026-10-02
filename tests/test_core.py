@@ -159,7 +159,7 @@ class ChatMarkupTests(unittest.TestCase):
         self.assertEqual(elide("abc", 0, len), "abc")
 
     def test_chat_role_and_body(self):
-        from project_agent.app import chat_body, chat_role
+        from project_agent.app import chat_body, chat_role, split_chat_stamp, with_chat_stamp
 
         self.assertEqual(chat_role("Вы: привет"), "user")
         self.assertEqual(chat_role("· list_dir"), "tool")
@@ -169,6 +169,14 @@ class ChatMarkupTests(unittest.TestCase):
         self.assertEqual(chat_body("Вы: привет"), "привет")
         self.assertEqual(chat_body("  Вы:  задача\nвторая"), "задача\nвторая")
         self.assertEqual(chat_body("ответ модели"), "ответ модели")
+        stamped = with_chat_stamp("Вы: привет")
+        body, stamp = split_chat_stamp(stamped)
+        self.assertEqual(body, "Вы: привет")
+        self.assertRegex(stamp or "", r"^\d{2}:\d{2}$")
+        self.assertEqual(chat_role(stamped), "user")
+        self.assertEqual(chat_body(stamped), "привет")
+        again = with_chat_stamp(stamped)
+        self.assertEqual(again, stamped)
 
     def test_user_copy_text_drops_attachment_tail(self):
         from project_agent.app import user_copy_text
@@ -830,7 +838,8 @@ class McpTests(unittest.TestCase):
         )
 
         self.assertEqual(PLAYWRIGHT_SERVER["command"], "npx")
-        self.assertIn("@playwright/mcp", PLAYWRIGHT_SERVER["args"][0])
+        self.assertEqual(PLAYWRIGHT_SERVER["args"][:2], ["-y", "@playwright/mcp@latest"])
+        self.assertIn("@playwright/mcp", PLAYWRIGHT_SERVER["args"][1])
         self.assertEqual(
             find_browser_server_name([{"name": "playwright"}, {"name": "other"}]),
             "playwright",
@@ -868,6 +877,78 @@ class McpTests(unittest.TestCase):
         self.assertEqual(hub.calls[0][1], "browser_snapshot")
         self.assertIn("browser snapshot", out.journal)
 
+    def test_build_argv_windows_npx_is_single_string(self):
+        from unittest import mock
+        from project_agent.mcp_client import build_argv
+
+        npx_path = r"C:\Program Files\nodejs\npx.cmd"
+
+        def which(name):
+            if name in ("npx.cmd", "npx"):
+                return npx_path
+            if name in ("node.exe", "node"):
+                return r"C:\Program Files\nodejs\node.exe"
+            return None
+
+        with mock.patch("project_agent.mcp_client.os.name", "nt"):
+            with mock.patch("project_agent.mcp_client.shutil.which", side_effect=which):
+                with mock.patch("project_agent.mcp_client.find_playwright_mcp_cli", return_value=None):
+                    with mock.patch.dict(os.environ, {"COMSPEC": r"C:\Windows\System32\cmd.exe"}, clear=False):
+                        argv = build_argv("npx", ["-y", "some-other-mcp@latest"])
+        self.assertEqual(
+            argv,
+            [r"C:\Windows\System32\cmd.exe", "/d", "/c", "call", npx_path, "-y", "some-other-mcp@latest"],
+        )
+        cli = r"C:\Users\me\AppData\Roaming\npm\node_modules\@playwright\mcp\cli.js"
+        with mock.patch("project_agent.mcp_client.os.name", "nt"):
+            with mock.patch("project_agent.mcp_client.shutil.which", side_effect=which):
+                with mock.patch("project_agent.mcp_client.find_playwright_mcp_cli", return_value=cli):
+                    pw = build_argv("npx", ["-y", "@playwright/mcp@latest"])
+        self.assertEqual(pw, [r"C:\Program Files\nodejs\node.exe", cli])
+        with mock.patch("project_agent.mcp_client.os.name", "posix"):
+            with mock.patch("project_agent.mcp_client.find_playwright_mcp_cli", return_value=None):
+                posix_argv = build_argv("npx", ["-y", "@playwright/mcp@latest"])
+        self.assertEqual(posix_argv, ["npx", "-y", "@playwright/mcp@latest"])
+
+    def test_waiter_keeps_first_error_and_death_rewrites_closed(self):
+        from project_agent.mcp_client import McpClient, _Waiter
+
+        waiter = _Waiter()
+        waiter.fail(RuntimeError("MCP-сервер завершился | code=1 | stderr: boom"))
+        waiter.fail(RuntimeError("MCP-сервер закрыт"))
+        self.assertIn("завершился", str(waiter.error))
+        self.assertNotIn("закрыт", str(waiter.error))
+
+        client = McpClient({"name": "x", "command": "npx", "args": ["-y", "pkg"]}, None)
+        client._argv_preview = "cmd /c npx -y pkg"
+        client.proc = type("P", (), {"poll": staticmethod(lambda: 1)})()
+        detail = client._death_detail("MCP-сервер закрыт")
+        self.assertIn("завершился", detail)
+        self.assertIn("code=1", detail)
+        self.assertIn("argv:", detail)
+
+    def test_mcp_write_is_ndjson_not_content_length(self):
+        from project_agent.mcp_client import McpClient
+
+        written = []
+
+        class FakeStdin:
+            def write(self, data):
+                written.append(data)
+
+            def flush(self):
+                return None
+
+        client = McpClient({"name": "x", "command": "node", "args": ["cli.js"]}, None)
+        client.proc = type("P", (), {"stdin": FakeStdin()})()
+        client._write({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(len(written), 1)
+        packet = written[0]
+        self.assertTrue(packet.endswith(b"\n"))
+        self.assertFalse(packet.lower().startswith(b"content-length:"))
+        body = packet[:-1].decode("utf-8")
+        self.assertEqual(json.loads(body)["method"], "initialize")
+        self.assertNotIn("\n", body)
 
 class ProviderTests(unittest.TestCase):
     def test_openai_request_hides_secret(self):
@@ -1596,24 +1677,17 @@ import json
 import sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\\r\\n", b"\\n"):
-            break
-        if b":" in line:
-            key, value = line.split(b":", 1)
-            headers[key.lower()] = value.strip()
-    length = int(headers.get(b"content-length", b"0"))
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode("utf-8"))
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return read_message()
+    return json.loads(line.decode("utf-8"))
 
 def write_message(payload):
-    data = json.dumps(payload).encode("utf-8")
-    packet = f"Content-Length: {len(data)}\\r\\n\\r\\n".encode("ascii") + data
-    sys.stdout.buffer.write(packet)
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\\n"
+    sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
 
 dump = sys.argv[1]
