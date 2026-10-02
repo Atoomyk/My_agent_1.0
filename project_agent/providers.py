@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import httpx
 
@@ -10,13 +11,27 @@ from project_agent.secrets import scrub_outbound
 DEFAULT_OPENAI_BASE = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 
+# Пауза между чанками и ожидание первого байта. Не общий лимит хода.
+API_CONNECT_TIMEOUT = 20.0
+API_READ_TIMEOUT = 300.0
+# Весь один stream, даже если чанки продолжают идти.
+API_OVERALL_TIMEOUT = 900.0
+
 
 class Stopped(Exception):
-    pass
+    def __init__(self, partial: str = "") -> None:
+        super().__init__("stopped")
+        self.partial = partial or ""
 
 
 class ApiError(Exception):
-    pass
+    def __init__(self, message: str = "", partial: str = "") -> None:
+        super().__init__(message)
+        self.partial = partial or ""
+
+
+class _RetryPlainStream(Exception):
+    """Сервер не принял stream_options — повторить stream без этого поля."""
 
 
 class ToolCall:
@@ -126,6 +141,22 @@ class _HttpProvider:
     def message_count(self) -> int:
         return len(self.messages)
 
+    def drop_incomplete_tail(self) -> None:
+        """Убрать оборванный ответ без вызовов инструментов, чтобы повтор не дублировал user."""
+        if not self.messages:
+            return
+        last = self.messages[-1]
+        if not isinstance(last, dict) or last.get("role") != "assistant":
+            return
+        if last.get("tool_calls"):
+            return
+        content = last.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_use" for block in content
+        ):
+            return
+        self.messages.pop()
+
     def _note_usage(self, data: dict) -> int | None:
         from project_agent.context_usage import parse_prompt_tokens
 
@@ -139,7 +170,7 @@ class _HttpProvider:
 
     def _client(self) -> httpx.Client:
         if self._http is None or self._http.is_closed:
-            kwargs = {"timeout": httpx.Timeout(120.0, connect=20.0)}
+            kwargs = {"timeout": httpx.Timeout(API_READ_TIMEOUT, connect=API_CONNECT_TIMEOUT)}
             if self._transport is not None:
                 kwargs["transport"] = self._transport
             self._http = httpx.Client(**kwargs)
@@ -165,6 +196,135 @@ class _HttpProvider:
         except json.JSONDecodeError:
             raise ApiError("API вернуло не JSON")
 
+    def _check_stream_limits(self, started: float, partial) -> None:
+        if self._cancel.is_set():
+            raise Stopped(partial())
+        if time.monotonic() - started > API_OVERALL_TIMEOUT:
+            raise ApiError("Превышено время ожидания API", partial())
+
+    def _take_event(self, feed, event: dict, on_text, started: float) -> None:
+        self._check_stream_limits(started, feed.text)
+        piece = feed.feed(event)
+        if piece and on_text is not None:
+            try:
+                on_text(piece)
+            except Exception:
+                pass
+        self._check_stream_limits(started, feed.text)
+
+    def _read_model(self, url, payload, headers, redact, feed, on_text, retry_stream_options: bool) -> None:
+        if self._cancel.is_set():
+            raise Stopped()
+        started = time.monotonic()
+        try:
+            with self._client().stream("POST", url, json=payload, headers=headers) as response:
+                self._consume_model(response, redact, feed, on_text, started, retry_stream_options)
+        except _RetryPlainStream:
+            raise
+        except Stopped as exc:
+            raise Stopped(feed.text() or exc.partial)
+        except ApiError as exc:
+            if not exc.partial:
+                exc.partial = feed.text()
+            raise
+        except httpx.TimeoutException:
+            if self._cancel.is_set():
+                raise Stopped(feed.text())
+            raise ApiError("Превышено время ожидания API", feed.text())
+        except httpx.HTTPError as exc:
+            if self._cancel.is_set():
+                raise Stopped(feed.text())
+            raise ApiError(redact(f"Нет соединения с API: {exc}"), feed.text()) from None
+        except Exception:
+            if self._cancel.is_set():
+                raise Stopped(feed.text()) from None
+            raise
+
+    def _consume_model(self, response, redact, feed, on_text, started: float, retry_stream_options: bool) -> None:
+        self._check_stream_limits(started, feed.text)
+        if response.status_code >= 400:
+            response.read()
+            message = _error_text(response)
+            if retry_stream_options and "stream_options" in message.lower():
+                raise _RetryPlainStream()
+            raise ApiError(redact(message), feed.text())
+        ctype = (response.headers.get("content-type") or "").lower()
+        if "event-stream" in ctype:
+            for event in self._iter_sse(response, started, feed):
+                self._take_event(feed, event, on_text, started)
+            return
+        raw = response.read()
+        text = raw.decode("utf-8", errors="replace").lstrip("\ufeff").lstrip()
+        if text.startswith("data:") or text.startswith("event:"):
+            for event in iter_sse_payloads(text.splitlines()):
+                self._take_event(feed, event, on_text, started)
+            return
+        try:
+            data = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            raise ApiError("API вернуло не JSON", feed.text())
+        if not isinstance(data, dict):
+            raise ApiError("непонятный ответ API", feed.text())
+        feed.from_json(data, on_text)
+
+    def _iter_sse(self, response: httpx.Response, started: float, feed):
+        data_lines: list[str] = []
+
+        def flush():
+            nonlocal data_lines
+            if not data_lines:
+                return None
+            payload = "\n".join(data_lines)
+            data_lines = []
+            if payload.strip() == "[DONE]":
+                return "DONE"
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+
+        for raw_line in response.iter_lines():
+            self._check_stream_limits(started, feed.text)
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            line = str(raw_line).rstrip("\r")
+            if line == "":
+                item = flush()
+                if item == "DONE":
+                    return
+                if isinstance(item, dict):
+                    yield item
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        item = flush()
+        if isinstance(item, dict):
+            yield item
+
+    def _store_partial(self, feed) -> None:
+        if not str(feed.text() or "").strip():
+            return
+        self.messages.append(feed.partial_message())
+
+    def _run_stream(self, url, payload, headers, redact, feed, on_text, retry_stream_options: bool = False) -> ModelTurn:
+        try:
+            self._read_model(url, payload, headers, redact, feed, on_text, retry_stream_options)
+        except _RetryPlainStream:
+            raise
+        except Stopped as exc:
+            self._store_partial(feed)
+            raise Stopped(feed.text() or exc.partial)
+        except ApiError as exc:
+            self._store_partial(feed)
+            if not exc.partial:
+                exc.partial = feed.text()
+            raise
+        self.messages.append(feed.stored_message())
+        return ModelTurn(feed.text(), feed.tool_calls(), self._note_usage(feed.usage_payload()))
+
 
 class OpenAIProvider(_HttpProvider):
     kind = "openai"
@@ -181,7 +341,7 @@ class OpenAIProvider(_HttpProvider):
             }
         )
 
-    def complete(self, tools: list[dict], redact) -> ModelTurn:
+    def complete(self, tools: list[dict], redact, on_text=None) -> ModelTurn:
         if self._cancel.is_set():
             raise Stopped()
         self.scrub_inplace(redact)
@@ -194,28 +354,19 @@ class OpenAIProvider(_HttpProvider):
         key = (self.settings.get("api_key") or "").strip()
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        data = self._post(chat_url(self.settings.get("base_url") or ""), payload, headers, redact)
-        prompt_tokens = self._note_usage(data)
+        url = chat_url(self.settings.get("base_url") or "")
+        streamed = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         try:
-            message = data["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError):
-            raise ApiError("непонятный ответ API")
-        text = _text_of(message.get("content"))
-        calls = []
-        for call in message.get("tool_calls") or []:
-            function = call.get("function") or {}
-            calls.append(
-                ToolCall(
-                    id=str(call.get("id") or ""),
-                    name=str(function.get("name") or ""),
-                    arguments=_parse_args(function.get("arguments")),
-                )
+            return self._run_stream(url, streamed, headers, redact, _OpenAIFeed(), on_text, retry_stream_options=True)
+        except _RetryPlainStream:
+            return self._run_stream(
+                url,
+                {**payload, "stream": True},
+                headers,
+                redact,
+                _OpenAIFeed(),
+                on_text,
             )
-        stored = {"role": "assistant", "content": message.get("content")}
-        if message.get("tool_calls"):
-            stored["tool_calls"] = message["tool_calls"]
-        self.messages.append(stored)
-        return ModelTurn(text, calls, prompt_tokens)
 
     def summarize(self, redact) -> str:
         from project_agent.context_usage import build_summary_user_text, flatten_messages_for_summary
@@ -278,7 +429,7 @@ class AnthropicProvider(_HttpProvider):
         else:
             self.messages.append({"role": "user", "content": [block]})
 
-    def complete(self, tools: list[dict], redact) -> ModelTurn:
+    def complete(self, tools: list[dict], redact, on_text=None) -> ModelTurn:
         if self._cancel.is_set():
             raise Stopped()
         self.scrub_inplace(redact)
@@ -288,31 +439,21 @@ class AnthropicProvider(_HttpProvider):
             "system": self.system,
             "messages": self.messages,
             "tools": [anthropic_tool(tool) for tool in tools],
+            "stream": True,
         }
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
             "x-api-key": (self.settings.get("api_key") or "").strip(),
         }
-        data = self._post(messages_url(self.settings.get("base_url") or ""), payload, headers, redact)
-        prompt_tokens = self._note_usage(data)
-        blocks = data.get("content")
-        if not isinstance(blocks, list):
-            raise ApiError("непонятный ответ API")
-        text_parts = []
-        calls = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
-                text_parts.append(block.get("text") or "")
-            elif block.get("type") == "tool_use":
-                raw_input = block.get("input") or {}
-                if not isinstance(raw_input, dict):
-                    raw_input = {"value": raw_input}
-                calls.append(ToolCall(str(block.get("id") or ""), str(block.get("name") or ""), raw_input))
-        self.messages.append({"role": "assistant", "content": blocks})
-        return ModelTurn("\n".join(part for part in text_parts if part), calls, prompt_tokens)
+        return self._run_stream(
+            messages_url(self.settings.get("base_url") or ""),
+            payload,
+            headers,
+            redact,
+            _AnthropicFeed(),
+            on_text,
+        )
 
     def summarize(self, redact) -> str:
         from project_agent.context_usage import build_summary_user_text, flatten_messages_for_summary
@@ -448,3 +589,326 @@ def _parse_args(raw) -> dict:
             return {"_raw": raw}
         return parsed if isinstance(parsed, dict) else {"value": parsed}
     return {"value": raw}
+
+
+def iter_sse_payloads(lines):
+    data_lines: list[str] = []
+
+    def flush():
+        nonlocal data_lines
+        if not data_lines:
+            return None
+        payload = "\n".join(data_lines)
+        data_lines = []
+        if payload.strip() == "[DONE]":
+            return "DONE"
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    for raw_line in lines:
+        if isinstance(raw_line, bytes):
+            raw_line = raw_line.decode("utf-8", errors="replace")
+        line = str(raw_line).rstrip("\r")
+        if line == "":
+            item = flush()
+            if item == "DONE":
+                return
+            if isinstance(item, dict):
+                yield item
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    item = flush()
+    if isinstance(item, dict):
+        yield item
+
+
+def _openai_calls_from_message(message: dict) -> list[ToolCall]:
+    calls = []
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        calls.append(
+            ToolCall(
+                id=str(call.get("id") or ""),
+                name=str(function.get("name") or ""),
+                arguments=_parse_args(function.get("arguments")),
+            )
+        )
+    return calls
+
+
+class _OpenAIFeed:
+    def __init__(self) -> None:
+        self.text_parts: list[str] = []
+        self.calls: dict[int, dict] = {}
+        self.usage = None
+        self.usage_data = None
+        self.raw_message = None
+
+    def text(self) -> str:
+        if self.raw_message is not None:
+            return _text_of(self.raw_message.get("content"))
+        return "".join(self.text_parts)
+
+    def feed(self, event: dict) -> str:
+        error = event.get("error")
+        if isinstance(error, dict) and not event.get("choices"):
+            raise ApiError(str(error.get("message") or "ошибка API")[:400])
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            self.usage = usage
+        choices = event.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            delta = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+        piece = ""
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self.text_parts.append(content)
+            piece = content
+        elif isinstance(content, list):
+            extra = _text_of(content)
+            if extra:
+                self.text_parts.append(extra)
+                piece = extra
+        for call in delta.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            try:
+                index = int(call.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            slot = self.calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if call.get("id"):
+                slot["id"] = str(call["id"])
+            function = call.get("function") or {}
+            if function.get("name") and not slot["name"]:
+                slot["name"] = str(function["name"])
+            arguments = function.get("arguments")
+            if isinstance(arguments, dict):
+                slot["arguments"] = json.dumps(arguments, ensure_ascii=False)
+            elif arguments:
+                slot["arguments"] += str(arguments)
+        return piece
+
+    def from_json(self, data: dict, on_text) -> None:
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            raise ApiError("непонятный ответ API")
+        if not isinstance(message, dict):
+            raise ApiError("непонятный ответ API")
+        self.raw_message = message
+        self.usage_data = data
+        text = self.text()
+        if text and on_text is not None:
+            on_text(text)
+
+    def tool_calls(self) -> list[ToolCall]:
+        if self.raw_message is not None:
+            return _openai_calls_from_message(self.raw_message)
+        calls = []
+        for index in sorted(self.calls):
+            slot = self.calls[index]
+            calls.append(
+                ToolCall(
+                    id=slot["id"] or f"call_{index}",
+                    name=slot["name"],
+                    arguments=_parse_args(slot["arguments"]),
+                )
+            )
+        return calls
+
+    def _stored_calls(self) -> list[dict]:
+        stored = []
+        for index in sorted(self.calls):
+            slot = self.calls[index]
+            stored.append(
+                {
+                    "id": slot["id"] or f"call_{index}",
+                    "type": "function",
+                    "function": {
+                        "name": slot["name"],
+                        "arguments": slot["arguments"] if slot["arguments"] else "{}",
+                    },
+                }
+            )
+        return stored
+
+    def stored_message(self) -> dict:
+        if self.raw_message is not None:
+            stored = {"role": "assistant", "content": self.raw_message.get("content")}
+            if self.raw_message.get("tool_calls"):
+                stored["tool_calls"] = self.raw_message["tool_calls"]
+            return stored
+        text = self.text()
+        stored = {"role": "assistant", "content": text if text else None}
+        calls = self._stored_calls()
+        if calls:
+            stored["tool_calls"] = calls
+        return stored
+
+    def partial_message(self) -> dict:
+        return {"role": "assistant", "content": self.text()}
+
+    def usage_payload(self) -> dict:
+        if isinstance(self.usage_data, dict):
+            return self.usage_data
+        if isinstance(self.usage, dict):
+            return {"usage": self.usage}
+        return {}
+
+
+class _AnthropicFeed:
+    def __init__(self) -> None:
+        self.blocks: list[dict] = []
+        self.usage = None
+        self.usage_data = None
+
+    def text(self) -> str:
+        parts = []
+        for block in self.blocks:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        return "\n".join(part for part in parts if part)
+
+    def _block(self, index: int) -> dict:
+        while len(self.blocks) <= index:
+            self.blocks.append({})
+        block = self.blocks[index]
+        if not isinstance(block, dict):
+            block = {}
+            self.blocks[index] = block
+        return block
+
+    def feed(self, event: dict) -> str:
+        if event.get("type") == "error":
+            error = event.get("error") or {}
+            message = error.get("message") if isinstance(error, dict) else error
+            raise ApiError(str(message or "ошибка API")[:400])
+        kind = event.get("type")
+        if kind == "message_start":
+            message = event.get("message") or {}
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(usage, dict):
+                self.usage = dict(usage)
+            return ""
+        if kind == "message_delta":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                merged = dict(self.usage or {})
+                merged.update(usage)
+                self.usage = merged
+            return ""
+        if kind == "content_block_start":
+            try:
+                index = int(event.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            block = dict(event.get("content_block") or {})
+            if block.get("type") == "tool_use":
+                block["_json"] = ""
+                if not isinstance(block.get("input"), dict):
+                    block["input"] = {}
+            self._block(index)
+            self.blocks[index] = block
+            return ""
+        if kind == "content_block_delta":
+            try:
+                index = int(event.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            delta = event.get("delta") or {}
+            block = self._block(index)
+            if delta.get("type") == "text_delta":
+                piece = delta.get("text") or ""
+                block["type"] = "text"
+                block["text"] = (block.get("text") or "") + piece
+                return piece
+            if delta.get("type") == "input_json_delta":
+                block["_json"] = (block.get("_json") or "") + str(delta.get("partial_json") or "")
+            return ""
+        if kind == "content_block_stop":
+            try:
+                index = int(event.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            if 0 <= index < len(self.blocks):
+                self._seal_block(self.blocks[index])
+            return ""
+        return ""
+
+    def _seal_block(self, block: dict) -> None:
+        if not isinstance(block, dict) or "_json" not in block:
+            return
+        raw = block.pop("_json") or ""
+        if raw:
+            block["input"] = _parse_args(raw)
+        elif not isinstance(block.get("input"), dict):
+            block["input"] = {}
+
+    def _seal(self) -> None:
+        for block in self.blocks:
+            if isinstance(block, dict):
+                self._seal_block(block)
+
+    def from_json(self, data: dict, on_text) -> None:
+        blocks = data.get("content")
+        if not isinstance(blocks, list):
+            raise ApiError("непонятный ответ API")
+        self.blocks = [block for block in blocks if isinstance(block, dict)]
+        self.usage_data = data
+        text = self.text()
+        if text and on_text is not None:
+            on_text(text)
+
+    def tool_calls(self) -> list[ToolCall]:
+        self._seal()
+        calls = []
+        for block in self.blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            raw_input = block.get("input") or {}
+            if not isinstance(raw_input, dict):
+                raw_input = {"value": raw_input}
+            calls.append(ToolCall(str(block.get("id") or ""), str(block.get("name") or ""), raw_input))
+        return calls
+
+    def stored_message(self) -> dict:
+        self._seal()
+        clean = []
+        for block in self.blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                clean.append({"type": "text", "text": block.get("text") or ""})
+            elif block.get("type") == "tool_use":
+                raw_input = block.get("input") or {}
+                if not isinstance(raw_input, dict):
+                    raw_input = {"value": raw_input}
+                clean.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(block.get("id") or ""),
+                        "name": str(block.get("name") or ""),
+                        "input": raw_input,
+                    }
+                )
+        return {"role": "assistant", "content": clean}
+
+    def partial_message(self) -> dict:
+        return {"role": "assistant", "content": [{"type": "text", "text": self.text()}]}
+
+    def usage_payload(self) -> dict:
+        if isinstance(self.usage_data, dict):
+            return self.usage_data
+        if isinstance(self.usage, dict):
+            return {"usage": self.usage}
+        return {}

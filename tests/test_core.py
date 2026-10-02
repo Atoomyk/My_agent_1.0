@@ -18,7 +18,7 @@ from project_agent.config import default_config, load_config, needs_api_key, sav
 from project_agent.mcp_client import McpHub
 from project_agent.patching import apply_diff
 from project_agent.paths import MAX_FILE_BYTES, PathError, list_entries, read_text_file, resolve_inside
-from project_agent.providers import OpenAIProvider
+from project_agent.providers import AnthropicProvider, OpenAIProvider, Stopped
 from project_agent.secrets import Scrubber, SecretVault, looks_like_literal_secret, scrub_outbound
 from project_agent.testing import (
     clip_output,
@@ -164,9 +164,27 @@ class ChatMarkupTests(unittest.TestCase):
         self.assertEqual(chat_role("Вы: привет"), "user")
         self.assertEqual(chat_role("· list_dir"), "tool")
         self.assertEqual(chat_role("готово"), "agent")
+        self.assertEqual(chat_role("Ошибка API: таймаут"), "error")
+        self.assertEqual(chat_role("Ошибка: обрыв"), "error")
         self.assertEqual(chat_body("Вы: привет"), "привет")
         self.assertEqual(chat_body("  Вы:  задача\nвторая"), "задача\nвторая")
         self.assertEqual(chat_body("ответ модели"), "ответ модели")
+
+    def test_user_copy_text_drops_attachment_tail(self):
+        from project_agent.app import user_copy_text
+
+        self.assertEqual(user_copy_text("привет"), "привет")
+        self.assertEqual(
+            user_copy_text("сделай\n(папки: src)\n(файлы: a.py, b.py)\n(изображений: 2)"),
+            "сделай",
+        )
+        self.assertEqual(
+            user_copy_text("первая\nвторая\n(файлы: a.py)"),
+            "первая\nвторая",
+        )
+        self.assertEqual(user_copy_text("(только изображение)\n(изображений: 1)"), "(только изображение)")
+        self.assertEqual(user_copy_text("(контекст)\n(папки: src)"), "(контекст)")
+        self.assertEqual(user_copy_text("см. (файлы: a.py) в тексте\nхвост"), "см. (файлы: a.py) в тексте\nхвост")
 
 
 class ClipboardTests(unittest.TestCase):
@@ -851,6 +869,181 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(seen["key"], "unit-test-key-123456")
         provider._http.close()
 
+    def test_openai_stream_collects_text_tools_and_usage(self):
+        events = [
+            {"choices": [{"delta": {"content": "Смотрю"}}]},
+            {"choices": [{"delta": {"content": " файл"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "read_file", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"path":'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"note.py"}'}}]}}]},
+            {
+                "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
+            },
+        ]
+        pieces = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            self.assertTrue(body.get("stream"))
+            self.assertIn("stream_options", body)
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(events),
+            )
+
+        provider = OpenAIProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "m", "api_key": "", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("прочитай", None)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []), lambda piece: pieces.append(piece))
+        finally:
+            provider._http.close()
+        self.assertEqual(pieces, ["Смотрю", " файл"])
+        self.assertEqual(turn.text, "Смотрю файл")
+        self.assertEqual(turn.prompt_tokens, 50)
+        self.assertEqual(len(turn.tool_calls), 1)
+        self.assertEqual(turn.tool_calls[0].name, "read_file")
+        self.assertEqual(turn.tool_calls[0].arguments, {"path": "note.py"})
+        stored = provider.messages[-1]
+        self.assertEqual(stored["content"], "Смотрю файл")
+        self.assertEqual(stored["tool_calls"][0]["id"], "call-1")
+        self.assertIn("note.py", stored["tool_calls"][0]["function"]["arguments"])
+
+    def test_openai_stream_stop_keeps_partial(self):
+        events = [
+            {"choices": [{"delta": {"content": "Раз"}}]},
+            {"choices": [{"delta": {"content": " Два"}}]},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(events),
+            )
+
+        provider = OpenAIProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "m", "api_key": "", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("вопрос", None)
+
+        def on_text(_piece: str) -> None:
+            provider._cancel.set()
+
+        try:
+            with self.assertRaises(Stopped) as caught:
+                provider.complete([], Scrubber(SecretVault(), []), on_text)
+        finally:
+            provider._http.close()
+        self.assertEqual(caught.exception.partial, "Раз")
+        self.assertEqual(provider.messages[-1]["content"], "Раз")
+        self.assertNotIn("tool_calls", provider.messages[-1])
+
+    def test_openai_retries_without_stream_options(self):
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            seen.append("stream_options" in body)
+            if "stream_options" in body:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "Unrecognized request argument supplied: stream_options"}},
+                )
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+        provider = OpenAIProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "m", "api_key": "", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("вопрос", None)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertEqual(seen, [True, False])
+        self.assertEqual(turn.text, "ok")
+
+    def test_anthropic_stream_collects_text_and_tool(self):
+        events = [
+            {"type": "message_start", "message": {"usage": {"input_tokens": 15, "output_tokens": 1}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Привет"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}},
+            },
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"path":'}},
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '"a.py"}'},
+            },
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 8}},
+            {"type": "message_stop"},
+        ]
+        pieces = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            self.assertTrue(body.get("stream"))
+            parts = []
+            for event in events:
+                parts.append(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n")
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="".join(parts).encode("utf-8"),
+            )
+
+        provider = AnthropicProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "m", "api_key": "unit-test-key-123456", "base_url": "https://api.anthropic.com"})
+        provider.set_system("helper")
+        provider.add_user("прочитай", None)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), ["unit-test-key-123456"]), pieces.append)
+        finally:
+            provider._http.close()
+        self.assertEqual(pieces, ["Привет"])
+        self.assertEqual(turn.text, "Привет")
+        self.assertEqual(turn.prompt_tokens, 15)
+        self.assertEqual(turn.tool_calls[0].name, "read_file")
+        self.assertEqual(turn.tool_calls[0].arguments, {"path": "a.py"})
+        self.assertEqual(turn.tool_calls[0].id, "toolu_1")
+        stored = provider.messages[-1]["content"]
+        self.assertEqual(stored[1]["input"], {"path": "a.py"})
+
+
+def _sse(events: list[dict], done: bool = True) -> bytes:
+    lines = [f"data: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events]
+    if done:
+        lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode("utf-8")
+
 
 class ChatStoreTests(unittest.TestCase):
     def test_roundtrip_list_and_delete(self):
@@ -1116,6 +1309,128 @@ class AgentLoopTests(unittest.TestCase):
             self.assertTrue(any("готово" in line for line in chats))
             self.assertTrue(contexts)
             self.assertEqual(contexts[-1][1], 256000)
+
+    def test_stream_updates_callback_without_duplicating_chat(self):
+        from project_agent.agent import Agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            events = [
+                {"choices": [{"delta": {"content": "го"}}]},
+                {"choices": [{"delta": {"content": "тово"}}]},
+            ]
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=_sse(events),
+                )
+
+            chats = []
+            snapshots = []
+            vault = SecretVault()
+            hub = McpHub()
+            box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
+            agent = Agent(
+                vault,
+                box,
+                hub,
+                chats.append,
+                lambda _journal: None,
+                lambda _status: None,
+                lambda *_args, **_kwargs: None,
+                lambda text, final: snapshots.append((text, final)),
+            )
+            try:
+                agent.set_root(root)
+                provider = OpenAIProvider()
+                provider._transport = httpx.MockTransport(handler)
+                agent.provider = provider
+                agent.provider_kind = "openai"
+                agent.run_turn(
+                    "скажи готово",
+                    [],
+                    {
+                        "provider": "openai",
+                        "model": "m",
+                        "api_key": "",
+                        "base_url": "http://example.test/v1",
+                        "mcp_servers": [],
+                    },
+                    threading.Event(),
+                )
+            finally:
+                provider._http.close()
+                hub.close()
+            self.assertTrue(any(not final and text == "го" for text, final in snapshots))
+            self.assertIn(("готово", True), snapshots)
+            self.assertFalse(any("готово" in line for line in chats))
+
+    def test_resend_repeats_same_user_turn(self):
+        from project_agent.agent import Agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            bodies = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                body = request.content.decode()
+                bodies.append(body)
+                if len(bodies) == 1:
+                    return httpx.Response(500, json={"error": {"message": "timeout"}})
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"role": "assistant", "content": "ок"}}]},
+                )
+
+            errors = []
+            chats = []
+            vault = SecretVault()
+            hub = McpHub()
+            box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
+            agent = Agent(
+                vault,
+                box,
+                hub,
+                chats.append,
+                lambda _journal: None,
+                lambda _status: None,
+                on_error=errors.append,
+            )
+            settings = {
+                "provider": "openai",
+                "model": "m",
+                "api_key": "",
+                "base_url": "http://example.test/v1",
+                "mcp_servers": [],
+                "agent_mode": "agent",
+            }
+            try:
+                agent.set_root(root)
+                provider = OpenAIProvider()
+                provider._transport = httpx.MockTransport(handler)
+                agent.provider = provider
+                agent.provider_kind = "openai"
+                agent.run_turn("вопрос", [], settings, threading.Event())
+                self.assertTrue(errors and errors[0].startswith("Ошибка API:"))
+                provider.messages.append({"role": "assistant", "content": "обрывок"})
+                settings = dict(settings)
+                settings["agent_mode"] = "ask"
+                agent.run_turn("вопрос", [], settings, threading.Event(), resend=True)
+            finally:
+                provider._http.close()
+                hub.close()
+            users = [item for item in provider.messages if item.get("role") == "user"]
+            self.assertEqual(len(users), 1)
+            self.assertEqual(users[0]["content"], "вопрос")
+            self.assertNotIn("обрывок", bodies[-1])
+            self.assertNotIn('"name": "write_file"', bodies[-1])
+            self.assertNotIn('"name":"write_file"', bodies[-1])
+            self.assertTrue(any("ок" in line for line in chats))
+            self.assertFalse(any(line.startswith("Вы:") for line in chats))
 
 
 class ContextUsageTests(unittest.TestCase):

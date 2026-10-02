@@ -93,6 +93,7 @@ CHAT_COLUMN = 820
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
+_USER_ATTACH_LINE = re.compile(r"^\((?:папки|файлы): .+\)$|^\(изображений: \d+\)$")
 
 
 def chat_role(text: str) -> str:
@@ -101,6 +102,8 @@ def chat_role(text: str) -> str:
         return "user"
     if body.startswith("·"):
         return "tool"
+    if body.startswith("Ошибка API:") or body.startswith("Ошибка:"):
+        return "error"
     return "agent"
 
 
@@ -113,6 +116,16 @@ def chat_body(text: str, role: str | None = None) -> str:
     if stripped.startswith("Вы:"):
         return stripped[3:].lstrip()
     return body
+
+
+def user_copy_text(body: str) -> str:
+    """Набранный запрос без хвостовых пометок вложений."""
+    lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and _USER_ATTACH_LINE.match(lines[-1].strip()):
+        lines.pop()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def chat_segments(text: str) -> list[tuple[str, str]]:
@@ -826,6 +839,13 @@ class App(ctk.CTk):
         self.chat_title = ""
         self.transcript: list[str] = []
         self._chat_list_lock = False
+        self._stream_open = False
+        self._stream_origin = "1.0"
+        self._stream_body_at = "1.0"
+        self._user_spans: list[tuple[str, str, str]] = []
+        self._retry_payload: dict | None = None
+        self._can_retry = False
+        self._retry_buttons: list[tk.Button] = []
         self.vault = SecretVault()
         self.mcp = McpHub()
         self.toolbox = Toolbox(self.vault, self.confirm, self.mcp, self.collect_settings)
@@ -837,6 +857,8 @@ class App(ctk.CTk):
             self.write_journal,
             self.set_status,
             self._on_context,
+            self.stream_chat,
+            self.write_retryable_error,
         )
         self.theme = "dark"
         self.theme_var = ctk.StringVar(value="Тёмная")
@@ -1683,6 +1705,12 @@ class App(ctk.CTk):
             activeforeground=_tone(TEXT),
             font=self._px_font(12),
         )
+        request = self._user_request_at(event)
+        if request:
+            menu.add_command(
+                label="Копировать запрос",
+                command=lambda text=request: self._copy_agent_message(text),
+            )
         menu.add_command(
             label="Копировать",
             state="normal" if selected else "disabled",
@@ -1694,6 +1722,21 @@ class App(ctk.CTk):
         finally:
             menu.grab_release()
         return "break"
+
+    def _user_request_at(self, event) -> str:
+        inner = self.chat._textbox
+        try:
+            point = inner.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return ""
+        found = ""
+        for start, end, text in self._user_spans:
+            try:
+                if inner.compare(start, "<=", point) and inner.compare(point, "<", end):
+                    found = text
+            except tk.TclError:
+                continue
+        return found
 
     def _chat_select_all(self) -> None:
         inner = self.chat._textbox
@@ -2068,6 +2111,7 @@ class App(ctk.CTk):
         self.chat_id = None
         self.chat_title = ""
         self.transcript.clear()
+        self._forget_retry()
         self.project = Path(selected).resolve()
         self._show_folder()
         self.agent.set_root(self.project)
@@ -2088,6 +2132,7 @@ class App(ctk.CTk):
         self.chat_id = None
         self.chat_title = ""
         self.transcript.clear()
+        self._forget_retry()
         self._clear_box(self.chat)
         self.agent.reset_session(announce=False)
         self._apply_context(0, self.context_limit, False)
@@ -2554,18 +2599,48 @@ class App(ctk.CTk):
         if created:
             self._refresh_chat_list()
             self._fit_labels()
+        self._retry_payload = {"chat_id": self.chat_id, "text": model_text, "images": prepared}
+        self._can_retry = False
+        self._set_retry_enabled(False)
         self.running = True
         self.stop_event = threading.Event()
         self._show_running(True)
         self.set_status("Запрос отправлен")
-        thread = threading.Thread(target=self._turn, args=(model_text, prepared, settings), daemon=True)
+        thread = threading.Thread(target=self._turn, args=(model_text, prepared, settings, False), daemon=True)
         thread.start()
 
-    def _turn(self, text: str, images: list, settings: dict) -> None:
+    def retry_last(self) -> None:
+        payload = self._retry_payload
+        if self.running or not self._can_retry or not payload:
+            return
+        if payload.get("chat_id") != self.chat_id or self.project is None:
+            return
+        settings = self.collect_settings()
+        if not settings["model"]:
+            self.write_chat("Укажите модель.")
+            return
+        if needs_api_key(settings["provider"], settings["base_url"], settings["api_key"]):
+            self.write_chat("Укажите API-ключ.")
+            return
+        self._can_retry = False
+        self._set_retry_enabled(False)
+        self.running = True
+        self.stop_event = threading.Event()
+        self._show_running(True)
+        self.set_status("Повтор запроса")
+        thread = threading.Thread(
+            target=self._turn,
+            args=(payload["text"], payload["images"], settings, True),
+            daemon=True,
+        )
+        thread.start()
+
+    def _turn(self, text: str, images: list, settings: dict, resend: bool = False) -> None:
+        self._can_retry = False
         try:
-            self.agent.run_turn(text, images, settings, self.stop_event)
+            self.agent.run_turn(text, images, settings, self.stop_event, resend=resend)
         except Exception as exc:
-            self.write_chat(f"Ошибка: {exc}")
+            self.write_retryable_error(f"Ошибка: {exc}")
         finally:
             self.after(0, self._finish)
 
@@ -2581,8 +2656,13 @@ class App(ctk.CTk):
         self.running = False
         self._show_running(False)
         if self.stop_event.is_set():
+            self._can_retry = False
+            self._set_retry_enabled(False)
             self.set_status("Остановлено")
+        elif self._can_retry:
+            self.set_status("Ошибка API")
         else:
+            self._set_retry_enabled(False)
             self.set_status("Готово")
         self._refresh_tree()
         self._reload_clean_editor()
@@ -2618,6 +2698,66 @@ class App(ctk.CTk):
     def write_chat(self, text: str) -> None:
         self._remember(text)
         self._append(self.chat, text)
+
+    def write_retryable_error(self, text: str) -> None:
+        self._can_retry = True
+        self._remember(text)
+        self.after(0, lambda line=text: self._append_error(line))
+
+    def _forget_retry(self) -> None:
+        self._retry_payload = None
+        self._can_retry = False
+        self._retry_buttons = []
+
+    def _set_retry_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        alive = []
+        for button in self._retry_buttons:
+            try:
+                if not button.winfo_exists():
+                    continue
+                button.configure(state=state)
+                alive.append(button)
+            except tk.TclError:
+                continue
+        self._retry_buttons = alive
+
+    def _append_error(self, text: str) -> None:
+        box = self.chat
+        if not box.winfo_exists():
+            return
+        box.configure(state="normal")
+        inner = box._textbox
+        start = inner.index("end-1c")
+        body = chat_body(text, "error")
+        inner.insert("end", body + "\n")
+        self._insert_retry_button(inner)
+        inner.tag_add("error", start, inner.index("end-1c"))
+        box.see("end")
+
+    def _insert_retry_button(self, inner) -> None:
+        self._set_retry_enabled(False)
+        button = tk.Button(
+            inner,
+            text="Повторить",
+            command=self.retry_last,
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            bg=_tone(BUTTON),
+            fg=_tone(TEXT),
+            activebackground=_tone(BUTTON_HOVER),
+            activeforeground=_tone(TEXT),
+            disabledforeground=_tone(MUTED),
+            font=self._px_font(12),
+        )
+        self._retry_buttons.append(button)
+        mark = inner.index("end-1c")
+        inner.window_create("end", window=button, padx=0, pady=2)
+        inner.insert("end", "\n\n")
+        inner.tag_add("error", mark, inner.index("end-1c"))
 
     def write_journal(self, text: str) -> None:
         self.write_chat(f"· {text.strip()}")
@@ -2679,6 +2819,7 @@ class App(ctk.CTk):
         self.chat_id = record["id"]
         self.chat_title = record["title"]
         self.transcript = list(record["lines"])
+        self._forget_retry()
         self._show_transcript()
         self.agent.reset_session(announce=False)
         self._refresh_chat_list()
@@ -2704,6 +2845,7 @@ class App(ctk.CTk):
             self.chat_id = None
             self.chat_title = ""
             self.transcript.clear()
+            self._forget_retry()
             self._clear_box(self.chat)
             self.agent.reset_session(announce=False)
         self._refresh_chat_list()
@@ -2746,6 +2888,15 @@ class App(ctk.CTk):
             spacing1=2,
             spacing3=4,
         )
+        inner.tag_configure(
+            "error",
+            lmargin1=12,
+            lmargin2=12,
+            rmargin=56,
+            foreground=_tone(CTX_FULL),
+            spacing1=4,
+            spacing3=6,
+        )
         inner.tag_configure("label", font=self._px_font(11), foreground=_tone(MUTED), spacing1=0, spacing3=2)
         inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
         inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
@@ -2768,6 +2919,16 @@ class App(ctk.CTk):
             spacing1=0,
             spacing3=8,
         )
+        inner.tag_configure(
+            "usercopy",
+            lmargin1=56,
+            lmargin2=56,
+            rmargin=12,
+            spacing1=0,
+            spacing3=8,
+        )
+        # Фон реплики «Вы» иначе перекрывает подсветку выделения.
+        inner.tag_raise("sel")
         inner.configure(pady=8)
         if self._chat_pad:
             inner.configure(padx=self._chat_pad)
@@ -2783,7 +2944,8 @@ class App(ctk.CTk):
         self._copy_photo_cache = photo
         return photo
 
-    def _make_copy_chip(self, body: str) -> tk.Label:
+    def _make_copy_chip(self, body: str, bg: tuple[str, str] | None = None) -> tk.Label:
+        fill = _tone(bg or INK)
         photo = self._copy_photo()
         chip = tk.Label(
             self.chat._textbox,
@@ -2791,14 +2953,14 @@ class App(ctk.CTk):
             bd=0,
             padx=2,
             pady=1,
-            bg=_tone(INK),
+            bg=fill,
             cursor="hand2",
             takefocus=0,
         )
         chip.image = photo
         chip.bind("<Button-1>", lambda _event, text=body: self._copy_agent_message(text))
         chip.bind("<Enter>", lambda _event: chip.configure(bg=_tone(PANEL)))
-        chip.bind("<Leave>", lambda _event: chip.configure(bg=_tone(INK)))
+        chip.bind("<Leave>", lambda _event, color=fill: chip.configure(bg=color))
         return chip
 
     def _copy_agent_message(self, text: str) -> None:
@@ -2813,9 +2975,19 @@ class App(ctk.CTk):
         start = inner.index("end-1c")
         role = self._role(text)
         body = chat_body(text, role)
+        copy_text = ""
         if role == "user":
             inner.insert("end", "Вы\n", ("label",))
-            inner.insert("end", body + "\n\n")
+            copy_text = user_copy_text(body)
+            inner.insert("end", body + "\n")
+            if copy_text:
+                mark = inner.index("end-1c")
+                chip = self._make_copy_chip(copy_text, USER_BG)
+                inner.window_create("end", window=chip, padx=0, pady=2)
+                inner.insert("end", "\n\n")
+                inner.tag_add("usercopy", mark, inner.index("end-1c"))
+            else:
+                inner.insert("end", "\n")
         elif role == "agent":
             inner.insert("end", "Ассистент\n", ("label",))
             for chunk, tag in chat_segments(body):
@@ -2829,20 +3001,80 @@ class App(ctk.CTk):
                 inner.tag_add("copyrow", mark, inner.index("end-1c"))
             else:
                 inner.insert("end", "\n\n")
+        elif role == "error":
+            inner.insert("end", body + "\n\n")
         else:
             inner.insert("end", body + "\n\n")
         inner.tag_add(role, start, inner.index("end-1c"))
+        if role == "user" and copy_text:
+            self._user_spans.append((start, inner.index("end-1c"), copy_text))
 
     def _show_transcript(self) -> None:
         box = self.chat
         if not box.winfo_exists():
             return
+        self._stream_open = False
+        self._user_spans = []
+        self._retry_buttons = []
         box.configure(state="normal")
         box.delete("1.0", "end")
         for line in self.transcript:
             self._insert_block(box, line)
         box.see("end")
         box.configure(state="normal")
+
+    def stream_chat(self, text: str, final: bool = False) -> None:
+        shown = text or ""
+        done = bool(final)
+        try:
+            self.after(0, lambda shown=shown, done=done: self._apply_stream(shown, done))
+        except Exception:
+            return
+
+    def _apply_stream(self, text: str, final: bool) -> None:
+        shown = (text or "").rstrip()
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            if final and shown:
+                self._remember(shown)
+            self._stream_open = False
+            return
+        if not shown and not self._stream_open:
+            return
+        box.configure(state="normal")
+        inner = box._textbox
+        if not self._stream_open:
+            origin = inner.index("end-1c")
+            inner.insert("end", "Ассистент\n", ("label",))
+            self._stream_origin = origin
+            self._stream_body_at = inner.index("end-1c")
+            self._stream_open = True
+        try:
+            if inner.compare(self._stream_body_at, "<", "end-1c"):
+                inner.delete(self._stream_body_at, "end-1c")
+        except tk.TclError:
+            self._stream_open = False
+            return
+        for chunk, tag in chat_segments(shown):
+            inner.insert("end-1c", chunk, (tag,) if tag else ())
+        end = inner.index("end-1c")
+        try:
+            if inner.compare(self._stream_origin, "<", end):
+                inner.tag_add("agent", self._stream_origin, end)
+        except tk.TclError:
+            pass
+        if final:
+            if shown:
+                inner.insert("end", "\n")
+                mark = inner.index("end-1c")
+                chip = self._make_copy_chip(shown)
+                inner.window_create("end", window=chip, padx=0, pady=2)
+                inner.insert("end", "\n\n")
+                inner.tag_add("copyrow", mark, inner.index("end-1c"))
+                inner.tag_add("agent", self._stream_origin, inner.index("end-1c"))
+                self._remember(shown)
+            self._stream_open = False
+        inner.see("end")
 
     def _append(self, box, text: str) -> None:
         def write() -> None:
@@ -2855,6 +3087,10 @@ class App(ctk.CTk):
         self.after(0, write)
 
     def _clear_box(self, box) -> None:
+        if box is getattr(self, "chat", None):
+            self._stream_open = False
+            self._user_spans = []
+            self._retry_buttons = []
         box.configure(state="normal")
         box.delete("1.0", "end")
 

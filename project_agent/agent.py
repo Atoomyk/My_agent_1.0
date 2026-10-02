@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from project_agent.providers import ApiError, Stopped, build_provider
@@ -48,7 +49,7 @@ SYSTEM = SYSTEM_AGENT
 
 
 class Agent:
-    def __init__(self, vault, toolbox, mcp, on_chat, on_journal, on_status, on_context=None) -> None:
+    def __init__(self, vault, toolbox, mcp, on_chat, on_journal, on_status, on_context=None, on_stream=None, on_error=None) -> None:
         self.vault = vault
         self.toolbox = toolbox
         self.mcp = mcp
@@ -56,6 +57,8 @@ class Agent:
         self.on_journal = on_journal
         self.on_status = on_status
         self.on_context = on_context or (lambda *_args, **_kwargs: None)
+        self.on_stream = on_stream
+        self.on_error = on_error
         self.provider = None
         self.provider_kind = None
         self.root: Path | None = None
@@ -96,11 +99,12 @@ class Agent:
             return f"{base}\n{block}"
         return base
 
-    def run_turn(self, text: str, images: list, settings: dict, stop: threading.Event) -> None:
+    def run_turn(self, text: str, images: list, settings: dict, stop: threading.Event, resend: bool = False) -> None:
         self.stop = stop
         self.toolbox.stop = stop
         self.toolbox.settings = lambda: settings
-        self.toolbox.begin_turn()
+        if not resend:
+            self.toolbox.begin_turn()
         if self.root is None:
             self.on_chat("Сначала выберите папку проекта.")
             return
@@ -117,7 +121,10 @@ class Agent:
         self.provider.configure(settings)
         self.provider.set_system(self._system())
         scrubber = Scrubber(self.vault, literals_from_settings(settings))
-        self.provider.add_user(scrubber(text), images)
+        if resend and self.provider.message_count():
+            self.provider.drop_incomplete_tail()
+        if not resend or self.provider.message_count() == 0:
+            self.provider.add_user(scrubber(text), images)
         specs = tools_for_mode(self._agent_mode)
         self._last_tools = specs
         max_steps = int(settings.get("max_steps") or 25)
@@ -130,24 +137,26 @@ class Agent:
                 return
             self.on_status(f"Шаг {step} из {max_steps}" + (" · Ask" if self._agent_mode == "ask" else ""))
             try:
-                turn = self.provider.complete(specs, scrubber)
-            except Stopped:
+                turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
+            except Stopped as exc:
+                self._emit_partial(exc, scrubber)
                 self.on_chat("Остановлено.")
                 self._publish_context(settings)
                 return
             except ApiError as exc:
-                self.on_chat(f"Ошибка API: {exc}")
+                self._emit_partial(exc, scrubber)
+                self._report_error(f"Ошибка API: {exc}")
                 self._publish_context(settings)
                 return
             except Exception as exc:
-                self.on_chat(f"Ошибка: {exc}")
+                self._report_error(f"Ошибка: {exc}")
                 self._publish_context(settings)
                 return
             if turn.prompt_tokens is not None:
                 self._context_from_api = True
                 self._emit_context(turn.prompt_tokens, settings, from_api=True)
             if turn.text.strip():
-                self.on_chat(scrubber(turn.text))
+                self._emit_assistant(scrubber(turn.text))
             if not turn.tool_calls:
                 if not turn.text.strip():
                     self.on_chat("(пустой ответ модели)")
@@ -202,6 +211,40 @@ class Agent:
         self._last_tools = tools_for_mode(normalize_agent_mode(settings.get("agent_mode")))
         self._publish_context(settings)
         self.on_status("Готово")
+
+    def _stream_hook(self, scrubber):
+        if self.on_stream is None:
+            return None
+        parts: list[str] = []
+        state = {"last": 0.0}
+
+        def on_piece(piece: str) -> None:
+            parts.append(piece)
+            now = time.monotonic()
+            if now - state["last"] < 0.05:
+                return
+            state["last"] = now
+            self.on_stream(scrubber("".join(parts)), False)
+
+        return on_piece
+
+    def _report_error(self, text: str) -> None:
+        if self.on_error is not None:
+            self.on_error(text)
+        else:
+            self.on_chat(text)
+
+    def _emit_partial(self, exc, scrubber) -> None:
+        self._emit_assistant(scrubber(getattr(exc, "partial", "") or ""))
+
+    def _emit_assistant(self, text: str) -> None:
+        text = (text or "").rstrip()
+        if not text:
+            return
+        if self.on_stream is not None:
+            self.on_stream(text, True)
+        else:
+            self.on_chat(text)
 
     def _announce_touched(self) -> None:
         paths = self.toolbox.touched_paths()
