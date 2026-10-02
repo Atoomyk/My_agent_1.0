@@ -40,7 +40,7 @@ from project_agent.context_attach import (
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
 from project_agent.paths import PathError, list_entries, read_text_file, relative_posix, resolve_inside
-from project_agent.secrets import Scrubber, SecretVault, literals_from_settings
+from project_agent.secrets import Scrubber, SecretVault, literals_from_settings, scrub_outbound
 from project_agent.index_store import build_index, index_summary
 from project_agent.rules import rules_summary
 from project_agent.testing import (
@@ -2683,6 +2683,7 @@ class App(ctk.CTk):
         else:
             self._set_retry_enabled(False)
             self.set_status("Готово")
+        self._store_chat()
         self._refresh_tree()
         self._reload_clean_editor()
         self._refresh_chat_list()
@@ -2795,7 +2796,17 @@ class App(ctk.CTk):
             scrubber = Scrubber(self.vault, literals_from_settings(self.collect_settings()))
             lines = [scrubber(line) for line in self.transcript]
             title = scrubber(self.chat_title) or "Чат"
-            save_chat(self.chat_id, title, str(self.project), lines)
+            provider, messages = self.agent.export_session()
+            if messages:
+                messages = scrub_outbound(messages, scrubber)
+            save_chat(
+                self.chat_id,
+                title,
+                str(self.project),
+                lines,
+                messages=messages,
+                provider=provider,
+            )
         except Exception as exc:
             self.set_status(f"Чат не сохранён: {exc}")
 
@@ -2840,10 +2851,27 @@ class App(ctk.CTk):
         self.transcript = list(record["lines"])
         self._forget_retry()
         self._show_transcript()
-        self.agent.reset_session(announce=False)
+        from project_agent.tools import normalize_agent_mode
+
+        self.agent._agent_mode = normalize_agent_mode(self.collect_settings().get("agent_mode"))
+        restored = False
+        messages = record.get("messages") or []
+        provider = record.get("provider") or ""
+        if messages and provider:
+            restored = self.agent.restore_session(provider, messages)
+        if not restored:
+            self.agent.reset_session(announce=False)
+            self.set_status("Чат открыт. Модель начинает заново.")
+        else:
+            self.set_status("Чат открыт. История модели восстановлена.")
+            settings = self.collect_settings()
+            if self.agent.provider is not None:
+                try:
+                    self.agent._publish_context(settings)
+                except Exception:
+                    self._apply_context(0, self.context_limit, False)
         self._refresh_chat_list()
         self._fit_labels()
-        self.set_status("Чат открыт. Модель начинает заново.")
 
     def delete_chat_item(self, chat_id: str) -> None:
         if self.running or not chat_id:

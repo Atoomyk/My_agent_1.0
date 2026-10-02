@@ -1091,11 +1091,72 @@ class ChatStoreTests(unittest.TestCase):
                 self.assertEqual([item["id"] for item in listed], [chat_id])
                 loaded = load_chat(chat_id)
                 self.assertEqual(loaded["lines"][0], "Вы: привет")
+                self.assertEqual(loaded["messages"], [])
                 delete_chat(chat_id)
                 self.assertIsNone(load_chat(chat_id))
                 self.assertEqual(list_chats(str(first)), [])
                 with self.assertRaises(ValueError):
                     delete_chat("../escape")
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
+    def test_messages_roundtrip_and_image_strip(self):
+        from project_agent.chats import sanitize_messages
+        from project_agent.agent import Agent
+        from project_agent.mcp_client import McpHub
+        from project_agent.tools import Toolbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                chat_id = new_chat_id()
+                raw_messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "посмотри"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,AAAA"},
+                            },
+                        ],
+                    },
+                    {"role": "assistant", "content": "ок, вижу"},
+                ]
+                save_chat(
+                    chat_id,
+                    "С картинкой",
+                    str(root),
+                    ["Вы: посмотри", "ок, вижу"],
+                    messages=raw_messages,
+                    provider="openai",
+                )
+                loaded = load_chat(chat_id)
+                self.assertEqual(loaded["provider"], "openai")
+                self.assertEqual(len(loaded["messages"]), 2)
+                blob = json.dumps(loaded["messages"], ensure_ascii=False)
+                self.assertNotIn("AAAA", blob)
+                self.assertIn("изображение опущено", blob)
+                cleaned = sanitize_messages(raw_messages)
+                self.assertEqual(cleaned[0]["content"][1]["type"], "text")
+
+                vault = SecretVault()
+                box = Toolbox(vault, lambda *_: True, McpHub(), lambda: {})
+                agent = Agent(vault, box, box.mcp, lambda *_: None, lambda *_: None, lambda *_: None)
+                agent.set_root(root)
+                self.assertTrue(agent.restore_session(loaded["provider"], loaded["messages"]))
+                self.assertEqual(agent.provider_kind, "openai")
+                self.assertEqual(len(agent.provider.messages), 2)
+                self.assertEqual(agent.provider.messages[-1]["content"], "ок, вижу")
+                kind, exported = agent.export_session()
+                self.assertEqual(kind, "openai")
+                self.assertEqual(len(exported), 2)
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)

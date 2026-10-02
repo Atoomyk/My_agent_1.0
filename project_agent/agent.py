@@ -83,6 +83,30 @@ class Agent:
         if announce:
             self.on_chat("Новый чат.")
 
+    def export_session(self) -> tuple[str, list]:
+        if self.provider is None:
+            return "", []
+        kind = self.provider.kind if self.provider.kind in ("openai", "anthropic") else ""
+        messages = list(self.provider.messages or [])
+        return kind, messages
+
+    def restore_session(self, provider: str, messages: list) -> bool:
+        from project_agent.chats import sanitize_messages
+
+        kind = str(provider or "").strip().lower()
+        if kind not in ("openai", "anthropic"):
+            return False
+        cleaned = sanitize_messages(messages)
+        if not cleaned:
+            return False
+        self.vault.clear()
+        self.mcp.close()
+        self.provider = build_provider(kind)
+        self.provider_kind = kind
+        self.provider.reset(self._system())
+        self.provider.messages = cleaned
+        return True
+
     def close(self) -> None:
         self.stop.set()
         if self.provider:
