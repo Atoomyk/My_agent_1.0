@@ -17,5 +17,6 @@
   "profiles": [],
   "mcp_servers": [],
   "agent_mode": "agent",
-  "context_limit": 256000
+  "context_limit": 256000,
+  "auto_write_project": false
 }

@@ -11,11 +11,13 @@ from pathlib import Path
 PRESETS = {
     "unittest": "unittest",
     "pytest": "pytest",
+    "npm": "npm",
 }
 PRESET_LABELS = {
     "Выключено": "",
     "unittest": "unittest",
     "pytest": "pytest",
+    "npm test": "npm",
 }
 LABEL_BY_PRESET = {value: key for key, value in PRESET_LABELS.items()}
 MAX_OUTPUT_CHARS = 32_000
@@ -103,15 +105,23 @@ def python_command() -> list[str]:
     raise ValueError("для exe нужен Python в PATH (python или py)")
 
 
+def npm_command() -> list[str]:
+    found = shutil.which("npm")
+    if not found:
+        raise ValueError("для пресета npm test нужен npm в PATH")
+    return [found]
+
+
 def preset_command(preset: str) -> list[str]:
     preset = normalize_preset(preset)
     if not preset:
         raise ValueError("пресет тестов выключен в настройках")
-    python = python_command()
     if preset == "unittest":
-        return [*python, "-m", "unittest", "discover", "-s", "tests", "-v"]
+        return [*python_command(), "-m", "unittest", "discover", "-s", "tests", "-v"]
     if preset == "pytest":
-        return [*python, "-m", "pytest", "-q"]
+        return [*python_command(), "-m", "pytest", "-q"]
+    if preset == "npm":
+        return [*npm_command(), "test"]
     raise ValueError("неизвестный пресет тестов")
 
 

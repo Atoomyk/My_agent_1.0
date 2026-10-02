@@ -39,6 +39,7 @@ def default_config() -> dict:
         "mcp_servers": [],
         "agent_mode": "agent",
         "context_limit": 256000,
+        "auto_write_project": False,
     }
 
 
@@ -161,6 +162,15 @@ def _context_limit(raw) -> int:
     return normalize_context_limit(raw)
 
 
+def _auto_write_project(raw) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    value = str(raw or "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def _write_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -236,6 +246,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
     merged["context_limit"] = _context_limit(data.get("context_limit"))
+    merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
     return merged, None
 
 
@@ -256,6 +267,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
     payload["context_limit"] = _context_limit(data.get("context_limit"))
+    payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
     _write_config(path, payload)
 
 

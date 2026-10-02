@@ -92,7 +92,7 @@ TOOL_SPECS = [
     },
     {
         "name": "write_file",
-        "description": "Полная перезапись файла внутри проекта. Выполняется только после подтверждения пользователя. Метки [[SEC:...]] копируй как есть, если секрет нужно сохранить.",
+        "description": "Полная перезапись файла внутри проекта. Обычно нужно подтверждение; если в настройках включены авто-правки проекта — без диалога. Метки [[SEC:...]] копируй как есть, если секрет нужно сохранить.",
         "parameters": _schema(
             {
                 "path": _string("Путь к файлу."),
@@ -104,7 +104,7 @@ TOOL_SPECS = [
     },
     {
         "name": "apply_patch",
-        "description": "Правка файла. Предпочтительный diff: блоки <<<<<<< SEARCH / ======= / >>>>>>> REPLACE с точным фрагментом. Также принимается unified diff. Нужно подтверждение пользователя.",
+        "description": "Правка файла. Предпочтительный diff: блоки <<<<<<< SEARCH / ======= / >>>>>>> REPLACE с точным фрагментом. Также принимается unified diff. Обычно нужно подтверждение; при авто-правках проекта — без диалога.",
         "parameters": _schema(
             {
                 "path": _string("Путь к файлу."),
@@ -148,7 +148,7 @@ TOOL_SPECS = [
     },
     {
         "name": "run_tests",
-        "description": "Запустить пресет тестов из настроек (unittest или pytest). Нужно подтверждение. Произвольные команды запрещены.",
+        "description": "Запустить пресет тестов из настроек (unittest, pytest или npm test). Нужно подтверждение. Произвольные команды запрещены.",
         "parameters": _schema(
             {"summary": _string("Короткая причина запуска без секретов.")},
             [],
@@ -476,7 +476,7 @@ class Toolbox:
         else:
             summary = self._summary(args.get("summary"), f"Запись, новый файл, {content.count(chr(10)) + 1} строк", hidden)
         detail = preview_unified(self._scrub(before, full), self._scrub(content, full), rel)
-        if self._stopped() or not self._confirm(rel, summary, detail):
+        if self._stopped() or not self._confirm_project_write(rel, summary, detail):
             return ToolOutcome(
                 "Пользователь отказался записывать файл. Не повторяй эту запись без новой причины.",
                 f"write_file {rel}: отказ",
@@ -519,7 +519,7 @@ class Toolbox:
         hidden = self.vault.count(diff)
         summary = self._summary(args.get("summary"), f"Правка +{plus} -{minus}", hidden)
         detail = preview_unified(self._scrub(original, full), self._scrub(updated, full), rel)
-        if self._stopped() or not self._confirm(rel, summary, detail):
+        if self._stopped() or not self._confirm_project_write(rel, summary, detail):
             return ToolOutcome(
                 "Пользователь отказался применять правку. Не повторяй её без новой причины.",
                 f"apply_patch {rel}: отказ",
@@ -635,7 +635,7 @@ class Toolbox:
         preset = normalize_preset(settings.get("test_preset"))
         if not preset:
             return ToolOutcome(
-                "Пресет тестов выключен. Включите unittest или pytest в настройках → Проект.",
+                "Пресет тестов выключен. Включите unittest, pytest или npm test в настройках → Проект.",
                 "run_tests: выключено",
             )
         rounds = normalize_fix_rounds(settings.get("test_fix_rounds"))
@@ -833,6 +833,20 @@ class Toolbox:
             journal = f"browser {action}: ошибка"
             text = "Ошибка браузера. " + text
         return ToolOutcome(text[:30_000], journal, images)
+
+    def _auto_write_project(self) -> bool:
+        settings = self.settings() or {}
+        raw = settings.get("auto_write_project")
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+    def _confirm_project_write(self, path: str, summary: str, detail: str = "") -> bool:
+        if self._auto_write_project():
+            return True
+        return self._confirm(path, summary, detail)
 
     def _confirm(self, path: str, summary: str, detail: str = "") -> bool:
         try:

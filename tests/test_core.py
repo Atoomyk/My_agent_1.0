@@ -306,6 +306,26 @@ class ToolTests(unittest.TestCase):
         self.assertIn("служебный", denied.model_text)
         self.assertFalse((self.root / ".git" / "config").exists())
 
+    def test_auto_write_skips_confirm(self):
+        self.settings["auto_write_project"] = True
+        before = len(self.notes)
+        self.confirm_result = False
+        outcome = self.box.execute("write_file", {"path": "auto.py", "content": "ok\n", "summary": "auto"})
+        self.assertEqual(len(self.notes), before)
+        self.assertIn("записано", outcome.journal)
+        self.assertEqual((self.root / "auto.py").read_text(encoding="utf-8"), "ok\n")
+        target = self.root / "auto.py"
+        diff = "<<<<<<< SEARCH\nok\n=======\nok2\n>>>>>>> REPLACE\n"
+        patched = self.box.execute("apply_patch", {"path": "auto.py", "diff": diff, "summary": "patch"})
+        self.assertEqual(len(self.notes), before)
+        self.assertIn("записано", patched.journal)
+        self.assertEqual(target.read_text(encoding="utf-8"), "ok2\n")
+        self.settings["auto_write_project"] = False
+        refused = self.box.execute("write_file", {"path": "auto.py", "content": "no\n", "summary": "back"})
+        self.assertEqual(len(self.notes), before + 1)
+        self.assertIn("отказался", refused.model_text)
+        self.assertEqual(target.read_text(encoding="utf-8"), "ok2\n")
+
     def test_patch_and_binary_and_escape(self):
         target = self.root / "app.py"
         target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -365,6 +385,7 @@ class ToolTests(unittest.TestCase):
 class TestRunnerTests(unittest.TestCase):
     def test_preset_and_clip(self):
         self.assertEqual(normalize_preset("pytest"), "pytest")
+        self.assertEqual(normalize_preset("npm"), "npm")
         self.assertEqual(normalize_preset("rm -rf"), "")
         self.assertEqual(normalize_timeout(5), 15)
         self.assertEqual(normalize_timeout(900), 600)
@@ -375,6 +396,14 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("unittest", command)
         with self.assertRaises(ValueError):
             preset_command("")
+        from unittest import mock
+
+        with mock.patch("project_agent.testing.shutil.which", return_value=r"C:\npm.cmd"):
+            npm_cmd = preset_command("npm")
+        self.assertEqual(npm_cmd, [r"C:\npm.cmd", "test"])
+        with mock.patch("project_agent.testing.shutil.which", return_value=None):
+            with self.assertRaises(ValueError):
+                preset_command("npm")
         long = "a" * 20_000 + "MID" + "b" * 20_000
         clipped = clip_output(long, 100)
         self.assertLessEqual(len(clipped), 110)
@@ -1117,6 +1146,11 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual(loaded["test_preset"], "unittest")
             self.assertEqual(loaded["test_timeout"], 90)
+            data["test_preset"] = "npm"
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["test_preset"], "npm")
             data["test_preset"] = "rm -rf /"
             data["test_timeout"] = 9999
             data["test_fix_rounds"] = 0
@@ -1126,6 +1160,17 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(loaded["test_timeout"], 600)
             self.assertEqual(loaded["test_fix_rounds"], 1)
             self.assertEqual(loaded["project_dir"], "")
+            data["auto_write_project"] = True
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertTrue(loaded["auto_write_project"])
+            data["auto_write_project"] = "nope"
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertFalse(loaded["auto_write_project"])
+            self.assertEqual(default_config()["auto_write_project"], False)
         example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         self.assertEqual(set(example), set(default_config()))
         self.assertEqual(example["api_key"], "")

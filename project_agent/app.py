@@ -769,14 +769,27 @@ class SettingsWindow(ctk.CTkToplevel):
         ).pack(fill="x", padx=8, pady=(8, 4))
 
     def _fill_security(self, page) -> None:
+        app = self.app
         ctk.CTkLabel(page, text="Безопасность", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
             fill="x", padx=8, pady=(8, 4)
         )
+        ctk.CTkSwitch(
+            page,
+            text="Разрешить правки в папке проекта без подтверждения",
+            variable=app.auto_write_var,
+            text_color=TEXT,
+            progress_color=CTX_OK,
+            button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER,
+            font=("Segoe UI", 12),
+        ).pack(fill="x", padx=8, pady=(8, 4))
         notes = (
             "Ключ и настройки хранятся только в %APPDATA%\\ProjectAgent\\config.json — в программу они не зашиты.\n\n"
             "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
-            "Запись файла, генерация изображения и запуск тестов всегда спрашивают подтверждение.\n\n"
-            "Команд произвольного терминала нет. Тесты — только пресет unittest или pytest из настроек.\n\n"
+            "По умолчанию запись файла спрашивает подтверждение. Переключатель выше снимает диалог "
+            "только для write_file / apply_patch внутри открытой папки проекта.\n\n"
+            "Генерация изображения, запуск тестов и git commit всегда спрашивают подтверждение.\n\n"
+            "Команд произвольного терминала нет. Тесты — только пресет unittest, pytest или npm test из настроек.\n\n"
             "Браузер не встроен: только MCP Playwright из настроек (если добавлен).\n\n"
             "Агент не выходит за выбранную папку проекта."
         )
@@ -886,6 +899,8 @@ class App(ctk.CTk):
         self.test_preset_var = ctk.StringVar(value="Выключено")
         self.test_timeout_var = ctk.StringVar(value="120")
         self.test_fix_rounds_var = ctk.StringVar(value="3")
+        self.auto_write_project = False
+        self.auto_write_var = ctk.BooleanVar(value=False)
         self._build()
         self._load()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1839,6 +1854,8 @@ class App(ctk.CTk):
         self.test_preset_var.set(LABEL_BY_PRESET.get(self.test_preset, "Выключено"))
         self.test_timeout_var.set(str(normalize_timeout(data.get("test_timeout"))))
         self.test_fix_rounds_var.set(str(normalize_fix_rounds(data.get("test_fix_rounds"))))
+        self.auto_write_project = bool(data.get("auto_write_project"))
+        self.auto_write_var.set(self.auto_write_project)
         self._set_agent_mode(data.get("agent_mode") or "agent", persist=False)
         from project_agent.context_usage import normalize_context_limit
 
@@ -1996,6 +2013,8 @@ class App(ctk.CTk):
         settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
         settings["agent_mode"] = self.agent_mode
         settings["context_limit"] = self.context_limit
+        settings["auto_write_project"] = bool(self.auto_write_var.get())
+        self.auto_write_project = settings["auto_write_project"]
         return settings
 
     def _set_agent_mode(self, mode: str, persist: bool = True) -> None:
