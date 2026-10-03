@@ -24,7 +24,6 @@ from project_agent.config import (
     needs_api_key,
     save_agent_mode,
     save_config,
-    save_prompt_height,
     save_theme,
 )
 from project_agent.context_attach import (
@@ -103,6 +102,8 @@ _GROUP_NAMES = 4
 # Группы с одним действием не сворачиваем: единственная строка и так информативна.
 _GROUP_FOLD = 2
 _CHIP_ROWS = 2
+_TASK_MIN_H = 56
+_COMPOSER_MAX_RATIO = 1 / 3
 
 
 def split_chat_stamp(text: str) -> tuple[str, str | None]:
@@ -953,7 +954,10 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_width = 420
-        self.prompt_height = 0
+        self._task_height = _TASK_MIN_H
+        self._task_width = 0
+        self._fit_composer_job = None
+        self._window_h = 0
         self.agent_mode = "agent"
         self.agent_mode_var = ctk.StringVar(value="Agent")
         self.context_limit = 256000
@@ -983,31 +987,32 @@ class App(ctk.CTk):
     def _build(self) -> None:
         self.bind_class("Text", "<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.bind_class("Entry", "<Control-KeyPress>", _on_layout_clipboard, add="+")
-        self.grid_columnconfigure(0, weight=0, minsize=56)
+        self.grid_columnconfigure(0, weight=0, minsize=28)
         self.grid_columnconfigure(1, weight=0, minsize=1)
         self.grid_columnconfigure(2, weight=0, minsize=248)
         self.grid_columnconfigure(3, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=56)
+        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=28)
         rail.grid(row=0, column=0, sticky="nsew")
+        rail.grid_propagate(False)
         rail.grid_rowconfigure(1, weight=1)
         self.project_badge = ctk.CTkButton(
             rail,
             text="·",
-            width=36,
-            height=36,
-            corner_radius=10,
+            width=24,
+            height=24,
+            corner_radius=8,
             border_width=1,
             border_color=BORDER,
             fg_color=BUTTON,
             hover_color=BUTTON_HOVER,
             text_color=TEXT,
-            font=self._font(14, weight="bold"),
+            font=self._font(11, weight="bold"),
             command=self.choose_folder,
         )
-        self.project_badge.grid(row=0, column=0, padx=10, pady=(12, 0))
-        icon_button(rail, "gear", self.open_settings, size=36).grid(row=2, column=0, padx=10, pady=(0, 12))
+        self.project_badge.grid(row=0, column=0, padx=2, pady=(12, 0))
+        icon_button(rail, "gear", self.open_settings, size=24).grid(row=2, column=0, padx=2, pady=(0, 12))
         ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
 
         side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=248)
@@ -1103,19 +1108,10 @@ class App(ctk.CTk):
         )
         self.chat_head.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 6))
         self.chat_head.bind("<Configure>", lambda _event: self._fit_labels())
-        self.stack = tk.PanedWindow(
-            self.center,
-            orient="vertical",
-            sashwidth=6,
-            sashrelief="flat",
-            bd=0,
-            bg=_tone(INK),
-            sashcursor="sb_v_double_arrow",
-        )
-        self.stack.grid(row=1, column=0, sticky="nsew")
-        self.stack.bind("<ButtonRelease-1>", self._remember_prompt_height)
-        chat_holder = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
+        self.center.grid_rowconfigure(2, weight=0)
+        chat_holder = ctk.CTkFrame(self.center, fg_color=INK, corner_radius=0)
         self.chat_holder = chat_holder
+        chat_holder.grid(row=1, column=0, sticky="nsew")
         chat_holder.grid_columnconfigure(0, weight=1)
         chat_holder.grid_rowconfigure(1, weight=1)
         self.search_bar = ctk.CTkFrame(
@@ -1161,7 +1157,6 @@ class App(ctk.CTk):
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
         self.chat.grid(row=1, column=0, sticky="nsew", padx=(8, 0))
-        self.stack.add(chat_holder, stretch="always", minsize=140, sticky="nsew")
         self._tag_chat()
         self.chat._textbox.bind("<Configure>", self._center_chat, add="+")
         self.chat.bind("<<Paste>>", lambda _event: "break")
@@ -1213,24 +1208,24 @@ class App(ctk.CTk):
         self.editor_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.editor_box._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
 
-        bottom = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
+        bottom = ctk.CTkFrame(self.center, fg_color=INK, corner_radius=0)
         self.bottom = bottom
+        bottom.grid(row=2, column=0, sticky="ew")
         bottom.grid_columnconfigure(0, weight=1)
-        bottom.grid_rowconfigure(0, weight=1)
-        self.stack.add(bottom, stretch="never", minsize=150, sticky="nsew")
+        bottom.grid_rowconfigure(0, weight=0)
         bottom.bind("<Configure>", self._center_composer, add="+")
         card = ctk.CTkFrame(bottom, fg_color=FIELD, corner_radius=16, border_width=1, border_color=BORDER)
         self.card = card
-        card.grid(row=0, column=0, sticky="nsew", padx=24, pady=(6, 0))
+        card.grid(row=0, column=0, sticky="ew", padx=24, pady=(0, 0))
         card.grid_columnconfigure(1, weight=1)
-        card.grid_rowconfigure(1, weight=1)
+        card.grid_rowconfigure(1, weight=0)
         self.attach_row = ctk.CTkFrame(card, fg_color="transparent")
         self.attach_row.grid(row=0, column=0, columnspan=3, sticky="ew", padx=10, pady=(8, 0))
         self.attach_row.grid_remove()
         self.attach_row.bind("<Configure>", self._on_attach_resize, add="+")
         self.task = ctk.CTkTextbox(
             card,
-            height=56,
+            height=_TASK_MIN_H,
             fg_color=FIELD,
             text_color=TEXT,
             border_width=0,
@@ -1239,7 +1234,7 @@ class App(ctk.CTk):
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.task.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=10, pady=(8, 0))
+        self.task.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(8, 0))
         self.task.bind("<Return>", self._send_key)
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
@@ -1265,12 +1260,12 @@ class App(ctk.CTk):
         inner.bind("<FocusIn>", self._task_focus_in, add="+")
         inner.bind("<FocusOut>", self._task_focus_out, add="+")
         inner.bind("<<Modified>>", self._on_task_modified, add="+")
+        inner.bind("<Configure>", self._on_task_configure, add="+")
         self._sync_placeholder()
         self.image_button = icon_button(card, "plus", self._attach_menu, size=32)
-        self.image_button.grid(row=2, column=0, padx=(8, 4), pady=8, sticky="w")
-        self.send_button = quiet_button(card, "", self._send_or_stop, round_mark=True)
-        self.send_button.configure(width=34, height=34, corner_radius=17)
-        self.send_button.grid(row=2, column=2, padx=(4, 8), pady=8, sticky="e")
+        self.image_button.grid(row=2, column=0, padx=(8, 4), pady=(2, 6), sticky="w")
+        self.send_button = icon_button(card, "send", self._send_or_stop, size=32)
+        self.send_button.grid(row=2, column=2, padx=(4, 8), pady=(2, 6), sticky="e")
         inner.bind("<KeyRelease>", self._on_task_key, add="+")
         inner.bind("<Escape>", self._hide_at_popup, add="+")
         inner.bind("<Down>", self._at_move, add="+")
@@ -1353,6 +1348,8 @@ class App(ctk.CTk):
         self.context_bar.set(0)
         self.status_label = ctk.CTkLabel(footer, text="Готово", anchor="e", text_color=MUTED, font=self._font(11))
         self.status_label.grid(row=0, column=5, sticky="e")
+        self.bind("<Configure>", self._on_window_configure, add="+")
+        self.after(80, self._fit_composer)
 
     def _font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
         return (family, size, weight)
@@ -1530,6 +1527,101 @@ class App(ctk.CTk):
             self.placeholder.place_forget()
         else:
             self._sync_placeholder()
+        self._schedule_fit_composer()
+
+    def _on_window_configure(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        try:
+            height = int(self.winfo_height())
+        except tk.TclError:
+            return
+        if height < 200 or height == self._window_h:
+            return
+        self._window_h = height
+        self._schedule_fit_composer()
+
+    def _on_task_configure(self, event=None) -> None:
+        if event is None:
+            self._schedule_fit_composer()
+            return
+        width = int(getattr(event, "width", 0) or 0)
+        if width < 40 or width == self._task_width:
+            return
+        self._task_width = width
+        self._schedule_fit_composer()
+
+    def _schedule_fit_composer(self) -> None:
+        if self._closing:
+            return
+        job = self._fit_composer_job
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+        try:
+            self._fit_composer_job = self.after(30, self._fit_composer)
+        except tk.TclError:
+            self._fit_composer_job = None
+
+    def _task_needed_height(self) -> int:
+        inner = self.task._textbox
+        try:
+            text = inner.get("1.0", "end-1c")
+        except tk.TclError:
+            return _TASK_MIN_H
+        font = tkfont.Font(font=self._px_font(13))
+        line_h = max(14, int(font.metrics("linespace")))
+        try:
+            width = max(inner.winfo_width() - 8, 120)
+        except tk.TclError:
+            width = 120
+        lines = 0
+        for paragraph in text.split("\n"):
+            if not paragraph:
+                lines += 1
+                continue
+            span = max(1, math.ceil(font.measure(paragraph) / width))
+            lines += span
+        lines = max(1, lines)
+        return max(_TASK_MIN_H, lines * line_h + 14)
+
+    def _fit_composer(self) -> None:
+        self._fit_composer_job = None
+        if self._closing or not hasattr(self, "task"):
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            window_h = max(int(self.winfo_height()), 400)
+        except tk.TclError:
+            return
+        max_bottom = max(160, int(window_h * _COMPOSER_MAX_RATIO))
+        try:
+            footer_h = self.footer.winfo_reqheight() if self.footer.winfo_ismapped() else 36
+        except tk.TclError:
+            footer_h = 36
+        try:
+            attach_h = self.attach_row.winfo_reqheight() if self.attach_row.winfo_ismapped() else 0
+        except tk.TclError:
+            attach_h = 0
+        # ряд кнопок + поля карточки + футер
+        chrome = footer_h + attach_h + 48
+        max_task = max(_TASK_MIN_H, max_bottom - chrome)
+        needed = self._task_needed_height()
+        height = min(max(needed, _TASK_MIN_H), max_task)
+        if height == self._task_height:
+            return
+        self._task_height = height
+        try:
+            self.task.configure(height=height)
+        except tk.TclError:
+            return
+        self.after(0, self._sync_placeholder)
 
     def _sync_placeholder(self) -> None:
         if not hasattr(self, "task") or not hasattr(self, "placeholder"):
@@ -1551,7 +1643,7 @@ class App(ctk.CTk):
             self.send()
 
     def _show_running(self, running: bool) -> None:
-        self.send_button.configure(image=glyph("halt" if running else "send", invert=True))
+        self.send_button.configure(image=glyph("halt" if running else "send"))
 
     def _chat_menu(self, event) -> str | None:
         row = self.chat_tree.identify_row(event.y)
@@ -1747,35 +1839,6 @@ class App(ctk.CTk):
         except tk.TclError:
             return
         self.editor_width = max(240, total - left)
-
-    def _place_composer_sash(self, tries: int = 0) -> None:
-        total = self.stack.winfo_height()
-        if total < 200:
-            if tries < 8:
-                self.after(50, lambda: self._place_composer_sash(tries + 1))
-            return
-        natural = max(150, self.bottom.winfo_reqheight())
-        wanted = self.prompt_height or natural
-        wanted = max(natural, min(wanted, total - 140))
-        try:
-            self.stack.sash_place(0, 1, max(140, total - wanted))
-        except tk.TclError:
-            return
-
-    def _remember_prompt_height(self, _event=None) -> None:
-        total = self.stack.winfo_height()
-        try:
-            _left, top = self.stack.sash_coord(0)
-        except tk.TclError:
-            return
-        height = max(150, total - int(top))
-        if height == self.prompt_height:
-            return
-        self.prompt_height = height
-        try:
-            save_prompt_height(height)
-        except Exception as exc:
-            self.write_chat(f"Не удалось сохранить высоту поля: {exc}")
 
     def _save_editor(self) -> None:
         if not self.editor_open or self.project is None:
@@ -2180,8 +2243,6 @@ class App(ctk.CTk):
     def _load(self) -> None:
         data, error = load_config()
         self._apply_theme(data["theme"])
-        self.prompt_height = int(data.get("prompt_height") or 0)
-        self.after(50, self._place_composer_sash)
         self.profiles = list(data["profiles"])
         self.active_profile = data["active_profile"]
         self._sync_profile_menu()
@@ -2215,8 +2276,6 @@ class App(ctk.CTk):
         self.after(60, self._restore_theme_windows)
         if hasattr(self, "work"):
             self.work.configure(bg=_tone(INK))
-        if hasattr(self, "stack"):
-            self.stack.configure(bg=_tone(INK))
         if hasattr(self, "tree"):
             self._style_tree()
         if hasattr(self, "chat"):
@@ -2343,7 +2402,7 @@ class App(ctk.CTk):
         settings["profiles"] = list(self.profiles)
         settings["mcp_servers"] = self._servers_for_save()
         settings["theme"] = self.theme
-        settings["prompt_height"] = self.prompt_height
+        settings["prompt_height"] = 0
         settings["test_preset"] = PRESET_LABELS.get(self.test_preset_var.get(), self.test_preset)
         settings["test_timeout"] = normalize_timeout(self.test_timeout_var.get())
         settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
@@ -2668,8 +2727,9 @@ class App(ctk.CTk):
         else:
             self.attach_row.grid()
             self._fill_chips()
-        # ряд чипов двигает поле ввода — подсказку надо переставить.
+        # ряд чипов двигает поле ввода — подсказку и высоту надо пересчитать.
         self.after(0, self._sync_placeholder)
+        self._schedule_fit_composer()
 
     def _fill_chips(self) -> None:
         self._clear_chips()
@@ -2692,7 +2752,7 @@ class App(ctk.CTk):
             lines[-1].append(spec)
             used += span
         shown = sum(len(line) for line in lines)
-        self._ensure_composer_room(sum(1 for line in lines if line))
+        self._schedule_fit_composer()
         for index, line in enumerate(lines):
             if not line:
                 continue
@@ -2722,22 +2782,6 @@ class App(ctk.CTk):
                         command=self.clear_attachments,
                     )
                     clear.pack(side="left", padx=(2, 0))
-
-    def _ensure_composer_room(self, rows: int) -> None:
-        """Чипы отъедают высоту у поля ввода — опускаем разделитель, если тесно."""
-        if rows <= 0 or not hasattr(self, "stack"):
-            return
-        least = 150 + rows * 28
-        total = self.stack.winfo_height()
-        if total <= least + 140:
-            return
-        try:
-            _left, top = self.stack.sash_coord(0)
-            if total - int(top) >= least:
-                return
-            self.stack.sash_place(0, 1, total - least)
-        except tk.TclError:
-            return
 
     def _make_chip(self, parent, spec: dict) -> ctk.CTkFrame:
         chip = ctk.CTkFrame(parent, fg_color=BUTTON, corner_radius=8, border_width=1, border_color=BORDER)
