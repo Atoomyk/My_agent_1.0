@@ -194,6 +194,40 @@ class ChatMarkupTests(unittest.TestCase):
         self.assertEqual(user_copy_text("(контекст)\n(папки: src)"), "(контекст)")
         self.assertEqual(user_copy_text("см. (файлы: a.py) в тексте\nхвост"), "см. (файлы: a.py) в тексте\nхвост")
 
+    def test_running_journal_is_detected(self):
+        from project_agent.app import is_running_journal, with_chat_stamp
+
+        self.assertTrue(is_running_journal("· read_file app.py: выполняется…"))
+        self.assertTrue(is_running_journal(with_chat_stamp("· browser snapshot: выполняется…")))
+        self.assertFalse(is_running_journal("· read_file app.py: 120 строк"))
+        self.assertFalse(is_running_journal("готово"))
+
+    def test_tool_short_name(self):
+        from project_agent.app import tool_short_name
+
+        self.assertEqual(tool_short_name("· read_file app.py: 120 строк"), "read_file")
+        self.assertEqual(tool_short_name("· run_tests: PASS"), "run_tests")
+        self.assertEqual(tool_short_name("· mcp play.browser: выполнено"), "mcp")
+        self.assertEqual(tool_short_name("· изменены: a.py, b.py"), "изменены")
+        self.assertEqual(tool_short_name(""), "")
+
+    def test_tool_group_title(self):
+        from project_agent.app import tool_group_title
+
+        self.assertEqual(tool_group_title(["read_file"], 1, True), "▾ 1 действие")
+        self.assertEqual(tool_group_title([], 3, True), "▾ 3 действия")
+        self.assertEqual(tool_group_title([], 5, True), "▾ 5 действий")
+        self.assertEqual(tool_group_title([], 11, True), "▾ 11 действий")
+        self.assertEqual(
+            tool_group_title(["read_file", "search"], 2, False),
+            "▸ 2 действия · read_file, search",
+        )
+        self.assertEqual(
+            tool_group_title(["a", "b", "c", "d", "e"], 5, False),
+            "▸ 5 действий · a, b, c, d, …",
+        )
+        self.assertEqual(tool_group_title([], 2, False), "▸ 2 действия")
+
 
 class ClipboardTests(unittest.TestCase):
     def test_russian_layout_copies_and_english_keys_stay(self):

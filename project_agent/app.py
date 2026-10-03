@@ -90,12 +90,19 @@ CODE_TEXT = ("#0f7b8a", "#6cc7d3")
 CTX_OK = ("#5a8f6a", "#6aab7a")
 CTX_WARN = ("#c48a2e", "#d4a04a")
 CTX_FULL = ("#c45a4a", "#d46a5a")
+SEARCH_BG = ("#efe0b8", "#4a3f24")
+SEARCH_CUR = ("#e0b86a", "#7a5e28")
 CHAT_COLUMN = 820
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
 _USER_ATTACH_LINE = re.compile(r"^\((?:папки|файлы): .+\)$|^\(изображений: \d+\)$")
 _CHAT_STAMP = re.compile(r"\n(\d{2}:\d{2})\s*$")
+_RUNNING_TAIL = "выполняется…"
+_GROUP_NAMES = 4
+# Группы с одним действием не сворачиваем: единственная строка и так информативна.
+_GROUP_FOLD = 2
+_CHIP_ROWS = 2
 
 
 def split_chat_stamp(text: str) -> tuple[str, str | None]:
@@ -180,6 +187,41 @@ def chat_segments(text: str) -> list[tuple[str, str]]:
         else:
             merged.append((chunk, tag))
     return merged
+
+
+def is_running_journal(text: str) -> bool:
+    body, _ = split_chat_stamp(text)
+    return body.rstrip().endswith(_RUNNING_TAIL)
+
+
+def tool_short_name(body: str) -> str:
+    head = (body or "").strip().lstrip("·").strip()
+    head = head.split(":", 1)[0]
+    head = head.split(" ", 1)[0]
+    return head.strip()[:24]
+
+
+def actions_word(count: int) -> str:
+    if 11 <= count % 100 <= 14:
+        return "действий"
+    last = count % 10
+    if last == 1:
+        return "действие"
+    if 2 <= last <= 4:
+        return "действия"
+    return "действий"
+
+
+def tool_group_title(names, count: int, opened: bool) -> str:
+    total = max(int(count or 0), 0)
+    label = f"{total} {actions_word(total)}"
+    if opened:
+        return f"▾ {label}"
+    listed = list(names or [])
+    tail = ", ".join(listed[:_GROUP_NAMES])
+    if len(listed) > _GROUP_NAMES:
+        tail += ", …"
+    return f"▸ {label} · {tail}" if tail else f"▸ {label}"
 
 
 def elide(text: str, width: int, measure) -> str:
@@ -880,6 +922,17 @@ class App(ctk.CTk):
         self._retry_payload: dict | None = None
         self._can_retry = False
         self._retry_buttons: list[tk.Button] = []
+        self._tool_groups: list[dict] = []
+        self._tool_group: dict | None = None
+        self._group_seq = 0
+        self._running_tool: tuple[str, str] | None = None
+        self._chip_width = 0
+        self._chat_stick = True
+        self._search_open = False
+        self._search_hits: list[tuple[str, str]] = []
+        self._search_index = -1
+        self._search_query = ""
+        self._closing = False
         self.vault = SecretVault()
         self.mcp = McpHub()
         self.toolbox = Toolbox(self.vault, self.confirm, self.mcp, self.collect_settings)
@@ -1062,8 +1115,40 @@ class App(ctk.CTk):
         self.stack.grid(row=1, column=0, sticky="nsew")
         self.stack.bind("<ButtonRelease-1>", self._remember_prompt_height)
         chat_holder = ctk.CTkFrame(self.stack, fg_color=INK, corner_radius=0)
+        self.chat_holder = chat_holder
         chat_holder.grid_columnconfigure(0, weight=1)
-        chat_holder.grid_rowconfigure(0, weight=1)
+        chat_holder.grid_rowconfigure(1, weight=1)
+        self.search_bar = ctk.CTkFrame(
+            chat_holder, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER, height=36
+        )
+        self.search_bar.grid(row=0, column=0, sticky="ew", padx=(16, 16), pady=(0, 6))
+        self.search_bar.grid_columnconfigure(0, weight=1)
+        self.search_bar.grid_remove()
+        self.search_var = ctk.StringVar(value="")
+        self.search_entry = ctk.CTkEntry(
+            self.search_bar,
+            textvariable=self.search_var,
+            placeholder_text="Поиск по чату",
+            height=28,
+            border_width=0,
+            fg_color=FIELD,
+            text_color=TEXT,
+            font=self._font(12),
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(8, 4), pady=4)
+        self.search_count = ctk.CTkLabel(
+            self.search_bar, text="", width=52, text_color=MUTED, font=self._font(11)
+        )
+        self.search_count.grid(row=0, column=1, padx=(0, 2))
+        quiet_button(self.search_bar, "↑", self._search_prev, width=32).grid(row=0, column=2, padx=2, pady=4)
+        quiet_button(self.search_bar, "↓", self._search_next, width=32).grid(row=0, column=3, padx=2, pady=4)
+        icon_button(self.search_bar, "close", self.close_chat_search, size=28).grid(
+            row=0, column=4, padx=(2, 6), pady=4
+        )
+        self.search_var.trace_add("write", lambda *_args: self._run_chat_search())
+        self.search_entry.bind("<Return>", lambda _e: self._search_next())
+        self.search_entry.bind("<Shift-Return>", lambda _e: self._search_prev())
+        self.search_entry.bind("<Escape>", lambda _e: self.close_chat_search())
         self.chat = ctk.CTkTextbox(
             chat_holder,
             wrap="word",
@@ -1075,15 +1160,33 @@ class App(ctk.CTk):
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.chat.grid(row=0, column=0, sticky="nsew", padx=(8, 0))
+        self.chat.grid(row=1, column=0, sticky="nsew", padx=(8, 0))
         self.stack.add(chat_holder, stretch="always", minsize=140, sticky="nsew")
         self._tag_chat()
         self.chat._textbox.bind("<Configure>", self._center_chat, add="+")
         self.chat.bind("<<Paste>>", lambda _event: "break")
         self.chat.bind("<<Cut>>", lambda _event: "break")
         self.chat.bind("<Key>", self._chat_key)
-        self.chat._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
+        self.chat._textbox.bind("<Control-KeyPress>", self._on_chat_control, add="+")
         self.chat._textbox.bind("<Button-3>", self._chat_text_menu)
+        self.chat._textbox.configure(yscrollcommand=self._chat_scroll_set)
+        self.chat._y_scrollbar.configure(command=self._chat_yview)
+        self.jump_down = ctk.CTkButton(
+            chat_holder,
+            text="↓",
+            width=34,
+            height=34,
+            corner_radius=17,
+            border_width=1,
+            border_color=BORDER,
+            fg_color=BUTTON,
+            hover_color=BUTTON_HOVER,
+            text_color=TEXT,
+            font=self._font(14, weight="bold"),
+            command=self._jump_chat_end,
+        )
+        self.jump_down.place_forget()
+        self.bind_all("<Control-KeyPress>", self._on_find_key, add="+")
         _READONLY_TEXT.add(str(self.chat._textbox))
 
         self.editor_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
@@ -1120,7 +1223,11 @@ class App(ctk.CTk):
         self.card = card
         card.grid(row=0, column=0, sticky="nsew", padx=24, pady=(6, 0))
         card.grid_columnconfigure(1, weight=1)
-        card.grid_rowconfigure(0, weight=1)
+        card.grid_rowconfigure(1, weight=1)
+        self.attach_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.attach_row.grid(row=0, column=0, columnspan=3, sticky="ew", padx=10, pady=(8, 0))
+        self.attach_row.grid_remove()
+        self.attach_row.bind("<Configure>", self._on_attach_resize, add="+")
         self.task = ctk.CTkTextbox(
             card,
             height=56,
@@ -1132,7 +1239,7 @@ class App(ctk.CTk):
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.task.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=10, pady=(10, 0))
+        self.task.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=10, pady=(8, 0))
         self.task.bind("<Return>", self._send_key)
         self.task.bind("<KP_Enter>", self._send_key)
         self.task.bind("<Control-Return>", self._send_key)
@@ -1160,13 +1267,10 @@ class App(ctk.CTk):
         inner.bind("<<Modified>>", self._on_task_modified, add="+")
         self._sync_placeholder()
         self.image_button = icon_button(card, "plus", self._attach_menu, size=32)
-        self.image_button.grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
-        self.attach_label = ctk.CTkLabel(card, text="", anchor="w", text_color=MUTED, font=self._font(11))
-        self.attach_label.grid(row=1, column=1, sticky="ew", padx=4)
-        self.attach_label.bind("<Button-1>", lambda _e: self.clear_attachments())
+        self.image_button.grid(row=2, column=0, padx=(8, 4), pady=8, sticky="w")
         self.send_button = quiet_button(card, "", self._send_or_stop, round_mark=True)
         self.send_button.configure(width=34, height=34, corner_radius=17)
-        self.send_button.grid(row=1, column=2, padx=(4, 8), pady=8, sticky="e")
+        self.send_button.grid(row=2, column=2, padx=(4, 8), pady=8, sticky="e")
         inner.bind("<KeyRelease>", self._on_task_key, add="+")
         inner.bind("<Escape>", self._hide_at_popup, add="+")
         inner.bind("<Down>", self._at_move, add="+")
@@ -1267,7 +1371,12 @@ class App(ctk.CTk):
         return font.measure
 
     def _fit_labels(self) -> None:
-        if not hasattr(self, "chat_head"):
+        if self._closing or not hasattr(self, "chat_head"):
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
             return
         if self.project is None:
             name, path = "Папка не выбрана", "нажмите «…», чтобы выбрать"
@@ -1279,10 +1388,15 @@ class App(ctk.CTk):
             (self.folder_path, path, 11, "normal"),
             (self.chat_head, title, 13, "bold"),
         ):
-            width = label.winfo_width() - 4
-            shown = elide(text, width, self._measure(size, weight)) if width > 20 else text
-            if label.cget("text") != shown:
-                label.configure(text=shown)
+            try:
+                if not label.winfo_exists():
+                    continue
+                width = label.winfo_width() - 4
+                shown = elide(text, width, self._measure(size, weight)) if width > 20 else text
+                if label.cget("text") != shown:
+                    label.configure(text=shown)
+            except tk.TclError:
+                continue
 
     def _show_folder(self) -> None:
         letter = (self.project.name[:1] if self.project is not None else "") or "·"
@@ -1715,6 +1829,9 @@ class App(ctk.CTk):
         if event.keysym in _CHAT_FREE:
             return
         if event.state & 0x4:
+            if self._is_find_key(event):
+                self.open_chat_search()
+                return "break"
             action = clipboard_action(str(event.keysym), int(getattr(event, "keycode", 0) or 0))
             if action in {"copy", "select"}:
                 apply_layout_clipboard(event.widget, action)
@@ -1726,6 +1843,204 @@ class App(ctk.CTk):
                 return "break"
             return "break"
         return "break"
+
+    def _on_chat_control(self, event):
+        if not (int(getattr(event, "state", 0) or 0) & 0x4):
+            return
+        if self._is_find_key(event):
+            self.open_chat_search()
+            return "break"
+        return _on_layout_clipboard(event)
+
+    def _is_find_key(self, event) -> bool:
+        # F / А (ЙЦУКЕН) — поиск по чату.
+        symbol = str(getattr(event, "keysym", "") or "")
+        if symbol.lower() in {"f", "cyrillic_a"}:
+            return True
+        return int(getattr(event, "keycode", 0) or 0) == 70
+
+    def _on_find_key(self, event):
+        if not (int(getattr(event, "state", 0) or 0) & 0x4):
+            return
+        if not self._is_find_key(event):
+            return
+        # Не перехватываем Ctrl+F в чужих toplevel (настройки/диалоги).
+        try:
+            if event.widget.winfo_toplevel() is not self:
+                return
+        except tk.TclError:
+            return
+        self.open_chat_search()
+        return "break"
+
+    def open_chat_search(self) -> None:
+        if not hasattr(self, "search_bar"):
+            return
+        self._search_open = True
+        self.search_bar.grid()
+        try:
+            self.search_entry.focus_set()
+            self.search_entry.select_range(0, "end")
+        except tk.TclError:
+            pass
+        self._run_chat_search()
+
+    def close_chat_search(self, _event=None):
+        if not hasattr(self, "search_bar"):
+            return None
+        self._search_open = False
+        self.search_bar.grid_remove()
+        self._clear_search_marks()
+        self._search_hits = []
+        self._search_index = -1
+        self._search_query = ""
+        self.search_count.configure(text="")
+        try:
+            self.task._textbox.focus_set()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _clear_search_marks(self) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        try:
+            box._textbox.tag_remove("search", "1.0", "end")
+            box._textbox.tag_remove("searchcur", "1.0", "end")
+        except tk.TclError:
+            return
+
+    def _run_chat_search(self) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists() or not self._search_open:
+            return
+        query = self.search_var.get()
+        self._search_query = query
+        self._clear_search_marks()
+        self._search_hits = []
+        self._search_index = -1
+        needle = query.strip()
+        if not needle:
+            self.search_count.configure(text="")
+            return
+        inner = box._textbox
+        start = "1.0"
+        while True:
+            # -elide: искать и в свёрнутых блоках инструментов
+            found = inner.search(needle, start, stopindex="end", nocase=True, elide=True)
+            if not found:
+                break
+            end = f"{found}+{len(needle)}c"
+            self._search_hits.append((found, end))
+            inner.tag_add("search", found, end)
+            start = end
+        if not self._search_hits:
+            self.search_count.configure(text="0/0")
+            return
+        self._search_index = 0
+        self._focus_search_hit()
+
+    def _focus_search_hit(self) -> None:
+        if not self._search_hits:
+            self.search_count.configure(text="0/0")
+            return
+        index = max(0, min(self._search_index, len(self._search_hits) - 1))
+        self._search_index = index
+        box = self.chat
+        inner = box._textbox
+        try:
+            inner.tag_remove("searchcur", "1.0", "end")
+            start, end = self._search_hits[index]
+            # Если совпадение в свёрнутом блоке инструментов — раскрыть.
+            for group in self._tool_groups:
+                if not group["open"] and group["tag"] in inner.tag_names(start):
+                    self._toggle_tool_group(group)
+                    break
+            inner.tag_add("searchcur", start, end)
+            inner.see(start)
+            self._chat_stick = False
+            self._update_jump_down()
+        except tk.TclError:
+            pass
+        self.search_count.configure(text=f"{index + 1}/{len(self._search_hits)}")
+
+    def _search_next(self, _event=None):
+        if not self._search_hits:
+            self._run_chat_search()
+            return "break"
+        self._search_index = (self._search_index + 1) % len(self._search_hits)
+        self._focus_search_hit()
+        return "break"
+
+    def _search_prev(self, _event=None):
+        if not self._search_hits:
+            self._run_chat_search()
+            return "break"
+        self._search_index = (self._search_index - 1) % len(self._search_hits)
+        self._focus_search_hit()
+        return "break"
+
+    def _chat_scroll_set(self, first, last) -> None:
+        try:
+            self.chat._y_scrollbar.set(first, last)
+        except (tk.TclError, AttributeError):
+            pass
+        try:
+            self._chat_stick = float(last) >= 0.985
+        except (TypeError, ValueError):
+            self._chat_stick = True
+        self._update_jump_down(last)
+
+    def _chat_yview(self, *args) -> None:
+        self.chat._textbox.yview(*args)
+        try:
+            _first, last = self.chat._textbox.yview()
+            self._chat_stick = float(last) >= 0.985
+            self._update_jump_down(last)
+        except (tk.TclError, ValueError, TypeError):
+            return
+
+    def _chat_near_bottom(self) -> bool:
+        try:
+            _first, last = self.chat._textbox.yview()
+            return float(last) >= 0.985
+        except (tk.TclError, ValueError, TypeError):
+            return True
+
+    def _chat_see_end(self, force: bool = False) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        if force or self._chat_stick or self._chat_near_bottom():
+            box.see("end")
+            self._chat_stick = True
+        self._update_jump_down()
+
+    def _jump_chat_end(self) -> None:
+        self._chat_stick = True
+        self._chat_see_end(force=True)
+
+    def _update_jump_down(self, last=None) -> None:
+        button = getattr(self, "jump_down", None)
+        box = getattr(self, "chat", None)
+        if button is None or box is None or not box.winfo_exists():
+            return
+        if last is None:
+            try:
+                _first, last = box._textbox.yview()
+            except tk.TclError:
+                button.place_forget()
+                return
+        try:
+            show = float(last) < 0.985
+        except (TypeError, ValueError):
+            show = False
+        if show:
+            button.place(relx=1.0, rely=1.0, x=-18, y=-18, anchor="se")
+            button.lift()
+        else:
+            button.place_forget()
 
     def _chat_text_menu(self, event) -> str | None:
         inner = self.chat._textbox
@@ -2322,21 +2637,126 @@ class App(ctk.CTk):
             return "break"
         return None
 
+    def _attach_specs(self) -> list[dict]:
+        specs = [{"kind": "dir", "path": path, "text": "@" + Path(path).name + "/"} for path in self.context_dirs]
+        specs += [{"kind": "file", "path": path, "text": "@" + Path(path).name} for path in self.context_files]
+        specs += [{"kind": "image", "path": path, "text": Path(path).name} for path in self.attached]
+        return specs
+
+    def _drop_attachment(self, kind: str, path: str) -> None:
+        bucket = {"dir": self.context_dirs, "file": self.context_files, "image": self.attached}.get(kind)
+        if bucket is not None and path in bucket:
+            bucket.remove(path)
+        self._refresh_attach()
+
+    def _clear_chips(self) -> None:
+        for widget in self.attach_row.winfo_children():
+            widget.destroy()
+
+    def _on_attach_resize(self, event=None) -> None:
+        width = event.width if event is not None else self.attach_row.winfo_width()
+        if width == getattr(self, "_chip_width", 0):
+            return
+        self._chip_width = width
+        if self._attach_specs():
+            self._fill_chips()
+
     def _refresh_attach(self) -> None:
-        parts: list[str] = []
-        if self.context_dirs:
-            names = ", ".join(Path(path).name + "/" for path in self.context_dirs)
-            parts.append(f"Папки: {names}")
-        if self.context_files:
-            names = ", ".join(Path(path).name for path in self.context_files)
-            parts.append(f"Файлы: {names}")
-        if self.attached:
-            names = ", ".join(Path(path).name for path in self.attached)
-            parts.append(f"Изображения: {names}")
-        if parts:
-            self.attach_label.configure(text=" · ".join(parts) + "  (клик — очистить)")
+        if not self._attach_specs():
+            self._clear_chips()
+            self.attach_row.grid_remove()
         else:
-            self.attach_label.configure(text="")
+            self.attach_row.grid()
+            self._fill_chips()
+        # ряд чипов двигает поле ввода — подсказку надо переставить.
+        self.after(0, self._sync_placeholder)
+
+    def _fill_chips(self) -> None:
+        self._clear_chips()
+        specs = self._attach_specs()
+        measure = self._measure(11)
+        room = max(self.attach_row.winfo_width(), self.card.winfo_width() - 24, 240)
+        if len(specs) > 1:
+            # место под «очистить» в конце последнего ряда
+            room = max(room - 74, 200)
+        lines: list[list[dict]] = [[]]
+        used = 0
+        for spec in specs:
+            # ширина текста плюс поля чипа и крестик
+            span = measure(spec["text"]) + 46
+            if lines[-1] and used + span > room:
+                if len(lines) >= _CHIP_ROWS:
+                    break
+                lines.append([])
+                used = 0
+            lines[-1].append(spec)
+            used += span
+        shown = sum(len(line) for line in lines)
+        self._ensure_composer_room(sum(1 for line in lines if line))
+        for index, line in enumerate(lines):
+            if not line:
+                continue
+            strip = ctk.CTkFrame(self.attach_row, fg_color="transparent")
+            strip.pack(fill="x", anchor="w", pady=(0 if index == 0 else 3, 0))
+            for spec in line:
+                self._make_chip(strip, spec).pack(side="left", padx=(0, 4))
+            if index == len(lines) - 1:
+                if shown < len(specs):
+                    ctk.CTkLabel(
+                        strip,
+                        text=f"+{len(specs) - shown}",
+                        text_color=MUTED,
+                        font=self._font(11),
+                    ).pack(side="left", padx=(2, 6))
+                if len(specs) > 1:
+                    clear = ctk.CTkButton(
+                        strip,
+                        text="очистить",
+                        width=56,
+                        height=20,
+                        corner_radius=8,
+                        fg_color="transparent",
+                        hover_color=BUTTON_HOVER,
+                        text_color=MUTED,
+                        font=self._font(11),
+                        command=self.clear_attachments,
+                    )
+                    clear.pack(side="left", padx=(2, 0))
+
+    def _ensure_composer_room(self, rows: int) -> None:
+        """Чипы отъедают высоту у поля ввода — опускаем разделитель, если тесно."""
+        if rows <= 0 or not hasattr(self, "stack"):
+            return
+        least = 150 + rows * 28
+        total = self.stack.winfo_height()
+        if total <= least + 140:
+            return
+        try:
+            _left, top = self.stack.sash_coord(0)
+            if total - int(top) >= least:
+                return
+            self.stack.sash_place(0, 1, total - least)
+        except tk.TclError:
+            return
+
+    def _make_chip(self, parent, spec: dict) -> ctk.CTkFrame:
+        chip = ctk.CTkFrame(parent, fg_color=BUTTON, corner_radius=8, border_width=1, border_color=BORDER)
+        label = ctk.CTkLabel(chip, text=spec["text"], text_color=MUTED, font=self._font(11), height=18)
+        label.grid(row=0, column=0, padx=(8, 2), pady=1)
+        close = ctk.CTkButton(
+            chip,
+            text="×",
+            width=16,
+            height=16,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=BUTTON_HOVER,
+            text_color=MUTED,
+            font=self._font(13),
+            command=lambda kind=spec["kind"], path=spec["path"]: self._drop_attachment(kind, path),
+        )
+        close.grid(row=0, column=1, padx=(0, 4), pady=1)
+        return chip
 
     def _file_menu(self, event) -> str | None:
         row = self.tree.identify_row(event.y)
@@ -2695,6 +3115,9 @@ class App(ctk.CTk):
     def _finish(self) -> None:
         self.running = False
         self._show_running(False)
+        self._clear_running_tool()
+        self._close_tool_group()
+        self._collapse_tool_groups()
         if self.stop_event.is_set():
             self._can_retry = False
             self._set_retry_enabled(False)
@@ -2771,6 +3194,8 @@ class App(ctk.CTk):
             return
         box.configure(state="normal")
         inner = box._textbox
+        self._clear_running_tool()
+        self._close_tool_group()
         start = inner.index("end-1c")
         body = chat_body(text, "error")
         _, stamp = split_chat_stamp(text)
@@ -2782,7 +3207,7 @@ class App(ctk.CTk):
             inner.tag_add("error", start, mark)
         else:
             inner.tag_add("error", start, inner.index("end-1c"))
-        box.see("end")
+        self._chat_see_end()
 
     def _insert_retry_button(self, inner) -> None:
         self._set_retry_enabled(False)
@@ -2809,7 +3234,13 @@ class App(ctk.CTk):
         inner.tag_add("error", mark, inner.index("end-1c"))
 
     def write_journal(self, text: str) -> None:
-        self.write_chat(f"· {text.strip()}")
+        line = f"· {text.strip()}"
+        # Строка «выполняется…» живёт только на экране и гаснет, когда пришёл итог.
+        if is_running_journal(line):
+            self.after(0, lambda line=line: self._show_running_tool(line))
+            return
+        self.after(0, self._clear_running_tool)
+        self.write_chat(line)
 
     def _remember(self, text: str) -> None:
         line = text.rstrip()
@@ -2929,7 +3360,22 @@ class App(ctk.CTk):
         self.set_status("Чат удалён")
 
     def set_status(self, text: str) -> None:
-        self.after(0, lambda: self.status_label.configure(text=text))
+        shown = text
+
+        def apply() -> None:
+            if self._closing:
+                return
+            try:
+                if not self.winfo_exists() or not self.status_label.winfo_exists():
+                    return
+                self.status_label.configure(text=shown)
+            except tk.TclError:
+                return
+
+        try:
+            self.after(0, apply)
+        except tk.TclError:
+            return
 
     def _role(self, text: str) -> str:
         return chat_role(text)
@@ -2957,13 +3403,22 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "tool",
-            lmargin1=28,
-            lmargin2=28,
+            lmargin1=40,
+            lmargin2=48,
             rmargin=28,
             foreground=_tone(MUTED),
-            spacing1=2,
-            spacing3=4,
+            spacing1=0,
+            spacing3=0,
         )
+        inner.tag_configure(
+            "toolhead",
+            lmargin1=24,
+            lmargin2=24,
+            rmargin=28,
+            spacing1=4,
+            spacing3=2,
+        )
+        inner.tag_configure("toolgap", font=self._px_font(5), spacing1=0, spacing3=0)
         inner.tag_configure(
             "error",
             lmargin1=12,
@@ -3010,11 +3465,24 @@ class App(ctk.CTk):
             spacing1=0,
             spacing3=8,
         )
+        inner.tag_configure("search", background=_tone(SEARCH_BG))
+        inner.tag_configure("searchcur", background=_tone(SEARCH_CUR))
         # Фон реплики «Вы» иначе перекрывает подсветку выделения.
         inner.tag_raise("sel")
+        inner.tag_raise("search")
+        inner.tag_raise("searchcur")
         inner.configure(pady=8)
         if self._chat_pad:
             inner.configure(padx=self._chat_pad)
+        self._restyle_tool_heads()
+        if hasattr(self, "jump_down"):
+            self.jump_down.configure(
+                fg_color=BUTTON, hover_color=BUTTON_HOVER, text_color=TEXT, border_color=BORDER
+            )
+        if hasattr(self, "search_bar"):
+            self.search_bar.configure(fg_color=PANEL, border_color=BORDER)
+            self.search_entry.configure(fg_color=FIELD, text_color=TEXT)
+            self.search_count.configure(text_color=MUTED)
 
     def _copy_photo(self) -> ImageTk.PhotoImage:
         cached = getattr(self, "_copy_photo_cache", None)
@@ -3053,6 +3521,123 @@ class App(ctk.CTk):
         set_clipboard(self.chat._textbox, body)
         self.set_status("Скопировано")
 
+    def _restyle_tool_heads(self) -> None:
+        for group in getattr(self, "_tool_groups", []):
+            head = group.get("head")
+            try:
+                if head is None or not head.winfo_exists():
+                    continue
+                head.configure(font=self._px_font(11), fg=_tone(MUTED), bg=_tone(INK))
+            except tk.TclError:
+                continue
+
+    def _reset_tool_groups(self) -> None:
+        self._tool_groups = []
+        self._tool_group = None
+        self._running_tool = None
+
+    def _close_tool_group(self) -> None:
+        group = self._tool_group
+        self._tool_group = None
+        if group is None or not group["count"]:
+            return
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        inner = box._textbox
+        start = inner.index("end-1c")
+        inner.insert("end", "\n")
+        inner.tag_add("toolgap", start, inner.index("end-1c"))
+
+    def _open_tool_group(self, inner) -> dict:
+        self._group_seq += 1
+        tag = f"toolgrp{self._group_seq}"
+        inner.tag_configure(tag, elide=False)
+        start = inner.index("end-1c")
+        head = tk.Label(
+            inner,
+            text="",
+            anchor="w",
+            bd=0,
+            padx=4,
+            pady=0,
+            font=self._px_font(11),
+            fg=_tone(MUTED),
+            bg=_tone(INK),
+            cursor="hand2",
+            takefocus=0,
+        )
+        inner.window_create("end", window=head, padx=0, pady=1)
+        inner.insert("end", "\n")
+        inner.tag_add("toolhead", start, inner.index("end-1c"))
+        group = {"tag": tag, "head": head, "count": 0, "names": [], "open": True}
+        head.bind("<Button-1>", lambda _event, item=group: self._toggle_tool_group(item))
+        head.bind("<Enter>", lambda _event, item=head: item.configure(fg=_tone(TEXT)))
+        head.bind("<Leave>", lambda _event, item=head: item.configure(fg=_tone(MUTED)))
+        self._tool_groups.append(group)
+        self._tool_group = group
+        self._set_group_head(group)
+        return group
+
+    def _set_group_head(self, group: dict) -> None:
+        head = group.get("head")
+        try:
+            if head is None or not head.winfo_exists():
+                return
+            head.configure(text=tool_group_title(group["names"], group["count"], group["open"]))
+        except tk.TclError:
+            return
+
+    def _toggle_tool_group(self, group: dict) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        group["open"] = not group["open"]
+        try:
+            box._textbox.tag_configure(group["tag"], elide=not group["open"])
+        except tk.TclError:
+            return
+        self._set_group_head(group)
+
+    def _collapse_tool_groups(self) -> None:
+        for group in list(self._tool_groups):
+            if group["open"] and group["count"] >= _GROUP_FOLD:
+                self._toggle_tool_group(group)
+
+    def _insert_tool_line(self, inner, body: str) -> dict:
+        group = self._tool_group or self._open_tool_group(inner)
+        start = inner.index("end-1c")
+        inner.insert("end", body + "\n")
+        end = inner.index("end-1c")
+        inner.tag_add("tool", start, end)
+        inner.tag_add(group["tag"], start, end)
+        return group
+
+    def _show_running_tool(self, line: str) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        self._clear_running_tool()
+        box.configure(state="normal")
+        inner = box._textbox
+        start = inner.index("end-1c")
+        self._insert_tool_line(inner, chat_body(line, "tool"))
+        self._running_tool = (start, inner.index("end-1c"))
+        self._chat_see_end()
+
+    def _clear_running_tool(self) -> None:
+        span = self._running_tool
+        self._running_tool = None
+        if span is None:
+            return
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        try:
+            box._textbox.delete(span[0], span[1])
+        except tk.TclError:
+            return
+
     def _insert_time(self, inner, stamp: str | None) -> None:
         if not stamp:
             inner.insert("end", "\n")
@@ -3061,10 +3646,20 @@ class App(ctk.CTk):
 
     def _insert_block(self, box, text: str) -> None:
         inner = box._textbox
-        start = inner.index("end-1c")
         role = self._role(text)
         body = chat_body(text, role)
         _, stamp = split_chat_stamp(text)
+        if role == "tool":
+            group = self._insert_tool_line(inner, body)
+            group["count"] += 1
+            name = tool_short_name(body)
+            if name and name not in group["names"]:
+                group["names"].append(name)
+            self._set_group_head(group)
+            return
+        self._clear_running_tool()
+        self._close_tool_group()
+        start = inner.index("end-1c")
         copy_text = ""
         if role == "user":
             inner.insert("end", "Вы\n", ("label",))
@@ -3106,12 +3701,16 @@ class App(ctk.CTk):
         self._stream_open = False
         self._user_spans = []
         self._retry_buttons = []
+        self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")
         for line in self.transcript:
             self._insert_block(box, line)
-        box.see("end")
+        self._collapse_tool_groups()
+        self._chat_see_end(force=True)
         box.configure(state="normal")
+        if self._search_open:
+            self._run_chat_search()
 
     def stream_chat(self, text: str, final: bool = False) -> None:
         shown = text or ""
@@ -3134,6 +3733,8 @@ class App(ctk.CTk):
         box.configure(state="normal")
         inner = box._textbox
         if not self._stream_open:
+            self._clear_running_tool()
+            self._close_tool_group()
             origin = inner.index("end-1c")
             inner.insert("end", "Ассистент\n", ("label",))
             self._stream_origin = origin
@@ -3167,7 +3768,7 @@ class App(ctk.CTk):
                 inner.tag_add("agent", self._stream_origin, inner.index("end-1c"))
                 self._remember(stamped)
             self._stream_open = False
-        inner.see("end")
+        self._chat_see_end()
 
     def _append(self, box, text: str) -> None:
         def write() -> None:
@@ -3175,7 +3776,12 @@ class App(ctk.CTk):
                 return
             box.configure(state="normal")
             self._insert_block(box, text)
-            box.see("end")
+            if box is getattr(self, "chat", None):
+                self._chat_see_end()
+            else:
+                box.see("end")
+            if box is getattr(self, "chat", None) and self._search_open and self.search_var.get().strip():
+                self._run_chat_search()
 
         self.after(0, write)
 
@@ -3184,6 +3790,7 @@ class App(ctk.CTk):
             self._stream_open = False
             self._user_spans = []
             self._retry_buttons = []
+            self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")
 
@@ -3195,17 +3802,30 @@ class App(ctk.CTk):
         box.configure(state="disabled")
 
     def _ui_error(self, exc, value, tb) -> None:
+        if self._closing:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
         self.write_chat(f"Ошибка интерфейса: {value}")
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
         if not self._release_editor(ask=True):
             return
+        self._closing = True
         self.stop_event.set()
         try:
             self._store_chat()
             self.agent.close()
         finally:
-            self.destroy()
+            try:
+                self.destroy()
+            except tk.TclError:
+                return
 
 
 def main() -> None:
