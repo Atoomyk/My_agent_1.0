@@ -73,7 +73,20 @@ def tool_running_label(name: str, arguments) -> str:
 
 
 class Agent:
-    def __init__(self, vault, toolbox, mcp, on_chat, on_journal, on_status, on_context=None, on_stream=None, on_error=None) -> None:
+    def __init__(
+        self,
+        vault,
+        toolbox,
+        mcp,
+        on_chat,
+        on_journal,
+        on_status,
+        on_context=None,
+        on_stream=None,
+        on_error=None,
+        on_checkpoint=None,
+        transcript_len=None,
+    ) -> None:
         self.vault = vault
         self.toolbox = toolbox
         self.mcp = mcp
@@ -83,6 +96,8 @@ class Agent:
         self.on_context = on_context or (lambda *_args, **_kwargs: None)
         self.on_stream = on_stream
         self.on_error = on_error
+        self.on_checkpoint = on_checkpoint
+        self.transcript_len = transcript_len or (lambda: 0)
         self.provider = None
         self.provider_kind = None
         self.root: Path | None = None
@@ -90,6 +105,7 @@ class Agent:
         self._agent_mode = "agent"
         self._last_tools: list = []
         self._context_from_api = False
+        self.checkpoints = None
 
     def set_root(self, root: Path | None) -> None:
         self.root = None if root is None else Path(root).resolve()
@@ -153,6 +169,7 @@ class Agent:
         self.toolbox.settings = lambda: settings
         if not resend:
             self.toolbox.begin_turn()
+            self._abandon_checkpoint()
         if self.root is None:
             self.on_chat("Сначала выберите папку проекта.")
             return
@@ -173,61 +190,66 @@ class Agent:
             self.provider.drop_incomplete_tail()
         if not resend or self.provider.message_count() == 0:
             self.provider.add_user(scrubber(text), images)
+        if not resend:
+            self._open_checkpoint()
         specs = tools_for_mode(self._agent_mode)
         self._last_tools = specs
         max_steps = int(settings.get("max_steps") or 25)
         if self._agent_mode == "ask":
             max_steps = min(max_steps, 15)
-        for step in range(1, max_steps + 1):
-            if stop.is_set():
-                self.on_chat("Остановлено.")
-                self._publish_context(settings)
-                return
-            self.on_status(f"Шаг {step} из {max_steps}" + (" · Ask" if self._agent_mode == "ask" else ""))
-            try:
-                turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
-            except Stopped as exc:
-                self._emit_partial(exc, scrubber)
-                self.on_chat("Остановлено.")
-                self._publish_context(settings)
-                return
-            except ApiError as exc:
-                self._emit_partial(exc, scrubber)
-                self._report_error(f"Ошибка API: {exc}")
-                self._publish_context(settings)
-                return
-            except Exception as exc:
-                self._report_error(f"Ошибка: {exc}")
-                self._publish_context(settings)
-                return
-            if turn.prompt_tokens is not None:
-                self._context_from_api = True
-                self._emit_context(turn.prompt_tokens, settings, from_api=True)
-            if turn.text.strip():
-                self._emit_assistant(scrubber(turn.text))
-            if not turn.tool_calls:
-                if not turn.text.strip():
-                    self.on_chat("(пустой ответ модели)")
-                self._announce_touched()
-                self._publish_context(settings)
-                self.on_status("Готово")
-                return
-            for call in turn.tool_calls:
+        try:
+            for step in range(1, max_steps + 1):
                 if stop.is_set():
                     self.on_chat("Остановлено.")
                     self._publish_context(settings)
                     return
-                running = tool_running_label(call.name, call.arguments)
-                ask_mark = " · Ask" if self._agent_mode == "ask" else ""
-                self.on_status(f"Шаг {step} из {max_steps} · {running}…{ask_mark}")
-                self.on_journal(f"{running}: выполняется…")
-                outcome = self.toolbox.execute(call.name, call.arguments)
-                self.on_journal(outcome.journal)
-                self.provider.add_tool_result(call.id, call.name, outcome.model_text, outcome.images)
-        self.on_chat(f"Достигнут лимит шагов ({max_steps}).")
-        self._announce_touched()
-        self._publish_context(settings)
-        self.on_status("Готово")
+                self.on_status(f"Шаг {step} из {max_steps}" + (" · Ask" if self._agent_mode == "ask" else ""))
+                try:
+                    turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
+                except Stopped as exc:
+                    self._emit_partial(exc, scrubber)
+                    self.on_chat("Остановлено.")
+                    self._publish_context(settings)
+                    return
+                except ApiError as exc:
+                    self._emit_partial(exc, scrubber)
+                    self._report_error(f"Ошибка API: {exc}")
+                    self._publish_context(settings)
+                    return
+                except Exception as exc:
+                    self._report_error(f"Ошибка: {exc}")
+                    self._publish_context(settings)
+                    return
+                if turn.prompt_tokens is not None:
+                    self._context_from_api = True
+                    self._emit_context(turn.prompt_tokens, settings, from_api=True)
+                if turn.text.strip():
+                    self._emit_assistant(scrubber(turn.text))
+                if not turn.tool_calls:
+                    if not turn.text.strip():
+                        self.on_chat("(пустой ответ модели)")
+                    self._announce_touched()
+                    self._publish_context(settings)
+                    self.on_status("Готово")
+                    return
+                for call in turn.tool_calls:
+                    if stop.is_set():
+                        self.on_chat("Остановлено.")
+                        self._publish_context(settings)
+                        return
+                    running = tool_running_label(call.name, call.arguments)
+                    ask_mark = " · Ask" if self._agent_mode == "ask" else ""
+                    self.on_status(f"Шаг {step} из {max_steps} · {running}…{ask_mark}")
+                    self.on_journal(f"{running}: выполняется…")
+                    outcome = self.toolbox.execute(call.name, call.arguments)
+                    self.on_journal(outcome.journal)
+                    self.provider.add_tool_result(call.id, call.name, outcome.model_text, outcome.images)
+            self.on_chat(f"Достигнут лимит шагов ({max_steps}).")
+            self._announce_touched()
+            self._publish_context(settings)
+            self.on_status("Готово")
+        finally:
+            self._finish_checkpoint()
 
     def compress_context(self, settings: dict, stop: threading.Event) -> None:
         self.stop = stop
@@ -303,6 +325,50 @@ class Agent:
         if not paths:
             return
         self.on_journal("изменены: " + ", ".join(paths))
+
+    def _open_checkpoint(self) -> None:
+        stack = self.checkpoints
+        if stack is None or self._agent_mode != "agent" or self.provider is None:
+            return
+        try:
+            transcript_len = int(self.transcript_len() or 0)
+        except Exception:
+            transcript_len = 0
+        stack.begin(transcript_len, self.provider.message_count())
+        self.toolbox.on_before_write = stack.capture
+
+    def _abandon_checkpoint(self) -> None:
+        stack = self.checkpoints
+        self.toolbox.on_before_write = None
+        if stack is not None:
+            stack.abandon()
+
+    def _finish_checkpoint(self) -> None:
+        stack = self.checkpoints
+        self.toolbox.on_before_write = None
+        if stack is None or self._agent_mode != "agent":
+            self._abandon_checkpoint()
+            return
+        checkpoint, dropped = stack.finalize()
+        if self.on_checkpoint is None:
+            return
+        if dropped:
+            try:
+                self.on_checkpoint(None, 0, dropped)
+            except Exception:
+                pass
+        if checkpoint is None:
+            return
+        try:
+            self.on_checkpoint(checkpoint.id, checkpoint.file_count(), [])
+        except Exception:
+            pass
+
+    def truncate_messages(self, count: int) -> None:
+        if self.provider is None:
+            return
+        keep = max(0, int(count))
+        self.provider.messages = list(self.provider.messages[:keep])
 
     def _publish_context(self, settings: dict) -> None:
         if self.provider is None:

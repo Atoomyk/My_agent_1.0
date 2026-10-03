@@ -266,6 +266,7 @@ class Toolbox:
         self._last_fail_key = ""
         self._fail_locked = False
         self._touched: list[str] = []
+        self.on_before_write = None
 
     def set_root(self, root: Path | None) -> None:
         self.root = root
@@ -275,6 +276,15 @@ class Toolbox:
         self._last_fail_key = ""
         self._fail_locked = False
         self._touched = []
+
+    def _snapshot_before_write(self, relative: str, full: Path) -> None:
+        hook = self.on_before_write
+        if hook is None:
+            return
+        try:
+            hook(relative, full)
+        except Exception:
+            pass
 
     @property
     def fail_locked(self) -> bool:
@@ -482,6 +492,7 @@ class Toolbox:
                 "Пользователь отказался записывать файл. Не повторяй эту запись без новой причины.",
                 f"write_file {rel}: отказ",
             )
+        self._snapshot_before_write(rel, full)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8", newline="\n")
         try:
@@ -525,6 +536,7 @@ class Toolbox:
                 "Пользователь отказался применять правку. Не повторяй её без новой причины.",
                 f"apply_patch {rel}: отказ",
             )
+        self._snapshot_before_write(rel, full)
         full.write_text(updated, encoding="utf-8", newline="\n")
         try:
             touch_file(self.root, rel)

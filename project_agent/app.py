@@ -17,6 +17,13 @@ from PIL import Image, ImageDraw, ImageTk
 
 from project_agent.agent import Agent
 from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
+from project_agent.checkpoints import (
+    CheckpointStack,
+    checkpoint_mark,
+    delete_checkpoints,
+    parse_checkpoint_mark,
+    restore_files,
+)
 from project_agent.config import (
     ai_settings,
     config_dir,
@@ -126,6 +133,8 @@ def with_chat_stamp(text: str) -> str:
 def chat_role(text: str) -> str:
     body, _ = split_chat_stamp(text)
     body = body.lstrip()
+    if parse_checkpoint_mark(body):
+        return "checkpoint"
     if body.startswith("Вы:"):
         return "user"
     if body.startswith("·"):
@@ -923,6 +932,7 @@ class App(ctk.CTk):
         self._retry_payload: dict | None = None
         self._can_retry = False
         self._retry_buttons: list[tk.Button] = []
+        self._checkpoint_buttons: list[tk.Button] = []
         self._tool_groups: list[dict] = []
         self._tool_group: dict | None = None
         self._group_seq = 0
@@ -934,6 +944,7 @@ class App(ctk.CTk):
         self._search_index = -1
         self._search_query = ""
         self._closing = False
+        self.checkpoints = CheckpointStack()
         self.vault = SecretVault()
         self.mcp = McpHub()
         self.toolbox = Toolbox(self.vault, self.confirm, self.mcp, self.collect_settings)
@@ -947,7 +958,10 @@ class App(ctk.CTk):
             self._on_context,
             self.stream_chat,
             self.write_retryable_error,
+            self._on_checkpoint,
+            lambda: len(self.transcript),
         )
+        self.agent.checkpoints = self.checkpoints
         self.theme = "dark"
         self.theme_var = ctk.StringVar(value="Тёмная")
         self.editor_open = False
@@ -987,21 +1001,20 @@ class App(ctk.CTk):
     def _build(self) -> None:
         self.bind_class("Text", "<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.bind_class("Entry", "<Control-KeyPress>", _on_layout_clipboard, add="+")
-        self.grid_columnconfigure(0, weight=0, minsize=28)
+        self.grid_columnconfigure(0, weight=0, minsize=36)
         self.grid_columnconfigure(1, weight=0, minsize=1)
         self.grid_columnconfigure(2, weight=0, minsize=248)
         self.grid_columnconfigure(3, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=28)
+        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=36)
         rail.grid(row=0, column=0, sticky="nsew")
         rail.grid_propagate(False)
-        rail.grid_rowconfigure(1, weight=1)
         self.project_badge = ctk.CTkButton(
             rail,
             text="·",
-            width=24,
-            height=24,
+            width=28,
+            height=28,
             corner_radius=8,
             border_width=1,
             border_color=BORDER,
@@ -1011,8 +1024,8 @@ class App(ctk.CTk):
             font=self._font(11, weight="bold"),
             command=self.choose_folder,
         )
-        self.project_badge.grid(row=0, column=0, padx=2, pady=(12, 0))
-        icon_button(rail, "gear", self.open_settings, size=24).grid(row=2, column=0, padx=2, pady=(0, 12))
+        self.project_badge.place(relx=0.5, y=12, anchor="n")
+        icon_button(rail, "gear", self.open_settings, size=28).place(relx=0.5, rely=1.0, y=-12, anchor="s")
         ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
 
         side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=248)
@@ -2547,6 +2560,7 @@ class App(ctk.CTk):
         self.chat_title = ""
         self.transcript.clear()
         self._forget_retry()
+        self.checkpoints.clear()
         self._clear_box(self.chat)
         self.agent.reset_session(announce=False)
         self._apply_context(0, self.context_limit, False)
@@ -3099,6 +3113,9 @@ class App(ctk.CTk):
             self.chat_id = new_chat_id()
             self.chat_title = " ".join(note.split())[:80] or "Чат"
             self.transcript.clear()
+            self.checkpoints.clear()
+        self.checkpoints.chat_id = self.chat_id or ""
+        self.checkpoints.project_dir = str(self.project)
         self.write_chat(f"Вы: {note}")
         if created:
             self._refresh_chat_list()
@@ -3274,8 +3291,101 @@ class App(ctk.CTk):
         self._retry_buttons.append(button)
         mark = inner.index("end-1c")
         inner.window_create("end", window=button, padx=0, pady=2)
-        inner.insert("end", "\n\n")
+        inner.insert("end", "\n")
         inner.tag_add("error", mark, inner.index("end-1c"))
+
+    def _on_checkpoint(self, checkpoint_id: str | None, file_count: int, dropped: list[str]) -> None:
+        if dropped:
+            self.after(0, lambda ids=list(dropped): self._drop_checkpoint_marks(ids))
+        if not checkpoint_id:
+            return
+        mark = checkpoint_mark(checkpoint_id)
+        self._remember(mark)
+        count = max(0, int(file_count or 0))
+        self.after(0, lambda cid=checkpoint_id, n=count: self._insert_checkpoint_control(cid, n))
+
+    def _drop_checkpoint_marks(self, checkpoint_ids: list[str]) -> None:
+        if not checkpoint_ids:
+            return
+        marks = {checkpoint_mark(item) for item in checkpoint_ids}
+        before = len(self.transcript)
+        self.transcript = [line for line in self.transcript if line.strip() not in marks]
+        if len(self.transcript) != before:
+            self._store_chat()
+            self._show_transcript()
+
+    def _insert_checkpoint_control(self, checkpoint_id: str, file_count: int = 0) -> None:
+        box = getattr(self, "chat", None)
+        if box is None or not box.winfo_exists():
+            return
+        if self.checkpoints.get(checkpoint_id) is None:
+            return
+        box.configure(state="normal")
+        inner = box._textbox
+        self._clear_running_tool()
+        self._close_tool_group()
+        start = inner.index("end-1c")
+        button = tk.Button(
+            inner,
+            text="Откатить правки",
+            command=lambda cid=checkpoint_id: self.restore_checkpoint(cid),
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            bg=_tone(BUTTON),
+            fg=_tone(TEXT),
+            activebackground=_tone(BUTTON_HOVER),
+            activeforeground=_tone(TEXT),
+            disabledforeground=_tone(MUTED),
+            font=self._px_font(12),
+        )
+        self._checkpoint_buttons.append(button)
+        inner.window_create("end", window=button, padx=0, pady=2)
+        if file_count > 0:
+            hint = tk.Label(
+                inner,
+                text=f"  {file_count}",
+                bd=0,
+                padx=0,
+                pady=2,
+                font=self._px_font(10),
+                fg=_tone(MUTED),
+                bg=_tone(INK),
+            )
+            inner.window_create("end", window=hint, padx=0, pady=2)
+        inner.insert("end", "\n")
+        inner.tag_add("checkpoint", start, inner.index("end-1c"))
+        self._chat_see_end()
+
+    def restore_checkpoint(self, checkpoint_id: str) -> None:
+        if self.running or self.project is None:
+            return
+        checkpoint = self.checkpoints.get(checkpoint_id)
+        if checkpoint is None:
+            self.set_status("Снимок недоступен")
+            return
+        restored, failed = restore_files(self.project, checkpoint)
+        if not restored and failed:
+            self.set_status("Не удалось откатить файлы")
+            return
+        cut = max(0, int(checkpoint.transcript_len))
+        self.transcript = self.transcript[:cut]
+        removed = self.checkpoints.drop_from(checkpoint_id)
+        if removed:
+            marks = {checkpoint_mark(item) for item in removed}
+            self.transcript = [line for line in self.transcript if line.strip() not in marks]
+        self.agent.truncate_messages(checkpoint.message_count)
+        self._forget_retry()
+        self._show_transcript()
+        self._store_chat()
+        self._refresh_tree()
+        self._reload_clean_editor()
+        if failed:
+            self.set_status(f"Правки откачены ({len(failed)} без снимка)")
+        else:
+            self.set_status("Правки откачены")
 
     def write_journal(self, text: str) -> None:
         line = f"· {text.strip()}"
@@ -3354,6 +3464,8 @@ class App(ctk.CTk):
         self.chat_title = record["title"]
         self.transcript = list(record["lines"])
         self._forget_retry()
+        self.checkpoints.load(self.chat_id, str(self.project))
+        self._sync_checkpoint_marks()
         self._show_transcript()
         from project_agent.tools import normalize_agent_mode
 
@@ -3377,6 +3489,33 @@ class App(ctk.CTk):
         self._refresh_chat_list()
         self._fit_labels()
 
+    def _sync_checkpoint_marks(self) -> None:
+        valid = {item.id for item in self.checkpoints.items}
+        kept = []
+        changed = False
+        for line in self.transcript:
+            checkpoint_id = parse_checkpoint_mark(line)
+            if checkpoint_id is None:
+                kept.append(line)
+                continue
+            item = self.checkpoints.get(checkpoint_id)
+            if item is None or checkpoint_id not in valid:
+                changed = True
+                continue
+            if item.transcript_len > len(kept):
+                # маркер после обрезки истории — снимок уже не к месту
+                self.checkpoints.drop_from(checkpoint_id)
+                valid = {entry.id for entry in self.checkpoints.items}
+                changed = True
+                continue
+            kept.append(line)
+        if changed or kept != self.transcript:
+            self.transcript = kept
+            try:
+                self.checkpoints.save()
+            except Exception:
+                pass
+
     def delete_chat_item(self, chat_id: str) -> None:
         if self.running or not chat_id:
             return
@@ -3389,6 +3528,7 @@ class App(ctk.CTk):
             return
         try:
             delete_chat(chat_id)
+            delete_checkpoints(chat_id)
         except Exception as exc:
             self.write_chat(f"Чат не удалён: {exc}")
             return
@@ -3397,6 +3537,7 @@ class App(ctk.CTk):
             self.chat_title = ""
             self.transcript.clear()
             self._forget_retry()
+            self.checkpoints.clear()
             self._clear_box(self.chat)
             self.agent.reset_session(announce=False)
         self._refresh_chat_list()
@@ -3433,8 +3574,8 @@ class App(ctk.CTk):
             rmargin=12,
             foreground=_tone(USER_TEXT),
             background=_tone(USER_BG),
-            spacing1=8,
-            spacing3=10,
+            spacing1=4,
+            spacing3=4,
         )
         inner.tag_configure(
             "agent",
@@ -3442,8 +3583,8 @@ class App(ctk.CTk):
             lmargin2=12,
             rmargin=56,
             foreground=_tone(TEXT),
-            spacing1=4,
-            spacing3=10,
+            spacing1=2,
+            spacing3=4,
         )
         inner.tag_configure(
             "tool",
@@ -3469,8 +3610,16 @@ class App(ctk.CTk):
             lmargin2=12,
             rmargin=56,
             foreground=_tone(CTX_FULL),
-            spacing1=4,
-            spacing3=6,
+            spacing1=2,
+            spacing3=4,
+        )
+        inner.tag_configure(
+            "checkpoint",
+            lmargin1=12,
+            lmargin2=12,
+            rmargin=56,
+            spacing1=2,
+            spacing3=4,
         )
         inner.tag_configure("label", font=self._px_font(11), foreground=_tone(MUTED), spacing1=0, spacing3=2)
         inner.tag_configure(
@@ -3478,7 +3627,7 @@ class App(ctk.CTk):
             font=self._px_font(10),
             foreground=_tone(MUTED),
             spacing1=0,
-            spacing3=8,
+            spacing3=2,
         )
         inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
         inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
@@ -3499,7 +3648,7 @@ class App(ctk.CTk):
             lmargin2=12,
             rmargin=56,
             spacing1=0,
-            spacing3=8,
+            spacing3=2,
         )
         inner.tag_configure(
             "usercopy",
@@ -3507,7 +3656,7 @@ class App(ctk.CTk):
             lmargin2=56,
             rmargin=12,
             spacing1=0,
-            spacing3=8,
+            spacing3=2,
         )
         inner.tag_configure("search", background=_tone(SEARCH_BG))
         inner.tag_configure("searchcur", background=_tone(SEARCH_CUR))
@@ -3686,7 +3835,7 @@ class App(ctk.CTk):
         if not stamp:
             inner.insert("end", "\n")
             return
-        inner.insert("end", f"{stamp}\n\n", ("time",))
+        inner.insert("end", f"{stamp}\n", ("time",))
 
     def _insert_block(self, box, text: str) -> None:
         inner = box._textbox
@@ -3705,6 +3854,45 @@ class App(ctk.CTk):
         self._close_tool_group()
         start = inner.index("end-1c")
         copy_text = ""
+        if role == "checkpoint":
+            checkpoint_id = parse_checkpoint_mark(body) or ""
+            item = self.checkpoints.get(checkpoint_id) if checkpoint_id else None
+            if item is None:
+                return
+            button = tk.Button(
+                inner,
+                text="Откатить правки",
+                command=lambda cid=checkpoint_id: self.restore_checkpoint(cid),
+                relief="flat",
+                bd=0,
+                padx=8,
+                pady=2,
+                cursor="hand2",
+                bg=_tone(BUTTON),
+                fg=_tone(TEXT),
+                activebackground=_tone(BUTTON_HOVER),
+                activeforeground=_tone(TEXT),
+                disabledforeground=_tone(MUTED),
+                font=self._px_font(12),
+            )
+            self._checkpoint_buttons.append(button)
+            inner.window_create("end", window=button, padx=0, pady=2)
+            count = item.file_count()
+            if count > 0:
+                hint = tk.Label(
+                    inner,
+                    text=f"  {count}",
+                    bd=0,
+                    padx=0,
+                    pady=2,
+                    font=self._px_font(10),
+                    fg=_tone(MUTED),
+                    bg=_tone(INK),
+                )
+                inner.window_create("end", window=hint, padx=0, pady=2)
+            inner.insert("end", "\n")
+            inner.tag_add("checkpoint", start, inner.index("end-1c"))
+            return
         if role == "user":
             inner.insert("end", "Вы\n", ("label",))
             copy_text = user_copy_text(body)
@@ -3745,6 +3933,7 @@ class App(ctk.CTk):
         self._stream_open = False
         self._user_spans = []
         self._retry_buttons = []
+        self._checkpoint_buttons = []
         self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")
@@ -3834,6 +4023,7 @@ class App(ctk.CTk):
             self._stream_open = False
             self._user_spans = []
             self._retry_buttons = []
+            self._checkpoint_buttons = []
             self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")

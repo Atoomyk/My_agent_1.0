@@ -14,6 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
+from project_agent.checkpoints import (
+    CheckpointStack,
+    checkpoint_mark,
+    delete_checkpoints,
+    parse_checkpoint_mark,
+    restore_files,
+)
 from project_agent.config import default_config, load_config, needs_api_key, save_config, save_theme
 from project_agent.mcp_client import McpHub
 from project_agent.patching import apply_diff
@@ -1776,6 +1783,69 @@ while True:
     elif "id" in message:
         write_message({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "no"}})
 """
+
+
+class CheckpointTests(unittest.TestCase):
+    def test_mark_roundtrip(self):
+        checkpoint_id = "a" * 32
+        mark = checkpoint_mark(checkpoint_id)
+        self.assertEqual(parse_checkpoint_mark(mark), checkpoint_id)
+        self.assertIsNone(parse_checkpoint_mark("обычная строка"))
+
+    def test_snapshot_restore_and_stack(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        target = root / "note.py"
+        target.write_text("old\n", encoding="utf-8")
+        stack = CheckpointStack()
+        stack.chat_id = "b" * 32
+        stack.project_dir = str(root)
+        stack.begin(transcript_len=2, message_count=1)
+        stack.capture("note.py", target)
+        stack.capture("fresh.py", root / "fresh.py")
+        target.write_text("new\n", encoding="utf-8")
+        (root / "fresh.py").write_text("created\n", encoding="utf-8")
+        checkpoint, dropped = stack.finalize()
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual(dropped, [])
+        self.assertEqual(checkpoint.file_count(), 2)
+        restored, failed = restore_files(root, checkpoint)
+        self.assertEqual(sorted(restored), ["fresh.py", "note.py"])
+        self.assertEqual(failed, [])
+        self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+        self.assertFalse((root / "fresh.py").exists())
+        stack.begin(3, 2)
+        stack.capture("note.py", target)
+        target.write_text("again\n", encoding="utf-8")
+        second, _ = stack.finalize()
+        self.assertIsNotNone(second)
+        self.assertEqual(len(stack.items), 2)
+        removed = stack.drop_from(checkpoint.id)
+        self.assertEqual(removed, [checkpoint.id, second.id])
+        self.assertEqual(stack.items, [])
+        delete_checkpoints(stack.chat_id)
+
+    def test_write_captures_before_content(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        target = root / "a.py"
+        target.write_text("before\n", encoding="utf-8")
+        vault = SecretVault()
+        seen = []
+
+        def on_before(relative, full):
+            seen.append((relative, full.read_text(encoding="utf-8") if full.exists() else None))
+
+        box = Toolbox(vault, lambda *_args, **_kwargs: True, McpHub(), lambda: {"auto_write_project": True})
+        box.set_root(root)
+        box.on_before_write = on_before
+        box.begin_turn()
+        box.execute("write_file", {"path": "a.py", "content": "after\n", "summary": "edit"})
+        self.assertEqual(seen, [("a.py", "before\n")])
+        self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
+        box.mcp.close()
 
 
 if __name__ == "__main__":
