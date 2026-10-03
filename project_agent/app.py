@@ -1098,8 +1098,8 @@ class App(ctk.CTk):
         self.chat_tree.configure(yscrollcommand=chat_scroll.set)
         self.chat_tree.bind("<<TreeviewSelect>>", self._on_chat_select)
         self.chat_tree.bind("<Button-3>", self._chat_menu)
-        self.side_tabs.set("Чаты")
-        self._show_side_tab("Чаты")
+        self.side_tabs.set("Файлы")
+        self._show_side_tab("Файлы")
 
         self.work = tk.PanedWindow(
             self,
