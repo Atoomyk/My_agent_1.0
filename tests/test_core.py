@@ -412,7 +412,7 @@ class ToolTests(unittest.TestCase):
         self.assertNotIn(SECRET, outcome.model_text)
         prompts = []
 
-        def fake_image(base, key, model, prompt):
+        def fake_image(base, key, model, prompt, transport=None, size=None):
             prompts.append(prompt)
             return b"\x89PNG\r\n\x1a\nfake"
 
@@ -1058,6 +1058,50 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(seen["key"], "unit-test-key-123456")
         provider._http.close()
 
+    def test_openai_stream_keeps_reasoning_content(self):
+        events = [
+            {"choices": [{"delta": {"reasoning_content": "думаю…"}}]},
+            {"choices": [{"delta": {"content": "ок"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-r",
+                                    "type": "function",
+                                    "function": {"name": "list_dir", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(events),
+            )
+
+        provider = OpenAIProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "deepseek", "api_key": "", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("hi", None)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertEqual(turn.text, "ок")
+        stored = provider.messages[-1]
+        self.assertEqual(stored.get("reasoning_content"), "думаю…")
+        self.assertEqual(stored["tool_calls"][0]["id"], "call-r")
+
     def test_openai_stream_collects_text_tools_and_usage(self):
         events = [
             {"choices": [{"delta": {"content": "Смотрю"}}]},
@@ -1288,6 +1332,18 @@ class ChatStoreTests(unittest.TestCase):
                         ],
                     },
                     {"role": "assistant", "content": "ок, вижу"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "план: вызвать tool",
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {"name": "list_dir", "arguments": "{}"},
+                            }
+                        ],
+                    },
                 ]
                 save_chat(
                     chat_id,
@@ -1299,10 +1355,11 @@ class ChatStoreTests(unittest.TestCase):
                 )
                 loaded = load_chat(chat_id)
                 self.assertEqual(loaded["provider"], "openai")
-                self.assertEqual(len(loaded["messages"]), 2)
+                self.assertEqual(len(loaded["messages"]), 3)
                 blob = json.dumps(loaded["messages"], ensure_ascii=False)
                 self.assertNotIn("AAAA", blob)
                 self.assertIn("изображение опущено", blob)
+                self.assertEqual(loaded["messages"][2].get("reasoning_content"), "план: вызвать tool")
                 cleaned = sanitize_messages(raw_messages)
                 self.assertEqual(cleaned[0]["content"][1]["type"], "text")
 
@@ -1312,11 +1369,12 @@ class ChatStoreTests(unittest.TestCase):
                 agent.set_root(root)
                 self.assertTrue(agent.restore_session(loaded["provider"], loaded["messages"]))
                 self.assertEqual(agent.provider_kind, "openai")
-                self.assertEqual(len(agent.provider.messages), 2)
-                self.assertEqual(agent.provider.messages[-1]["content"], "ок, вижу")
+                self.assertEqual(len(agent.provider.messages), 3)
+                self.assertEqual(agent.provider.messages[1]["content"], "ок, вижу")
+                self.assertEqual(agent.provider.messages[2].get("reasoning_content"), "план: вызвать tool")
                 kind, exported = agent.export_session()
                 self.assertEqual(kind, "openai")
-                self.assertEqual(len(exported), 2)
+                self.assertEqual(len(exported), 3)
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)

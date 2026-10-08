@@ -168,6 +168,11 @@ def _clean_message(message) -> dict | None:
             cleaned_calls.append(entry)
         if cleaned_calls:
             item["tool_calls"] = cleaned_calls
+    reasoning = message.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        item["reasoning_content"] = _clip_str(reasoning)
     return item
 
 

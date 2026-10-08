@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,11 +128,12 @@ TOOL_SPECS = [
     },
     {
         "name": "generate_image",
-        "description": "Сгенерировать изображение и сохранить его в проект после подтверждения. В prompt не должно быть секретов.",
+        "description": "Сгенерировать изображение и сохранить его в проект после подтверждения. В prompt не должно быть секретов. size — опционально, например 1024x1024 или 512x512 (если провайдер не поддерживает — будет без size).",
         "parameters": _schema(
             {
                 "prompt": _string("Описание изображения."),
                 "path": _string("Куда сохранить, относительно корня, например images/pic.png."),
+                "size": _string("Размер WxH, например 1024x1024. Пусто — выбор провайдера."),
             },
             ["prompt", "path"],
         ),
@@ -602,7 +604,10 @@ class Toolbox:
             )
         if self._stopped():
             return ToolOutcome("Остановлено.", f"generate_image {rel}: остановлено")
-        raw = self.image_request(base, key, model, prompt[:1000])
+        size = str(args.get("size") or "").strip().lower().replace(" ", "")
+        if size and not re.fullmatch(r"\d{2,5}x\d{2,5}", size):
+            size = ""
+        raw = self.image_request(base, key, model, prompt[:1000], size=size or None)
         if len(raw) > 15_000_000:
             raise ValueError("ответ генерации слишком большой")
         final = resolve_inside(self.root, relative_posix(self.root, requested.with_suffix(_image_suffix(raw))))

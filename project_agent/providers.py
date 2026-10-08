@@ -504,8 +504,17 @@ def build_provider(kind: str):
     return OpenAIProvider()
 
 
-def request_image(base_url: str, api_key: str, model: str, prompt: str, transport=None) -> bytes:
+def request_image(
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    transport=None,
+    size: str | None = None,
+) -> bytes:
     payload = {"model": model, "prompt": prompt, "n": 1, "response_format": "b64_json"}
+    if size:
+        payload["size"] = size
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -513,8 +522,11 @@ def request_image(base_url: str, api_key: str, model: str, prompt: str, transpor
     timeout = httpx.Timeout(120.0, connect=20.0)
     with httpx.Client(timeout=timeout, transport=transport) as client:
         response = client.post(url, json=payload, headers=headers)
-        if response.status_code == 400:
+        if response.status_code == 400 and "response_format" in payload:
             payload.pop("response_format", None)
+            response = client.post(url, json=payload, headers=headers)
+        if response.status_code == 400 and size and "size" in payload:
+            payload.pop("size", None)
             response = client.post(url, json=payload, headers=headers)
         if response.status_code >= 400:
             raise ApiError(_error_text(response))
@@ -645,6 +657,7 @@ def _openai_calls_from_message(message: dict) -> list[ToolCall]:
 class _OpenAIFeed:
     def __init__(self) -> None:
         self.text_parts: list[str] = []
+        self.reasoning_parts: list[str] = []
         self.calls: dict[int, dict] = {}
         self.usage = None
         self.usage_data = None
@@ -654,6 +667,15 @@ class _OpenAIFeed:
         if self.raw_message is not None:
             return _text_of(self.raw_message.get("content"))
         return "".join(self.text_parts)
+
+    def reasoning(self) -> str:
+        if self.raw_message is not None:
+            for key in ("reasoning_content", "reasoning"):
+                value = self.raw_message.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            return ""
+        return "".join(self.reasoning_parts)
 
     def feed(self, event: dict) -> str:
         error = event.get("error")
@@ -678,6 +700,11 @@ class _OpenAIFeed:
             if extra:
                 self.text_parts.append(extra)
                 piece = extra
+        for key in ("reasoning_content", "reasoning"):
+            reason = delta.get(key)
+            if isinstance(reason, str) and reason:
+                self.reasoning_parts.append(reason)
+                break
         for call in delta.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -747,16 +774,28 @@ class _OpenAIFeed:
             stored = {"role": "assistant", "content": self.raw_message.get("content")}
             if self.raw_message.get("tool_calls"):
                 stored["tool_calls"] = self.raw_message["tool_calls"]
+            for key in ("reasoning_content", "reasoning"):
+                value = self.raw_message.get(key)
+                if isinstance(value, str) and value:
+                    stored["reasoning_content"] = value
+                    break
             return stored
         text = self.text()
         stored = {"role": "assistant", "content": text if text else None}
         calls = self._stored_calls()
         if calls:
             stored["tool_calls"] = calls
+        reason = self.reasoning()
+        if reason:
+            stored["reasoning_content"] = reason
         return stored
 
     def partial_message(self) -> dict:
-        return {"role": "assistant", "content": self.text()}
+        stored = {"role": "assistant", "content": self.text()}
+        reason = self.reasoning()
+        if reason:
+            stored["reasoning_content"] = reason
+        return stored
 
     def usage_payload(self) -> dict:
         if isinstance(self.usage_data, dict):

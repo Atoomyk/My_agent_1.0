@@ -652,7 +652,7 @@ class NameDialog(ctk.CTkToplevel):
 
 
 class SettingsWindow(ctk.CTkToplevel):
-    _SECTIONS = ("Внешний вид", "Модель", "Изображения", "Проект", "MCP", "Безопасность")
+    _SECTIONS = ("Внешний вид", "Модель", "Проект", "MCP", "Безопасность")
 
     def __init__(self, app: "App") -> None:
         super().__init__(app)
@@ -709,7 +709,6 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self._fill_appearance(self._pages["Внешний вид"])
         self._fill_model(self._pages["Модель"])
-        self._fill_images(self._pages["Изображения"])
         self._fill_project(self._pages["Проект"])
         self._fill_mcp(self._pages["MCP"])
         self._fill_security(self._pages["Безопасность"])
@@ -734,40 +733,50 @@ class SettingsWindow(ctk.CTkToplevel):
     def _fill_model(self, page) -> None:
         app = self.app
         ctk.CTkLabel(page, text="Модель и профили", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
-            fill="x", padx=8, pady=(8, 4)
+            fill="x", padx=8, pady=(6, 2)
         )
-        app._field(page, "Профиль")
+        app._field(page, "Профиль", top=4)
         app.profile_menu = quiet_menu(page, app.profile_var, [_NO_PROFILE], app._on_profile_pick)
-        app.profile_menu.pack(fill="x", padx=8, pady=4)
+        app.profile_menu.pack(fill="x", padx=8, pady=(2, 2))
         app._sync_profile_menu()
+        app._field(page, "Провайдер", top=4)
+        quiet_menu(page, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=(2, 2))
+        app._entry(page, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic", top=4, gap=2)
+        app._entry(page, "Модель", app.model_var, "имя модели", top=4, gap=2)
+        app._entry(page, "Ключ", app.api_key_var, "", secret=True, top=4, gap=2)
+        app._entry(page, "Лимит шагов", app.steps_var, "25", top=4, gap=2)
+        ctk.CTkLabel(page, text="Генерация изображений", anchor="w", text_color=TEXT, font=("Segoe UI", 13)).pack(
+            fill="x", padx=8, pady=(10, 2)
+        )
+        ctk.CTkLabel(
+            page,
+            text="Пустые поля — генерация выключена; URL и ключ по умолчанию из чата выше.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=("Segoe UI", 11),
+        ).pack(fill="x", padx=8, pady=(0, 2))
+        app._entry(page, "Модель изображений", app.image_model_var, "пусто — генерация выключена", top=4, gap=2)
+        app._entry(page, "URL изображений", app.image_url_var, "пусто — URL API", top=4, gap=2)
+        app._entry(page, "Ключ изображений", app.image_key_var, "пусто — основной ключ", secret=True, top=4, gap=2)
+        ctk.CTkLabel(page, text="Действия с профилем", anchor="w", text_color=TEXT, font=("Segoe UI", 13)).pack(
+            fill="x", padx=8, pady=(12, 2)
+        )
+        ctk.CTkLabel(
+            page,
+            text="«Сохранить профиль» записывает текущие поля выше в выбранный или новый профиль. "
+            "Кнопка «Сохранить» внизу окна — все настройки приложения.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=("Segoe UI", 11),
+        ).pack(fill="x", padx=8, pady=(0, 4))
         profile_row = ctk.CTkFrame(page, fg_color="transparent")
-        profile_row.pack(fill="x", padx=8, pady=4)
+        profile_row.pack(fill="x", padx=8, pady=(2, 8))
         quiet_button(profile_row, "Сохранить профиль", app.save_profile, width=188, mark="save").pack(
             side="left", padx=(0, 4)
         )
         quiet_button(profile_row, "Удалить", app.delete_profile, width=112, mark="trash").pack(side="left")
-        app._field(page, "Провайдер")
-        quiet_menu(page, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=4)
-        app._entry(page, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic")
-        app._entry(page, "Модель", app.model_var, "имя модели")
-        app._entry(page, "Ключ", app.api_key_var, "", secret=True)
-        app._entry(page, "Лимит шагов", app.steps_var, "25")
-
-    def _fill_images(self, page) -> None:
-        app = self.app
-        ctk.CTkLabel(page, text="Изображения", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
-            fill="x", padx=8, pady=(8, 4)
-        )
-        ctk.CTkLabel(
-            page,
-            text="Пустые поля — генерация выключена или берутся значения из раздела «Модель».",
-            wraplength=400,
-            justify="left",
-            text_color=MUTED,
-        ).pack(fill="x", padx=8, pady=(0, 8))
-        app._entry(page, "Модель изображений", app.image_model_var, "пусто — генерация выключена")
-        app._entry(page, "URL изображений", app.image_url_var, "пусто — URL API")
-        app._entry(page, "Ключ изображений", app.image_key_var, "пусто — основной ключ", secret=True)
 
     def _fill_project(self, page) -> None:
         app = self.app
@@ -2234,11 +2243,21 @@ class App(ctk.CTk):
         except tk.TclError:
             return
 
-    def _field(self, parent, text: str) -> None:
-        ctk.CTkLabel(parent, text=text, anchor="w", text_color=MUTED).pack(fill="x", padx=8, pady=(8, 0))
+    def _field(self, parent, text: str, *, top: int = 8) -> None:
+        ctk.CTkLabel(parent, text=text, anchor="w", text_color=MUTED).pack(fill="x", padx=8, pady=(top, 0))
 
-    def _entry(self, parent, label: str, variable, placeholder: str, secret: bool = False) -> None:
-        self._field(parent, label)
+    def _entry(
+        self,
+        parent,
+        label: str,
+        variable,
+        placeholder: str,
+        secret: bool = False,
+        *,
+        top: int = 8,
+        gap: int = 4,
+    ) -> None:
+        self._field(parent, label, top=top)
         entry = ctk.CTkEntry(
             parent,
             textvariable=variable,
@@ -2251,7 +2270,7 @@ class App(ctk.CTk):
             height=36,
             corner_radius=12,
         )
-        entry.pack(fill="x", padx=8, pady=4)
+        entry.pack(fill="x", padx=8, pady=gap)
 
     def _load(self) -> None:
         data, error = load_config()
@@ -2323,8 +2342,13 @@ class App(ctk.CTk):
         self._show_model()
 
     def _show_model(self) -> None:
-        name = self.model_var.get().strip()
-        self.model_label.configure(text=name or "модель не выбрана")
+        name = self.model_var.get().strip() or "модель не выбрана"
+        image = self.image_model_var.get().strip()
+        if image:
+            if len(image) > 28:
+                image = image[:27] + "…"
+            name = f"{name} ({image})"
+        self.model_label.configure(text=name)
 
     def _ai_snapshot(self) -> dict:
         try:

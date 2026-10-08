@@ -256,6 +256,10 @@ def _scrub_message(message: dict, redact) -> None:
         for part in content:
             if isinstance(part, dict):
                 _scrub_part(part, redact)
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            message[key] = redact(value)
     for call in message.get("tool_calls") or []:
         function = call.get("function")
         if not isinstance(function, dict):
