@@ -667,11 +667,11 @@ class ConfirmDialog(ctk.CTkToplevel):
 
 
 class NameDialog(ctk.CTkToplevel):
-    def __init__(self, master) -> None:
+    def __init__(self, master, initial: str = "", title: str = "Профиль") -> None:
         super().__init__(master)
         self.result = ""
         self._closed = False
-        self.title("Профиль")
+        self.title(title)
         self.geometry("420x168")
         self.resizable(False, False)
         self.configure(fg_color=INK)
@@ -687,6 +687,9 @@ class NameDialog(ctk.CTkToplevel):
             corner_radius=12,
         )
         self.entry.pack(fill="x", padx=16, pady=4)
+        if initial:
+            self.entry.insert(0, initial)
+            self.entry.select_range(0, "end")
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(pady=12)
         quiet_button(row, "Отмена", self._cancel, width=120, mark="close").pack(side="left", padx=8)
@@ -800,6 +803,7 @@ class SettingsWindow(ctk.CTkToplevel):
         app._field(page, "Профиль", top=4)
         app.profile_menu = quiet_menu(page, app.profile_var, [_NO_PROFILE], app._on_profile_pick)
         app.profile_menu.pack(fill="x", padx=8, pady=(2, 2))
+        app._bind_profile_rename(app.profile_menu)
         app._sync_profile_menu()
         app._field(page, "Провайдер", top=4)
         quiet_menu(page, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=(2, 2))
@@ -2640,6 +2644,60 @@ class App(ctk.CTk):
         self.active_profile = name
         self._sync_profile_menu()
         self._persist("Профиль сохранён")
+
+    def _bind_profile_rename(self, widget) -> None:
+        widget.bind("<Button-3>", self._profile_menu_context)
+        for child in widget.winfo_children():
+            self._bind_profile_rename(child)
+
+    def _profile_menu_context(self, event) -> str | None:
+        name = self.active_profile
+        if not name or name == _NO_PROFILE:
+            return "break"
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(label="Переименовать", command=self.rename_profile)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def rename_profile(self) -> None:
+        old = self.active_profile
+        if not old or old == _NO_PROFILE:
+            return
+        if self.running:
+            return
+        dialog = NameDialog(self, initial=old, title="Переименовать")
+        self.wait_window(dialog)
+        name = " ".join(str(dialog.result or "").split())
+        if not name or name == old:
+            return
+        if len(name) > 80 or name == _NO_PROFILE:
+            self.write_chat("Такое имя профиля не подходит.")
+            return
+        if any(item["name"] == name for item in self.profiles):
+            self.write_chat("Профиль с таким именем уже есть.")
+            return
+        updated = []
+        for item in self.profiles:
+            if item["name"] == old:
+                updated.append({**item, "name": name})
+            else:
+                updated.append(item)
+        self.profiles = updated
+        self.active_profile = name
+        self._sync_profile_menu()
+        self._persist("Профиль переименован")
 
     def delete_profile(self) -> None:
         name = self.active_profile
