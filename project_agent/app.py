@@ -66,6 +66,8 @@ PROVIDER_LABELS = {
 LABEL_BY_PROVIDER = {value: key for key, value in PROVIDER_LABELS.items()}
 MODE_LABELS = {
     "Agent": "agent",
+    "Plan": "plan",
+    "Debug": "debug",
     "Ask": "ask",
 }
 LABEL_BY_MODE = {value: key for key, value in MODE_LABELS.items()}
@@ -96,9 +98,13 @@ CODE_TEXT = ("#0f7b8a", "#6cc7d3")
 CTX_OK = ("#5a8f6a", "#6aab7a")
 CTX_WARN = ("#c48a2e", "#d4a04a")
 CTX_FULL = ("#c45a4a", "#d46a5a")
+DIFF_ADD = ("#2f6b3c", "#7dba8a")
+DIFF_DEL = ("#a33d3d", "#e08a8a")
+DIFF_HUNK = ("#6a5a8a", "#b0a0d0")
 SEARCH_BG = ("#efe0b8", "#4a3f24")
 SEARCH_CUR = ("#e0b86a", "#7a5e28")
 CHAT_COLUMN = 820
+DIFF_PREVIEW_LINES = 48
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
@@ -546,8 +552,12 @@ class ConfirmDialog(ctk.CTkToplevel):
         super().__init__(master)
         self.result = False
         self._closed = False
+        self._detail = (detail or "").strip()
+        self._expanded = False
+        self._box = None
+        self._expand_btn = None
         self.title("Подтверждение")
-        tall = bool((detail or "").strip())
+        tall = bool(self._detail)
         self.geometry("560x420" if tall else "520x220")
         self.minsize(480, 200)
         self.resizable(True, True)
@@ -563,7 +573,7 @@ class ConfirmDialog(ctk.CTkToplevel):
             row=1, column=0, sticky="ew", padx=16, pady=4
         )
         if tall:
-            box = ctk.CTkTextbox(
+            self._box = ctk.CTkTextbox(
                 self,
                 fg_color=FIELD,
                 text_color=TEXT,
@@ -573,19 +583,71 @@ class ConfirmDialog(ctk.CTkToplevel):
                 font=("Consolas", 11),
                 wrap="none",
             )
-            box.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
-            box.insert("1.0", detail.strip())
-            box.configure(state="disabled")
+            self._box.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
+            inner = self._box._textbox
+            inner.tag_configure("diff_add", foreground=_tone(DIFF_ADD))
+            inner.tag_configure("diff_del", foreground=_tone(DIFF_DEL))
+            inner.tag_configure("diff_hunk", foreground=_tone(DIFF_HUNK))
+            inner.tag_configure("diff_meta", foreground=_tone(MUTED))
+            self._fill_diff(self._preview_text())
             button_row = 3
         else:
             button_row = 2
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.grid(row=button_row, column=0, pady=(8, 16))
+        if tall and self._is_truncated():
+            self._expand_btn = quiet_button(row, "Показать всё", self._expand_diff, width=140)
+            self._expand_btn.pack(side="left", padx=8)
         quiet_button(row, "Нет", self.refuse, width=110, mark="close").pack(side="left", padx=8)
         quiet_button(row, "Да", self.allow, width=110, primary=True, mark="check").pack(side="left", padx=8)
         self.protocol("WM_DELETE_WINDOW", self.refuse)
         self.bind("<Escape>", lambda _event: self.refuse())
         self.after(50, self.focus)
+
+    def _detail_lines(self) -> list[str]:
+        return self._detail.splitlines()
+
+    def _is_truncated(self) -> bool:
+        return (not self._expanded) and len(self._detail_lines()) > DIFF_PREVIEW_LINES
+
+    def _preview_text(self) -> str:
+        lines = self._detail_lines()
+        if self._expanded or len(lines) <= DIFF_PREVIEW_LINES:
+            return self._detail
+        return "\n".join(lines[:DIFF_PREVIEW_LINES] + ["…"])
+
+    def _fill_diff(self, text: str) -> None:
+        if self._box is None:
+            return
+        inner = self._box._textbox
+        self._box.configure(state="normal")
+        inner.delete("1.0", "end")
+        for raw in text.splitlines():
+            line = raw + "\n"
+            start = inner.index("end-1c")
+            inner.insert("end", line)
+            end = inner.index("end-1c")
+            if raw.startswith("+++") or raw.startswith("---"):
+                inner.tag_add("diff_meta", start, end)
+            elif raw.startswith("@@"):
+                inner.tag_add("diff_hunk", start, end)
+            elif raw.startswith("+"):
+                inner.tag_add("diff_add", start, end)
+            elif raw.startswith("-"):
+                inner.tag_add("diff_del", start, end)
+        self._box.configure(state="disabled")
+
+    def _expand_diff(self) -> None:
+        if self._expanded or self._box is None:
+            return
+        self._expanded = True
+        self._fill_diff(self._detail)
+        if self._expand_btn is not None:
+            self._expand_btn.configure(state="disabled")
+        try:
+            self.geometry("640x520")
+        except tk.TclError:
+            pass
 
     def allow(self) -> None:
         if self._closed:
@@ -1323,7 +1385,7 @@ class App(ctk.CTk):
             values=list(MODE_LABELS),
             command=self._on_mode_pick,
             height=26,
-            width=88,
+            width=96,
             corner_radius=8,
             dynamic_resizing=False,
             fg_color=INK,

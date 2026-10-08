@@ -153,7 +153,7 @@ def parse_commit_paths(raw) -> list[str]:
     return [part for part in text.split() if part.strip()]
 
 
-def preview_unified(before: str, after: str, path: str, limit: int = 48) -> str:
+def preview_unified(before: str, after: str, path: str, limit: int | None = None) -> str:
     import difflib
 
     before_lines = before.splitlines()
@@ -170,6 +170,6 @@ def preview_unified(before: str, after: str, path: str, limit: int = 48) -> str:
     )
     if not lines:
         return "(нет текстового диффа)"
-    if len(lines) > limit:
+    if limit is not None and limit > 0 and len(lines) > limit:
         lines = lines[:limit] + ["…"]
     return "\n".join(lines)

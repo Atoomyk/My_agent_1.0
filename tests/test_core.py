@@ -629,6 +629,15 @@ class GitOpsTests(unittest.TestCase):
             self.assertIn("init", log.output)
             preview = preview_unified("one\n", "one\ntwo\n", "a.txt")
             self.assertIn("+two", preview)
+            long_before = "\n".join(f"old{i}" for i in range(60)) + "\n"
+            long_after = "\n".join(f"new{i}" for i in range(60)) + "\n"
+            clipped = preview_unified(long_before, long_after, "b.txt", limit=10)
+            self.assertTrue(clipped.rstrip().endswith("…"))
+            self.assertLessEqual(len(clipped.splitlines()), 11)
+            full = preview_unified(long_before, long_after, "b.txt")
+            self.assertIn("+new0", full)
+            self.assertGreater(len(full.splitlines()), 10)
+            self.assertFalse(full.rstrip().endswith("…"))
             notes = []
             box = Toolbox(
                 SecretVault(),
@@ -807,6 +816,14 @@ class ProjectRulesTests(unittest.TestCase):
             ask_system = agent._system()
             self.assertIn("Режим: Ask", ask_system)
             self.assertIn("Пиши кратко.", ask_system)
+            agent._agent_mode = "plan"
+            plan_system = agent._system()
+            self.assertIn("Режим: Plan", plan_system)
+            self.assertIn("- [ ]", plan_system)
+            agent._agent_mode = "debug"
+            debug_system = agent._system()
+            self.assertIn("Режим: Debug", debug_system)
+            self.assertIn("гипотезу", debug_system)
 
 
 class ToolRunningLabelTests(unittest.TestCase):
@@ -824,17 +841,35 @@ class ToolRunningLabelTests(unittest.TestCase):
 
 class AgentModeTests(unittest.TestCase):
     def test_tools_filter_and_ask_blocks_writes(self):
-        from project_agent.tools import ASK_TOOL_NAMES, normalize_agent_mode, tools_for_mode
+        from project_agent.tools import (
+            ASK_TOOL_NAMES,
+            PLAN_TOOL_NAMES,
+            mode_allows_writes,
+            normalize_agent_mode,
+            tools_for_mode,
+        )
 
         self.assertEqual(normalize_agent_mode("ASK"), "ask")
+        self.assertEqual(normalize_agent_mode("Plan"), "plan")
+        self.assertEqual(normalize_agent_mode("DEBUG"), "debug")
         self.assertEqual(normalize_agent_mode("nope"), "agent")
+        self.assertTrue(mode_allows_writes("agent"))
+        self.assertTrue(mode_allows_writes("debug"))
+        self.assertFalse(mode_allows_writes("ask"))
+        self.assertFalse(mode_allows_writes("plan"))
         ask_names = {spec["name"] for spec in tools_for_mode("ask")}
         self.assertEqual(ask_names, set(ASK_TOOL_NAMES))
         self.assertNotIn("write_file", ask_names)
         self.assertNotIn("browser", ask_names)
+        plan_names = {spec["name"] for spec in tools_for_mode("plan")}
+        self.assertEqual(plan_names, set(PLAN_TOOL_NAMES))
+        self.assertNotIn("write_file", plan_names)
+        self.assertNotIn("run_tests", plan_names)
         agent_names = {spec["name"] for spec in tools_for_mode("agent")}
         self.assertIn("write_file", agent_names)
         self.assertIn("browser", agent_names)
+        debug_names = {spec["name"] for spec in tools_for_mode("debug")}
+        self.assertEqual(debug_names, agent_names)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -847,6 +882,14 @@ class AgentModeTests(unittest.TestCase):
             self.assertFalse((root / "a.py").exists())
             commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
             self.assertIn("Ask", commit.model_text)
+            settings["agent_mode"] = "plan"
+            plan_blocked = box.execute("write_file", {"path": "b.py", "content": "y=1\n", "summary": "y"})
+            self.assertIn("Plan", plan_blocked.model_text)
+            self.assertFalse((root / "b.py").exists())
+            plan_tests = box.execute("run_tests", {"summary": "check"})
+            self.assertIn("Plan", plan_tests.model_text)
+            plan_commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
+            self.assertIn("Plan", plan_commit.model_text)
 
 
 class McpTests(unittest.TestCase):

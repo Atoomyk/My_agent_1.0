@@ -7,7 +7,7 @@ from pathlib import Path
 from project_agent.providers import ApiError, Stopped, build_provider
 from project_agent.rules import load_project_rules
 from project_agent.secrets import Scrubber, literals_from_settings
-from project_agent.tools import normalize_agent_mode, tools_for_mode
+from project_agent.tools import mode_allows_writes, normalize_agent_mode, tools_for_mode
 from project_agent.context_usage import (
     DEFAULT_CONTEXT_LIMIT,
     estimate_tokens,
@@ -44,6 +44,46 @@ SYSTEM_ASK = """Ты помощник по файлам проекта. Режи
 Можно: list_dir, read_file, search, project_index, view_image, web_search, list_mcp_tools, git status/diff/log.
 Отвечай на языке пользователя. Когда ответ готов — текстом без инструментов.
 """
+
+SYSTEM_PLAN = """Ты помощник по файлам проекта. Режим: Plan (план без записи). Корень: {root}
+Весь проект в контекст не входит: нужные файлы читай инструментами.
+Человек может явно приложить файлы и папки (@путь / @папка или вложение): файлы — содержимое, папки — только дерево путей. Изображение можно вставить из буфера (Ctrl+V).
+Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
+Метки вида [[SEC:...:N]] заменяют пароли и ключи. Не пытайся их раскрыть.
+Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
+В Plan нельзя менять проект и запускать тесты: нет write_file, apply_patch, run_tests, git commit, generate_image, browser, call_mcp_tool.
+Можно: list_dir, read_file, search, project_index, view_image, web_search, list_mcp_tools, git status/diff/log.
+Задача: разобрать задачу, при необходимости прочитать код, затем выдать короткий план чеклистом в чате в виде строк «- [ ] шаг».
+Не пиши файлы и не предлагай «уже внести правку» в этом режиме. В конце напомни: чтобы выполнить план, переключиться в Agent и написать «делай».
+Отвечай на языке пользователя. Когда план готов — текстом без инструментов.
+"""
+
+SYSTEM_DEBUG = """Ты помощник по файлам проекта. Режим: Debug. Корень: {root}
+Весь проект в контекст не входит: нужные файлы читай инструментами.
+Человек может явно приложить файлы и папки (@путь / @папка или вложение): файлы — содержимое, папки — только дерево путей. Изображение можно вставить из буфера (Ctrl+V).
+Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
+Метки вида [[SEC:...:N]] заменяют пароли и ключи. Копируй метку целиком, если значение нужно сохранить. Не пытайся её раскрыть.
+Не вставляй секреты в web_search, generate_image и аргументы MCP: оттуда метки будут удалены.
+Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
+Запись файла, генерация изображения и запуск тестов — только после подтверждения. Если отказал — не повторяй то же действие.
+Дисциплина Debug: 1) воспроизведи или собери факты (чтение кода, логи, run_tests при включённом пресете); 2) кратко сформулируй гипотезу; 3) одна точечная правка; 4) снова проверь.
+Не размазывай правки по многим файлам наугад. Push, reset --hard и произвольный shell недоступны.
+Тесты только через run_tests и пресет в настройках → Проект. При повторном том же FAIL или СТОП — остановись и опиши проблему.
+Когда задача сделана или ход остановлен: ответь текстом без инструментов и перечисли изменённые файлы. Если правок не было — скажи об этом.
+Отвечай на языке пользователя.
+"""
+
+_SYSTEM_BY_MODE = {
+    "agent": SYSTEM_AGENT,
+    "ask": SYSTEM_ASK,
+    "plan": SYSTEM_PLAN,
+    "debug": SYSTEM_DEBUG,
+}
+_STATUS_BY_MODE = {
+    "ask": " · Ask",
+    "plan": " · Plan",
+    "debug": " · Debug",
+}
 
 # совместимость со старыми импортами/тестами
 SYSTEM = SYSTEM_AGENT
@@ -156,7 +196,7 @@ class Agent:
 
     def _system(self) -> str:
         root = str(self.root) if self.root else ""
-        template = SYSTEM_ASK if self._agent_mode == "ask" else SYSTEM_AGENT
+        template = _SYSTEM_BY_MODE.get(self._agent_mode, SYSTEM_AGENT)
         base = template.replace("{root}", root)
         block, _sources = load_project_rules(self.root)
         if block:
@@ -195,7 +235,7 @@ class Agent:
         specs = tools_for_mode(self._agent_mode)
         self._last_tools = specs
         max_steps = int(settings.get("max_steps") or 25)
-        if self._agent_mode == "ask":
+        if self._agent_mode in ("ask", "plan"):
             max_steps = min(max_steps, 15)
         try:
             for step in range(1, max_steps + 1):
@@ -203,7 +243,8 @@ class Agent:
                     self.on_chat("Остановлено.")
                     self._publish_context(settings)
                     return
-                self.on_status(f"Шаг {step} из {max_steps}" + (" · Ask" if self._agent_mode == "ask" else ""))
+                mark = _STATUS_BY_MODE.get(self._agent_mode, "")
+                self.on_status(f"Шаг {step} из {max_steps}{mark}")
                 try:
                     turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
                 except Stopped as exc:
@@ -238,8 +279,8 @@ class Agent:
                         self._publish_context(settings)
                         return
                     running = tool_running_label(call.name, call.arguments)
-                    ask_mark = " · Ask" if self._agent_mode == "ask" else ""
-                    self.on_status(f"Шаг {step} из {max_steps} · {running}…{ask_mark}")
+                    mark = _STATUS_BY_MODE.get(self._agent_mode, "")
+                    self.on_status(f"Шаг {step} из {max_steps} · {running}…{mark}")
                     self.on_journal(f"{running}: выполняется…")
                     outcome = self.toolbox.execute(call.name, call.arguments)
                     self.on_journal(outcome.journal)
@@ -328,7 +369,7 @@ class Agent:
 
     def _open_checkpoint(self) -> None:
         stack = self.checkpoints
-        if stack is None or self._agent_mode != "agent" or self.provider is None:
+        if stack is None or not mode_allows_writes(self._agent_mode) or self.provider is None:
             return
         try:
             transcript_len = int(self.transcript_len() or 0)
@@ -346,7 +387,7 @@ class Agent:
     def _finish_checkpoint(self) -> None:
         stack = self.checkpoints
         self.toolbox.on_before_write = None
-        if stack is None or self._agent_mode != "agent":
+        if stack is None or not mode_allows_writes(self._agent_mode):
             self._abandon_checkpoint()
             return
         checkpoint, dropped = stack.finalize()

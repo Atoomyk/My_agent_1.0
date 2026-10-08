@@ -231,7 +231,11 @@ ASK_TOOL_NAMES = frozenset(
         "list_mcp_tools",
     }
 )
-AGENT_MODES = ("agent", "ask")
+# Plan — те же read-only инструменты, что Ask (без записи и run_tests).
+PLAN_TOOL_NAMES = ASK_TOOL_NAMES
+AGENT_MODES = ("agent", "ask", "plan", "debug")
+WRITE_MODES = frozenset({"agent", "debug"})
+READONLY_MODES = frozenset({"ask", "plan"})
 
 
 def normalize_agent_mode(raw) -> str:
@@ -239,11 +243,16 @@ def normalize_agent_mode(raw) -> str:
     return value if value in AGENT_MODES else "agent"
 
 
+def mode_allows_writes(mode: str) -> bool:
+    return normalize_agent_mode(mode) in WRITE_MODES
+
+
 def tools_for_mode(mode: str) -> list[dict]:
     mode = normalize_agent_mode(mode)
-    if mode != "ask":
-        return list(TOOL_SPECS)
-    return [spec for spec in TOOL_SPECS if spec["name"] in ASK_TOOL_NAMES]
+    if mode in READONLY_MODES:
+        names = PLAN_TOOL_NAMES if mode == "plan" else ASK_TOOL_NAMES
+        return [spec for spec in TOOL_SPECS if spec["name"] in names]
+    return list(TOOL_SPECS)
 
 
 @dataclass
@@ -315,11 +324,19 @@ class Toolbox:
     def execute(self, name: str, arguments) -> ToolOutcome:
         try:
             mode = normalize_agent_mode((self.settings() or {}).get("agent_mode"))
-            if mode == "ask" and name not in ASK_TOOL_NAMES:
-                outcome = ToolOutcome(
-                    f"Режим Ask: инструмент «{name}» недоступен. Переключитесь в Agent, чтобы менять проект.",
-                    f"{name}: запрещено в Ask",
-                )
+            allowed = {spec["name"] for spec in tools_for_mode(mode)}
+            if mode in READONLY_MODES and name not in allowed:
+                if mode == "plan":
+                    outcome = ToolOutcome(
+                        f"Режим Plan: инструмент «{name}» недоступен. Сначала план без записи; "
+                        "переключитесь в Agent и напишите «делай», чтобы выполнять.",
+                        f"{name}: запрещено в Plan",
+                    )
+                else:
+                    outcome = ToolOutcome(
+                        f"Режим Ask: инструмент «{name}» недоступен. Переключитесь в Agent, чтобы менять проект.",
+                        f"{name}: запрещено в Ask",
+                    )
             else:
                 arguments = _arguments(arguments)
                 handler = getattr(self, f"_tool_{name}", None)
@@ -728,7 +745,13 @@ class Toolbox:
     def _tool_git(self, args: dict) -> ToolOutcome:
         root = self._require_root()
         action = str(args.get("action") or "").strip().lower()
-        if action == "commit" and normalize_agent_mode((self.settings() or {}).get("agent_mode")) == "ask":
+        mode = normalize_agent_mode((self.settings() or {}).get("agent_mode"))
+        if action == "commit" and mode in READONLY_MODES:
+            if mode == "plan":
+                return ToolOutcome(
+                    "Режим Plan: git commit недоступен. Переключитесь в Agent.",
+                    "git commit: запрещено в Plan",
+                )
             return ToolOutcome(
                 "Режим Ask: git commit недоступен. Переключитесь в Agent.",
                 "git commit: запрещено в Ask",
