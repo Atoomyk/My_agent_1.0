@@ -481,7 +481,7 @@ def glyph(name: str, invert: bool = False) -> ctk.CTkImage:
     return icon
 
 
-def quiet_button(parent, text, command, width=96, primary=False, mark=None, round_mark=False):
+def quiet_button(parent, text, command, width=96, primary=False, mark=None, round_mark=False, height=32):
     if round_mark:
         return ctk.CTkButton(
             parent,
@@ -500,14 +500,14 @@ def quiet_button(parent, text, command, width=96, primary=False, mark=None, roun
         text=text,
         image=None if mark is None else glyph(mark, invert=primary),
         width=width,
-        height=32,
-        corner_radius=16,
+        height=height,
+        corner_radius=max(8, height // 2),
         border_width=0 if primary else 1,
         border_color=BORDER,
         fg_color=SEND if primary else BUTTON,
         hover_color=SEND_HOVER if primary else BUTTON_HOVER,
         text_color=ON_SEND if primary else TEXT,
-        font=("Segoe UI", 12),
+        font=("Segoe UI", 12 if height >= 28 else 11),
         command=command,
     )
 
@@ -1468,7 +1468,7 @@ class App(ctk.CTk):
         footer = ctk.CTkFrame(bottom, fg_color="transparent")
         self.footer = footer
         footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 8))
-        footer.grid_columnconfigure(4, weight=1)
+        footer.grid_columnconfigure(3, weight=1)
         self.footer_profile_menu = ctk.CTkOptionMenu(
             footer,
             variable=self.profile_var,
@@ -1509,19 +1509,11 @@ class App(ctk.CTk):
             dropdown_font=self._font(12),
         )
         self.mode_menu.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        quiet_button(footer, "Сжать", self.compress_context, width=72).grid(
+        quiet_button(footer, "Сжать", self.compress_context, width=48, height=24).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
         )
-        self.model_label = ctk.CTkLabel(
-            footer,
-            text="модель не выбрана",
-            anchor="w",
-            text_color=MUTED,
-            font=self._font(11),
-        )
-        self.model_label.grid(row=0, column=3, sticky="w", padx=(10, 0))
         ctx = ctk.CTkFrame(footer, fg_color="transparent")
-        ctx.grid(row=0, column=4, sticky="e", padx=(8, 8))
+        ctx.grid(row=0, column=3, sticky="e", padx=(8, 8))
         self.context_label = ctk.CTkLabel(
             ctx,
             text="0%",
@@ -1541,7 +1533,7 @@ class App(ctk.CTk):
         self.context_bar.pack(side="left")
         self.context_bar.set(0)
         self.status_label = ctk.CTkLabel(footer, text="Готово", anchor="e", text_color=MUTED, font=self._font(11))
-        self.status_label.grid(row=0, column=5, sticky="e")
+        self.status_label.grid(row=0, column=4, sticky="e")
         self.bind("<Configure>", self._on_window_configure, add="+")
         self.after(80, self._fit_composer)
 
@@ -2591,16 +2583,6 @@ class App(ctk.CTk):
         self.image_model_var.set(fields["image_model"])
         self.image_url_var.set(fields["image_base_url"])
         self.image_key_var.set(fields["image_api_key"])
-        self._show_model()
-
-    def _show_model(self) -> None:
-        name = self.model_var.get().strip() or "модель не выбрана"
-        image = self.image_model_var.get().strip()
-        if image:
-            if len(image) > 28:
-                image = image[:27] + "…"
-            name = f"{name} ({image})"
-        self.model_label.configure(text=name)
 
     def _ai_snapshot(self) -> dict:
         try:
@@ -2663,6 +2645,12 @@ class App(ctk.CTk):
         name = self.active_profile
         if not name:
             self.write_chat("Профиль не выбран.")
+            return
+        dialog = ConfirmDialog(self, name, "Удалить этот профиль?")
+        self._dialog = dialog
+        self.wait_window(dialog)
+        self._dialog = None
+        if not dialog.result:
             return
         self.profiles = [item for item in self.profiles if item["name"] != name]
         self.active_profile = ""
@@ -2791,7 +2779,6 @@ class App(ctk.CTk):
 
     def save_settings(self) -> None:
         self._persist("Настройки сохранены")
-        self._show_model()
 
     def _capture_active_profile(self) -> None:
         name = self.active_profile
