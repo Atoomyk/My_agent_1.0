@@ -157,6 +157,19 @@ class _HttpProvider:
             return
         self.messages.pop()
 
+    def rewind_to_last_user(self) -> bool:
+        """Срезать всё после последнего user — для Повторить/Продолжить после стопа или ошибки."""
+        idx = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            msg = self.messages[i]
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                idx = i
+                break
+        if idx is None:
+            return False
+        del self.messages[idx + 1 :]
+        return True
+
     def _note_usage(self, data: dict) -> int | None:
         from project_agent.context_usage import parse_prompt_tokens
 

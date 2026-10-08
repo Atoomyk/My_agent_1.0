@@ -1903,6 +1903,63 @@ class AgentLoopTests(unittest.TestCase):
             self.assertTrue(any("ок" in line for line in chats))
             self.assertFalse(any(line.startswith("Вы:") for line in chats))
 
+    def test_rewind_to_last_user_clears_tool_tail(self):
+        provider = OpenAIProvider()
+        provider.messages = [
+            {"role": "user", "content": "задача"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function"}]},
+            {"role": "tool", "tool_call_id": "1", "content": "частично"},
+        ]
+        self.assertTrue(provider.rewind_to_last_user())
+        self.assertEqual(provider.messages, [{"role": "user", "content": "задача"}])
+
+    def test_stop_calls_on_stopped(self):
+        from project_agent.agent import Agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            stopped = []
+            chats = []
+            vault = SecretVault()
+            hub = McpHub()
+            box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
+            agent = Agent(
+                vault,
+                box,
+                hub,
+                chats.append,
+                lambda _journal: None,
+                lambda _status: None,
+                on_stopped=stopped.append,
+            )
+            settings = {
+                "provider": "openai",
+                "model": "m",
+                "api_key": "",
+                "base_url": "http://example.test/v1",
+                "mcp_servers": [],
+                "agent_mode": "ask",
+            }
+            stop = threading.Event()
+            stop.set()
+            try:
+                agent.set_root(root)
+                provider = OpenAIProvider()
+                provider._transport = httpx.MockTransport(
+                    lambda _request: httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "x"}}]})
+                )
+                agent.provider = provider
+                agent.provider_kind = "openai"
+                agent.run_turn("вопрос", [], settings, stop)
+            finally:
+                if provider._http is not None:
+                    provider._http.close()
+                hub.close()
+            self.assertTrue(stopped)
+            self.assertIn("Остановлено", stopped[0])
+            self.assertFalse(any("Остановлено" in line for line in chats))
+
 
 class ContextUsageTests(unittest.TestCase):
     def test_parse_estimate_and_flatten(self):

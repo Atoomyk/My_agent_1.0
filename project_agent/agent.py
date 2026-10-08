@@ -124,6 +124,7 @@ class Agent:
         on_context=None,
         on_stream=None,
         on_error=None,
+        on_stopped=None,
         on_checkpoint=None,
         transcript_len=None,
     ) -> None:
@@ -136,6 +137,7 @@ class Agent:
         self.on_context = on_context or (lambda *_args, **_kwargs: None)
         self.on_stream = on_stream
         self.on_error = on_error
+        self.on_stopped = on_stopped or on_chat
         self.on_checkpoint = on_checkpoint
         self.transcript_len = transcript_len or (lambda: 0)
         self.provider = None
@@ -227,7 +229,8 @@ class Agent:
         self.provider.set_system(self._system())
         scrubber = Scrubber(self.vault, literals_from_settings(settings))
         if resend and self.provider.message_count():
-            self.provider.drop_incomplete_tail()
+            if not self.provider.rewind_to_last_user():
+                self.provider.drop_incomplete_tail()
         if not resend or self.provider.message_count() == 0:
             self.provider.add_user(scrubber(text), images)
         if not resend:
@@ -240,7 +243,7 @@ class Agent:
         try:
             for step in range(1, max_steps + 1):
                 if stop.is_set():
-                    self.on_chat("Остановлено.")
+                    self.on_stopped("Остановлено.")
                     self._publish_context(settings)
                     return
                 mark = _STATUS_BY_MODE.get(self._agent_mode, "")
@@ -249,7 +252,7 @@ class Agent:
                     turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
                 except Stopped as exc:
                     self._emit_partial(exc, scrubber)
-                    self.on_chat("Остановлено.")
+                    self.on_stopped("Остановлено.")
                     self._publish_context(settings)
                     return
                 except ApiError as exc:
@@ -275,7 +278,7 @@ class Agent:
                     return
                 for call in turn.tool_calls:
                     if stop.is_set():
-                        self.on_chat("Остановлено.")
+                        self.on_stopped("Остановлено.")
                         self._publish_context(settings)
                         return
                     running = tool_running_label(call.name, call.arguments)

@@ -1052,8 +1052,9 @@ class App(ctk.CTk):
             self._on_context,
             self.stream_chat,
             self.write_retryable_error,
-            self._on_checkpoint,
-            lambda: len(self.transcript),
+            on_stopped=self.write_stopped,
+            on_checkpoint=self._on_checkpoint,
+            transcript_len=lambda: len(self.transcript),
         )
         self.agent.checkpoints = self.checkpoints
         self.theme = "dark"
@@ -3311,11 +3312,16 @@ class App(ctk.CTk):
         self._close_tool_group()
         self._collapse_tool_groups()
         if self.stop_event.is_set():
-            self._can_retry = False
-            self._set_retry_enabled(False)
+            if self._retry_payload:
+                self._can_retry = True
+                self._set_retry_enabled(True)
+            else:
+                self._can_retry = False
+                self._set_retry_enabled(False)
             self.set_status("Остановлено")
         elif self._can_retry:
             self.set_status("Ошибка API")
+            self._set_retry_enabled(True)
         else:
             self._set_retry_enabled(False)
             self.set_status("Готово")
@@ -3360,7 +3366,18 @@ class App(ctk.CTk):
         self._can_retry = True
         line = with_chat_stamp(text)
         self._remember(line)
-        self.after(0, lambda line=line: self._append_error(line))
+        self.after(0, lambda line=line: self._append_retryable(line, button="Повторить", error=True))
+
+    def write_stopped(self, text: str = "Остановлено.") -> None:
+        self._can_retry = bool(self._retry_payload)
+        line = with_chat_stamp(text)
+        self._remember(line)
+        self.after(
+            0,
+            lambda line=line, can=self._can_retry: self._append_retryable(
+                line, button="Продолжить", error=False, with_button=can
+            ),
+        )
 
     def _forget_retry(self) -> None:
         self._retry_payload = None
@@ -3380,7 +3397,9 @@ class App(ctk.CTk):
                 continue
         self._retry_buttons = alive
 
-    def _append_error(self, text: str) -> None:
+    def _append_retryable(
+        self, text: str, *, button: str, error: bool = False, with_button: bool = True
+    ) -> None:
         box = self.chat
         if not box.winfo_exists():
             return
@@ -3389,23 +3408,28 @@ class App(ctk.CTk):
         self._clear_running_tool()
         self._close_tool_group()
         start = inner.index("end-1c")
-        body = chat_body(text, "error")
+        body = chat_body(text, "error" if error else None)
         _, stamp = split_chat_stamp(text)
         inner.insert("end", body + "\n")
-        self._insert_retry_button(inner)
+        if with_button:
+            self._insert_retry_button(inner, label=button, error=error)
         if stamp:
             mark = inner.index("end-1c")
             inner.insert("end", f"{stamp}\n\n", ("time",))
-            inner.tag_add("error", start, mark)
-        else:
+            if error:
+                inner.tag_add("error", start, mark)
+        elif error:
             inner.tag_add("error", start, inner.index("end-1c"))
         self._chat_see_end()
 
-    def _insert_retry_button(self, inner) -> None:
+    def _append_error(self, text: str) -> None:
+        self._append_retryable(text, button="Повторить", error=True)
+
+    def _insert_retry_button(self, inner, *, label: str = "Повторить", error: bool = True) -> None:
         self._set_retry_enabled(False)
         button = tk.Button(
             inner,
-            text="Повторить",
+            text=label,
             command=self.retry_last,
             relief="flat",
             bd=0,
@@ -3423,7 +3447,8 @@ class App(ctk.CTk):
         mark = inner.index("end-1c")
         inner.window_create("end", window=button, padx=0, pady=2)
         inner.insert("end", "\n")
-        inner.tag_add("error", mark, inner.index("end-1c"))
+        if error:
+            inner.tag_add("error", mark, inner.index("end-1c"))
 
     def _on_checkpoint(self, checkpoint_id: str | None, file_count: int, dropped: list[str]) -> None:
         if dropped:
