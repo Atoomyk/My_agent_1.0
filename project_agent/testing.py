@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +174,7 @@ def run_argv(
     timeout: int,
     stop: threading.Event | None = None,
     holder: dict | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> TestRun:
     timeout = normalize_timeout(timeout)
     env = os.environ.copy()
@@ -185,19 +188,66 @@ def run_argv(
         text=True,
         encoding="utf-8",
         errors="replace",
+        bufsize=1,
         env=env,
     )
     if holder is not None:
         holder["process"] = process
     timed_out = False
     stopped = False
-    try:
+    chunks: list[str] = []
+    reader_done = threading.Event()
+
+    def _emit(piece: str) -> None:
+        if not piece or on_output is None:
+            return
         try:
-            output, _err = process.communicate(timeout=timeout)
+            on_output(piece)
+        except Exception:
+            pass
+
+    def _read_stdout() -> None:
+        stream = process.stdout
+        try:
+            if stream is None:
+                return
+            while True:
+                line = stream.readline()
+                if line == "":
+                    break
+                chunks.append(line)
+                _emit(line)
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+            reader_done.set()
+
+    reader = threading.Thread(target=_read_stdout, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while not reader_done.wait(0.15):
+            if stop is not None and stop.is_set():
+                stopped = True
+                kill_process(process)
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                kill_process(process)
+                break
+        reader_done.wait(5)
+        reader.join(timeout=2)
+        try:
+            process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            timed_out = True
             kill_process(process)
-            output, _err = process.communicate(timeout=5)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         if holder is not None:
             holder.pop("process", None)
@@ -208,7 +258,7 @@ def run_argv(
     return TestRun(
         command=command,
         code=code,
-        output=clip_output(output or ""),
+        output=clip_output("".join(chunks)),
         timed_out=timed_out,
         stopped=stopped,
     )
@@ -220,5 +270,6 @@ def run_preset(
     timeout: int,
     stop: threading.Event | None = None,
     holder: dict | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> TestRun:
-    return run_argv(root, preset_command(preset), timeout, stop, holder)
+    return run_argv(root, preset_command(preset), timeout, stop, holder, on_output)

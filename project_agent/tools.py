@@ -29,6 +29,7 @@ from project_agent.testing import (
     normalize_fix_rounds,
     normalize_preset,
     normalize_timeout,
+    preset_command,
     run_argv,
     run_preset,
 )
@@ -49,6 +50,7 @@ from project_agent.gitops import (
     git_log,
     git_status,
     parse_commit_paths,
+    preview_commit_diff,
     preview_unified,
 )
 from project_agent.websearch import web_search
@@ -311,9 +313,19 @@ class Toolbox:
         self._fail_locked = False
         self._touched: list[str] = []
         self.on_before_write = None
+        self.on_run_output = None
 
     def set_root(self, root: Path | None) -> None:
         self.root = root
+
+    def _emit_run(self, event: str, **payload) -> None:
+        hook = self.on_run_output
+        if hook is None:
+            return
+        try:
+            hook(event, **payload)
+        except Exception:
+            pass
 
     def begin_turn(self) -> None:
         self._test_runs = 0
@@ -782,11 +794,26 @@ class Toolbox:
             )
         if self._stopped():
             return ToolOutcome("Остановлено.", "run_tests: остановлено")
+        title = f"run_tests · {label}"
         try:
-            result = run_preset(root, preset, timeout, self.stop, self._test_holder)
+            command = preset_command(preset)
         except ValueError as exc:
             return ToolOutcome(str(exc), "run_tests: ошибка")
+        self._emit_run("start", title=title, command=format_command(command))
+        try:
+            result = run_preset(
+                root,
+                preset,
+                timeout,
+                self.stop,
+                self._test_holder,
+                on_output=lambda chunk: self._emit_run("chunk", text=chunk),
+            )
+        except ValueError as exc:
+            self._emit_run("end", title=title, status="ошибка")
+            return ToolOutcome(str(exc), "run_tests: ошибка")
         if result.stopped or self._stopped():
+            self._emit_run("end", title=title, status="остановлено")
             return ToolOutcome("Запуск тестов остановлен.", "run_tests: остановлено")
         self._test_runs += 1
         if result.timed_out:
@@ -794,6 +821,7 @@ class Toolbox:
                 f"Таймаут {timeout} с. Запуск {self._test_runs}/{rounds}.\n"
                 f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
+            self._emit_run("end", title=title, status=f"таймаут {self._test_runs}/{rounds}")
             return ToolOutcome(body + self._touched_suffix(), f"run_tests {label}: таймаут {self._test_runs}/{rounds}")
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
@@ -807,6 +835,7 @@ class Toolbox:
                     f"опиши проблему человеку и перечисли тронутые файлы.\n"
                     f"Команда: {format_command(result.command)}\n\n{result.output}"
                 ).strip()
+                self._emit_run("end", title=title, status=f"повтор {status} {self._test_runs}/{rounds}")
                 return ToolOutcome(
                     body + self._touched_suffix(),
                     f"run_tests {label}: повтор {self._test_runs}/{rounds}",
@@ -818,6 +847,7 @@ class Toolbox:
             f"{status}. Запуск {self._test_runs}/{rounds}.\n"
             f"Команда: {format_command(result.command)}\n\n{result.output}"
         ).strip()
+        self._emit_run("end", title=title, status=f"{status} {self._test_runs}/{rounds}")
         return ToolOutcome(
             body + self._touched_suffix(),
             f"run_tests {label}: {status} {self._test_runs}/{rounds}",
@@ -850,24 +880,38 @@ class Toolbox:
             )
         if self._stopped():
             return ToolOutcome("Остановлено.", f"run_allowed {resolved_id}: остановлено")
+        title = f"run_allowed · {resolved_id}"
+        self._emit_run("start", title=title, command=format_command(command))
         try:
-            result = run_argv(root, command, timeout, self.stop, self._test_holder)
+            result = run_argv(
+                root,
+                command,
+                timeout,
+                self.stop,
+                self._test_holder,
+                on_output=lambda chunk: self._emit_run("chunk", text=chunk),
+            )
         except ValueError as exc:
+            self._emit_run("end", title=title, status="ошибка")
             return ToolOutcome(str(exc), f"run_allowed {resolved_id}: ошибка")
         except OSError as exc:
+            self._emit_run("end", title=title, status="ошибка")
             return ToolOutcome(f"Не удалось запустить: {exc}", f"run_allowed {resolved_id}: ошибка")
         if result.stopped or self._stopped():
+            self._emit_run("end", title=title, status="остановлено")
             return ToolOutcome("Запуск остановлен.", f"run_allowed {resolved_id}: остановлено")
         if result.timed_out:
             body = (
                 f"Таймаут {timeout} с.\nКоманда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
+            self._emit_run("end", title=title, status="таймаут")
             return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: таймаут")
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
         body = (
             f"{status}.\nКоманда: {format_command(result.command)}\n\n{result.output}"
         ).strip()
+        self._emit_run("end", title=title, status=status)
         return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: {status}")
 
     def _tool_git(self, args: dict) -> ToolOutcome:
@@ -920,8 +964,8 @@ class Toolbox:
                 )
             try:
                 status = git_status(root)
-                preview = git_diff(root, staged=False)
-            except GitError as exc:
+                preview = preview_commit_diff(root, paths, add_all)
+            except (GitError, PathError) as exc:
                 return ToolOutcome(str(exc), "git commit: ошибка")
             summary = self._summary(args.get("summary"), f"git commit: {message[:80]}", 0)
             detail_parts = [
@@ -929,8 +973,8 @@ class Toolbox:
                 f"stage: {'add -A' if add_all else ', '.join(paths)}",
                 "status:\n" + (status.output or "(чисто)"),
             ]
-            if preview.output:
-                detail_parts.append("diff (unstaged, обрезка):\n" + "\n".join(preview.output.splitlines()[:60]))
+            if preview:
+                detail_parts.append("diff (будет в commit):\n" + preview)
             detail = self._scrub("\n\n".join(detail_parts))
             if self._stopped() or not self._confirm("git commit", summary, detail):
                 return ToolOutcome(

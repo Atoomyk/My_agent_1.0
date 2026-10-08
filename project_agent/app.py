@@ -49,7 +49,7 @@ from project_agent.mcp_client import McpHub
 from project_agent.paths import PathError, list_entries, read_text_file, relative_posix, resolve_inside
 from project_agent.secrets import Scrubber, SecretVault, literals_from_settings, scrub_outbound
 from project_agent.index_store import build_index, index_summary
-from project_agent.rules import rules_summary
+from project_agent.rules import rule_chip_text, rules_summary
 from project_agent.testing import (
     LABEL_BY_PRESET,
     PRESET_LABELS,
@@ -1023,6 +1023,7 @@ class App(ctk.CTk):
         self._stream_origin = "1.0"
         self._stream_body_at = "1.0"
         self._user_spans: list[tuple[str, str, str]] = []
+        self._user_bubbles: list[dict] = []
         self._retry_payload: dict | None = None
         self._can_retry = False
         self._retry_buttons: list[tk.Button] = []
@@ -1042,6 +1043,12 @@ class App(ctk.CTk):
         self.vault = SecretVault()
         self.mcp = McpHub()
         self.toolbox = Toolbox(self.vault, self.confirm, self.mcp, self.collect_settings)
+        self.toolbox.on_run_output = self._on_run_output
+        self._output_open = False
+        self._output_slots: list[dict] = []
+        self._output_view = 0
+        self._output_pending = ""
+        self._output_flush_job = None
         self.agent = Agent(
             self.vault,
             self.toolbox,
@@ -1213,17 +1220,42 @@ class App(ctk.CTk):
         self.center.grid_columnconfigure(0, weight=1)
         self.center.grid_rowconfigure(1, weight=1)
         self.work.add(self.center, stretch="always", minsize=360, sticky="nsew")
+        head_bar = ctk.CTkFrame(self.center, fg_color="transparent")
+        self.head_bar = head_bar
+        head_bar.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 6))
+        head_bar.grid_columnconfigure(0, weight=1)
         self.chat_head = ctk.CTkLabel(
-            self.center, text="Новый чат", anchor="w", text_color=TEXT, font=self._font(13, weight="bold")
+            head_bar, text="Новый чат", anchor="w", text_color=TEXT, font=self._font(13, weight="bold")
         )
-        self.chat_head.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 6))
+        self.chat_head.grid(row=0, column=0, sticky="ew")
         self.chat_head.bind("<Configure>", lambda _event: self._fit_labels())
+        self.git_label = ctk.CTkLabel(
+            head_bar, text="", anchor="e", text_color=MUTED, font=self._font(11), cursor="hand2"
+        )
+        self.git_label.grid(row=0, column=1, padx=(8, 6), sticky="e")
+        self.git_label.bind("<Button-1>", lambda _event: self._on_git_badge_click())
+        self.run_indicator = ctk.CTkLabel(
+            head_bar, text="", anchor="e", text_color=MUTED, font=self._font(11), width=1
+        )
+        self.run_indicator.grid(row=0, column=2, padx=(4, 6), sticky="e")
+        self.output_toggle = quiet_button(head_bar, "Вывод", self.toggle_output_panel, width=72)
+        self.output_toggle.grid(row=0, column=3, sticky="e")
         self.center.grid_rowconfigure(2, weight=0)
-        chat_holder = ctk.CTkFrame(self.center, fg_color=INK, corner_radius=0)
+        self.mid_split = tk.PanedWindow(
+            self.center,
+            orient="vertical",
+            sashwidth=6,
+            sashrelief="flat",
+            bd=0,
+            bg=_tone(INK),
+            sashcursor="sb_v_double_arrow",
+        )
+        self.mid_split.grid(row=1, column=0, sticky="nsew")
+        chat_holder = ctk.CTkFrame(self.mid_split, fg_color=INK, corner_radius=0)
         self.chat_holder = chat_holder
-        chat_holder.grid(row=1, column=0, sticky="nsew")
         chat_holder.grid_columnconfigure(0, weight=1)
         chat_holder.grid_rowconfigure(1, weight=1)
+        self.mid_split.add(chat_holder, stretch="always", minsize=120)
         self.search_bar = ctk.CTkFrame(
             chat_holder, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER, height=36
         )
@@ -1293,6 +1325,58 @@ class App(ctk.CTk):
         self.jump_down.place_forget()
         self.bind_all("<Control-KeyPress>", self._on_find_key, add="+")
         _READONLY_TEXT.add(str(self.chat._textbox))
+
+        self.output_frame = ctk.CTkFrame(
+            self.mid_split, fg_color=PANEL, corner_radius=0, border_width=0
+        )
+        self.output_frame.grid_columnconfigure(0, weight=1)
+        self.output_frame.grid_rowconfigure(1, weight=1)
+        out_head = ctk.CTkFrame(self.output_frame, fg_color="transparent")
+        out_head.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 2))
+        out_head.grid_columnconfigure(0, weight=1)
+        self.output_title = ctk.CTkLabel(
+            out_head, text="Пока нет прогонов", anchor="w", text_color=MUTED, font=self._font(12)
+        )
+        self.output_title.grid(row=0, column=0, sticky="ew")
+        self.output_slot_var = ctk.StringVar(value="Текущий")
+        self.output_slot_menu = ctk.CTkOptionMenu(
+            out_head,
+            variable=self.output_slot_var,
+            values=["Текущий"],
+            command=self._on_output_slot_pick,
+            height=24,
+            width=110,
+            corner_radius=8,
+            fg_color=FIELD,
+            button_color=FIELD,
+            button_hover_color=BUTTON_HOVER,
+            text_color=MUTED,
+            font=self._font(11),
+            dropdown_fg_color=PANEL,
+            dropdown_text_color=TEXT,
+            dropdown_hover_color=SELECT,
+            dropdown_font=self._font(11),
+        )
+        self.output_slot_menu.grid(row=0, column=1, padx=(6, 4))
+        quiet_button(out_head, "Очистить", self.clear_output_panel, width=84).grid(
+            row=0, column=2, padx=(0, 4)
+        )
+        icon_button(out_head, "close", self.close_output_panel, size=26).grid(row=0, column=3)
+        self.output_box = ctk.CTkTextbox(
+            self.output_frame,
+            wrap="none",
+            fg_color=FIELD,
+            text_color=TEXT,
+            border_width=0,
+            corner_radius=8,
+            font=("Consolas", 12),
+            scrollbar_button_color=BUTTON,
+            scrollbar_button_hover_color=BUTTON_HOVER,
+        )
+        self.output_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        self.output_box.configure(state="disabled")
+        self.output_box._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
+        _READONLY_TEXT.add(str(self.output_box._textbox))
 
         self.editor_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         self.editor_frame.grid_columnconfigure(0, weight=1)
@@ -1513,6 +1597,42 @@ class App(ctk.CTk):
         self._refresh_chat_list()
         self._refresh_index_label()
         self._refresh_rules_label()
+        self._refresh_attach()
+        self._refresh_git_badge()
+
+    def _refresh_git_badge(self) -> None:
+        label = getattr(self, "git_label", None)
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.project is None:
+            label.configure(text="")
+            return
+        try:
+            from project_agent.gitops import git_badge
+
+            label.configure(text=git_badge(self.project))
+        except Exception:
+            label.configure(text="")
+
+    def _on_git_badge_click(self) -> None:
+        if self.project is None or self.running:
+            return
+        try:
+            from project_agent.gitops import GitError, git_status
+
+            result = git_status(self.project)
+            body = result.output or "(чисто)"
+            self.write_chat(f"git status:\n{body}")
+            self._refresh_git_badge()
+        except GitError as exc:
+            self.write_chat(f"git: {exc}")
+        except Exception as exc:
+            self.write_chat(f"git: {exc}")
 
     def _refresh_rules_label(self) -> None:
         label = self.rules_label
@@ -1578,10 +1698,13 @@ class App(ctk.CTk):
     def _center_chat(self, event=None) -> None:
         width = event.width if event is not None else self.chat._textbox.winfo_width()
         pad = self._column_pad(width, 16)
-        if pad == self._chat_pad:
-            return
-        self._chat_pad = pad
-        self.chat._textbox.configure(padx=pad)
+        if pad != self._chat_pad:
+            self._chat_pad = pad
+            self.chat._textbox.configure(padx=pad)
+        bubble_w = self._user_bubble_width()
+        if getattr(self, "_bubble_width", None) != bubble_w:
+            self._bubble_width = bubble_w
+            self._restyle_user_bubbles()
 
     def _center_composer(self, event=None) -> None:
         scale = ctk.ScalingTracker.get_widget_scaling(self)
@@ -2154,32 +2277,44 @@ class App(ctk.CTk):
         self._focus_search_hit()
         return "break"
 
+    def _chat_at_bottom(self, first=None, last=None) -> bool:
+        try:
+            inner = self.chat._textbox
+            if int(inner.winfo_height()) < 80:
+                return True
+            if not inner.get("1.0", "end-1c").strip():
+                return True
+            if first is None or last is None:
+                first, last = inner.yview()
+            first_f = float(first)
+            last_f = float(last)
+        except (tk.TclError, TypeError, ValueError, AttributeError):
+            return True
+        visible = last_f - first_f
+        # Нет прокрутки (всё видно) или низ в кадре.
+        if visible <= 0.0 or visible >= 0.99:
+            return True
+        return last_f >= 0.985
+
     def _chat_scroll_set(self, first, last) -> None:
         try:
             self.chat._y_scrollbar.set(first, last)
         except (tk.TclError, AttributeError):
             pass
-        try:
-            self._chat_stick = float(last) >= 0.985
-        except (TypeError, ValueError):
-            self._chat_stick = True
+        self._chat_stick = self._chat_at_bottom(first, last)
         self._update_jump_down(last)
 
     def _chat_yview(self, *args) -> None:
         self.chat._textbox.yview(*args)
         try:
-            _first, last = self.chat._textbox.yview()
-            self._chat_stick = float(last) >= 0.985
+            first, last = self.chat._textbox.yview()
+            self._chat_stick = self._chat_at_bottom(first, last)
             self._update_jump_down(last)
         except (tk.TclError, ValueError, TypeError):
             return
 
     def _chat_near_bottom(self) -> bool:
-        try:
-            _first, last = self.chat._textbox.yview()
-            return float(last) >= 0.985
-        except (tk.TclError, ValueError, TypeError):
-            return True
+        return self._chat_at_bottom()
 
     def _chat_see_end(self, force: bool = False) -> None:
         box = getattr(self, "chat", None)
@@ -2199,16 +2334,24 @@ class App(ctk.CTk):
         box = getattr(self, "chat", None)
         if button is None or box is None or not box.winfo_exists():
             return
-        if last is None:
-            try:
-                _first, last = box._textbox.yview()
-            except tk.TclError:
+        try:
+            inner = box._textbox
+            # Пока paned/layout даёт высоту 1px, yview врёт (например 0..0.06) — стрелку не рисуем.
+            if int(inner.winfo_height()) < 80:
                 button.place_forget()
                 return
-        try:
-            show = float(last) < 0.985
-        except (TypeError, ValueError):
-            show = False
+            if not inner.get("1.0", "end-1c").strip():
+                button.place_forget()
+                return
+            first, bottom = inner.yview()
+            first_f = float(first)
+            last_f = float(bottom if last is None else last)
+        except (tk.TclError, TypeError, ValueError):
+            button.place_forget()
+            return
+        visible = last_f - first_f
+        can_scroll = visible > 0.0 and visible < 0.99
+        show = can_scroll and last_f < 0.985
         if show:
             button.place(relx=1.0, rely=1.0, x=-18, y=-18, anchor="se")
             button.lift()
@@ -2399,6 +2542,8 @@ class App(ctk.CTk):
         self.after(60, self._restore_theme_windows)
         if hasattr(self, "work"):
             self.work.configure(bg=_tone(INK))
+        if hasattr(self, "mid_split"):
+            self.mid_split.configure(bg=_tone(INK))
         if hasattr(self, "tree"):
             self._style_tree()
         if hasattr(self, "chat"):
@@ -2406,6 +2551,22 @@ class App(ctk.CTk):
             self._copy_photo_cache = None
         if hasattr(self, "placeholder"):
             self.placeholder.configure(fg=_tone(HINT), bg=_tone(FIELD), font=self._font(11))
+        if hasattr(self, "git_label"):
+            self.git_label.configure(text_color=MUTED)
+        if hasattr(self, "output_frame"):
+            self.output_frame.configure(fg_color=PANEL)
+            self.output_title.configure(text_color=MUTED)
+            self.run_indicator.configure(text_color=MUTED)
+            self.output_box.configure(fg_color=FIELD, text_color=TEXT)
+            self.output_slot_menu.configure(
+                fg_color=FIELD,
+                button_color=FIELD,
+                button_hover_color=BUTTON_HOVER,
+                text_color=MUTED,
+                dropdown_fg_color=PANEL,
+                dropdown_text_color=TEXT,
+                dropdown_hover_color=SELECT,
+            )
 
     def _on_theme_pick(self, label: str) -> None:
         theme = THEME_LABELS.get(label, "dark")
@@ -2848,7 +3009,21 @@ class App(ctk.CTk):
         specs += [{"kind": "image", "path": path, "text": Path(path).name} for path in self.attached]
         return specs
 
+    def _rule_specs(self) -> list[dict]:
+        try:
+            text = rule_chip_text(self.project)
+        except Exception:
+            return []
+        if not text:
+            return []
+        return [{"kind": "rule", "path": "", "text": text}]
+
+    def _strip_specs(self) -> list[dict]:
+        return self._rule_specs() + self._attach_specs()
+
     def _drop_attachment(self, kind: str, path: str) -> None:
+        if kind == "rule":
+            return
         bucket = {"dir": self.context_dirs, "file": self.context_files, "image": self.attached}.get(kind)
         if bucket is not None and path in bucket:
             bucket.remove(path)
@@ -2863,11 +3038,13 @@ class App(ctk.CTk):
         if width == getattr(self, "_chip_width", 0):
             return
         self._chip_width = width
-        if self._attach_specs():
+        if self._strip_specs():
             self._fill_chips()
 
     def _refresh_attach(self) -> None:
-        if not self._attach_specs():
+        if not hasattr(self, "attach_row"):
+            return
+        if not self._strip_specs():
             self._clear_chips()
             self.attach_row.grid_remove()
         else:
@@ -2879,17 +3056,18 @@ class App(ctk.CTk):
 
     def _fill_chips(self) -> None:
         self._clear_chips()
-        specs = self._attach_specs()
+        specs = self._strip_specs()
+        removable = self._attach_specs()
         measure = self._measure(11)
         room = max(self.attach_row.winfo_width(), self.card.winfo_width() - 24, 240)
-        if len(specs) > 1:
+        if removable:
             # место под «очистить» в конце последнего ряда
             room = max(room - 74, 200)
         lines: list[list[dict]] = [[]]
         used = 0
         for spec in specs:
-            # ширина текста плюс поля чипа и крестик
-            span = measure(spec["text"]) + 46
+            # ширина текста плюс поля чипа и крестик (у правил без крестика — чуть уже)
+            span = measure(spec["text"]) + (28 if spec.get("kind") == "rule" else 46)
             if lines[-1] and used + span > room:
                 if len(lines) >= _CHIP_ROWS:
                     break
@@ -2914,7 +3092,7 @@ class App(ctk.CTk):
                         text_color=MUTED,
                         font=self._font(11),
                     ).pack(side="left", padx=(2, 6))
-                if len(specs) > 1:
+                if removable:
                     clear = ctk.CTkButton(
                         strip,
                         text="очистить",
@@ -2930,9 +3108,18 @@ class App(ctk.CTk):
                     clear.pack(side="left", padx=(2, 0))
 
     def _make_chip(self, parent, spec: dict) -> ctk.CTkFrame:
-        chip = ctk.CTkFrame(parent, fg_color=BUTTON, corner_radius=8, border_width=1, border_color=BORDER)
+        is_rule = spec.get("kind") == "rule"
+        chip = ctk.CTkFrame(
+            parent,
+            fg_color="transparent" if is_rule else BUTTON,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+        )
         label = ctk.CTkLabel(chip, text=spec["text"], text_color=MUTED, font=self._font(11), height=18)
-        label.grid(row=0, column=0, padx=(8, 2), pady=1)
+        label.grid(row=0, column=0, padx=(8, 8 if is_rule else 2), pady=1)
+        if is_rule:
+            return chip
         close = ctk.CTkButton(
             chip,
             text="×",
@@ -3329,6 +3516,7 @@ class App(ctk.CTk):
         self._refresh_tree()
         self._reload_clean_editor()
         self._refresh_chat_list()
+        self._refresh_git_badge()
 
     def confirm(self, path: str, summary: str, detail: str = "") -> bool:
         if self.stop_event.is_set():
@@ -3700,6 +3888,195 @@ class App(ctk.CTk):
         self._fit_labels()
         self.set_status("Чат удалён")
 
+    def toggle_output_panel(self) -> None:
+        if self._output_open:
+            self.close_output_panel()
+        else:
+            self.open_output_panel()
+
+    def open_output_panel(self) -> None:
+        if self._output_open or not hasattr(self, "mid_split"):
+            return
+        try:
+            self.mid_split.add(self.output_frame, stretch="never", minsize=80)
+        except tk.TclError:
+            # Уже в пане: путь CTkFrame ≠ panes(), add может ругнуться — ок.
+            pass
+        self.after(20, self._place_output_sash)
+        self._output_open = True
+        self._show_output_slot(self._output_view)
+
+    def close_output_panel(self) -> None:
+        if not hasattr(self, "mid_split"):
+            return
+        try:
+            self.mid_split.forget(self.output_frame)
+        except tk.TclError:
+            pass
+        self._output_open = False
+
+    def _place_output_sash(self) -> None:
+        if not self._output_open:
+            return
+        try:
+            height = max(self.mid_split.winfo_height(), 200)
+            sash = max(100, height - 180)
+            self.mid_split.sash_place(0, 0, sash)
+        except tk.TclError:
+            return
+
+    def clear_output_panel(self) -> None:
+        self._output_slots.clear()
+        self._output_view = 0
+        self._output_pending = ""
+        if self._output_flush_job is not None:
+            try:
+                self.after_cancel(self._output_flush_job)
+            except Exception:
+                pass
+            self._output_flush_job = None
+        self._set_output_text("")
+        self.output_title.configure(text="Пока нет прогонов")
+        self.run_indicator.configure(text="")
+        self.output_slot_var.set("Текущий")
+        self.output_slot_menu.configure(values=["Текущий"])
+
+    def _on_output_slot_pick(self, label: str) -> None:
+        if label == "Предыдущий" and len(self._output_slots) > 1:
+            self._output_view = 1
+        else:
+            self._output_view = 0
+        self._show_output_slot(self._output_view)
+
+    def _show_output_slot(self, index: int) -> None:
+        if not self._output_slots:
+            self._set_output_text("")
+            self.output_title.configure(text="Пока нет прогонов")
+            return
+        index = max(0, min(index, len(self._output_slots) - 1))
+        self._output_view = index
+        slot = self._output_slots[index]
+        title = slot.get("title") or "Прогон"
+        status = slot.get("status") or ""
+        head = f"{title} · {status}".strip(" ·") if status else title
+        self.output_title.configure(text=head)
+        self._set_output_text(slot.get("text") or "")
+        labels = ["Текущий"]
+        if len(self._output_slots) > 1:
+            labels.append("Предыдущий")
+        self.output_slot_menu.configure(values=labels)
+        self.output_slot_var.set("Предыдущий" if index == 1 else "Текущий")
+
+    def _set_output_text(self, text: str) -> None:
+        box = getattr(self, "output_box", None)
+        if box is None:
+            return
+        try:
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            if text:
+                box.insert("1.0", text)
+                box.see("end")
+            box.configure(state="disabled")
+        except tk.TclError:
+            return
+
+    def _append_output_text(self, text: str) -> None:
+        if not text:
+            return
+        box = getattr(self, "output_box", None)
+        if box is None:
+            return
+        try:
+            box.configure(state="normal")
+            box.insert("end", text)
+            box.see("end")
+            box.configure(state="disabled")
+        except tk.TclError:
+            return
+
+    def _on_run_output(self, event: str, **payload) -> None:
+        def apply() -> None:
+            if self._closing:
+                return
+            try:
+                if not self.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            if event == "start":
+                self._begin_output_run(str(payload.get("title") or "Прогон"), str(payload.get("command") or ""))
+            elif event == "chunk":
+                self._chunk_output_run(str(payload.get("text") or ""))
+            elif event == "end":
+                self._end_output_run(
+                    str(payload.get("title") or ""),
+                    str(payload.get("status") or ""),
+                )
+
+        try:
+            self.after(0, apply)
+        except tk.TclError:
+            return
+
+    def _begin_output_run(self, title: str, command: str) -> None:
+        previous = self._output_slots[0] if self._output_slots else None
+        slot = {
+            "title": title,
+            "command": command,
+            "status": "идёт…",
+            "text": (f"$ {command}\n\n" if command else ""),
+        }
+        self._output_slots = [slot] + ([previous] if previous else [])
+        self._output_slots = self._output_slots[:2]
+        self._output_view = 0
+        self._output_pending = ""
+        self.open_output_panel()
+        self._show_output_slot(0)
+        mark = title.replace("run_tests · ", "").replace("run_allowed · ", "")
+        self.run_indicator.configure(text=f"▶ {mark}")
+
+    def _chunk_output_run(self, text: str) -> None:
+        if not self._output_slots:
+            return
+        self._output_slots[0]["text"] = (self._output_slots[0].get("text") or "") + text
+        if self._output_view != 0:
+            return
+        self._output_pending += text
+        if self._output_flush_job is not None:
+            return
+        self._output_flush_job = self.after(50, self._flush_output_pending)
+
+    def _flush_output_pending(self) -> None:
+        self._output_flush_job = None
+        chunk = self._output_pending
+        self._output_pending = ""
+        if chunk and self._output_view == 0:
+            self._append_output_text(chunk)
+
+    def _end_output_run(self, title: str, status: str) -> None:
+        if self._output_flush_job is not None:
+            try:
+                self.after_cancel(self._output_flush_job)
+            except Exception:
+                pass
+            self._output_flush_job = None
+        if self._output_pending:
+            pending = self._output_pending
+            self._output_pending = ""
+            if self._output_view == 0:
+                self._append_output_text(pending)
+        if self._output_slots:
+            if title:
+                self._output_slots[0]["title"] = title
+            self._output_slots[0]["status"] = status or "готово"
+            if self._output_view == 0:
+                self._show_output_slot(0)
+        mark = (title or self.run_indicator.cget("text")).replace("run_tests · ", "").replace(
+            "run_allowed · ", ""
+        ).replace("▶ ", "")
+        self.run_indicator.configure(text=f"{mark}: {status}" if status else mark)
+
     def set_status(self, text: str) -> None:
         shown = text
 
@@ -3725,11 +4102,9 @@ class App(ctk.CTk):
         inner = self.chat._textbox
         inner.tag_configure(
             "user",
-            lmargin1=56,
-            lmargin2=56,
+            lmargin1=12,
+            lmargin2=12,
             rmargin=12,
-            foreground=_tone(USER_TEXT),
-            background=_tone(USER_BG),
             spacing1=4,
             spacing3=4,
         )
@@ -3808,15 +4183,14 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "usercopy",
-            lmargin1=56,
-            lmargin2=56,
+            lmargin1=12,
+            lmargin2=12,
             rmargin=12,
             spacing1=0,
             spacing3=2,
         )
         inner.tag_configure("search", background=_tone(SEARCH_BG))
         inner.tag_configure("searchcur", background=_tone(SEARCH_CUR))
-        # Фон реплики «Вы» иначе перекрывает подсветку выделения.
         inner.tag_raise("sel")
         inner.tag_raise("search")
         inner.tag_raise("searchcur")
@@ -3824,6 +4198,7 @@ class App(ctk.CTk):
         if self._chat_pad:
             inner.configure(padx=self._chat_pad)
         self._restyle_tool_heads()
+        self._restyle_user_bubbles()
         if hasattr(self, "jump_down"):
             self.jump_down.configure(
                 fg_color=BUTTON, hover_color=BUTTON_HOVER, text_color=TEXT, border_color=BORDER
@@ -3844,11 +4219,11 @@ class App(ctk.CTk):
         self._copy_photo_cache = photo
         return photo
 
-    def _make_copy_chip(self, body: str, bg: tuple[str, str] | None = None) -> tk.Label:
+    def _make_copy_chip(self, body: str, bg: tuple[str, str] | None = None, parent=None) -> tk.Label:
         fill = _tone(bg or INK)
         photo = self._copy_photo()
         chip = tk.Label(
-            self.chat._textbox,
+            parent or self.chat._textbox,
             image=photo,
             bd=0,
             padx=2,
@@ -3862,6 +4237,62 @@ class App(ctk.CTk):
         chip.bind("<Enter>", lambda _event: chip.configure(bg=_tone(PANEL)))
         chip.bind("<Leave>", lambda _event, color=fill: chip.configure(bg=color))
         return chip
+
+    def _user_bubble_width(self) -> int:
+        """Ширина пузыря по активной колонке чата (равные поля), не по длине текста."""
+        try:
+            inner = self.chat._textbox
+            width = int(inner.winfo_width()) - 2 * int(inner.cget("padx") or 0) - 24
+        except (tk.TclError, AttributeError, TypeError, ValueError):
+            width = 0
+        if width < 160:
+            width = max(160, CHAT_COLUMN - 48)
+        return width
+
+    def _make_user_bubble(self, body: str, copy_text: str) -> dict:
+        bubble_w = self._user_bubble_width()
+        inner_w = max(120, bubble_w - 24)
+        wrap = max(100, inner_w - 4)
+        frame = ctk.CTkFrame(
+            self.chat._textbox,
+            fg_color=INK,
+            corner_radius=14,
+            border_width=1,
+            border_color=BORDER,
+        )
+        message = ctk.CTkLabel(
+            frame,
+            text=body,
+            text_color=USER_TEXT,
+            font=self._font(13),
+            width=inner_w,
+            wraplength=wrap,
+            justify="left",
+            anchor="w",
+        )
+        message.pack(fill="x", padx=12, pady=(10, 4 if copy_text else 10))
+        chip = None
+        if copy_text:
+            chip = self._make_copy_chip(copy_text, INK, parent=frame)
+            chip.pack(anchor="w", padx=10, pady=(0, 8))
+        return {"frame": frame, "message": message, "chip": chip, "body": body}
+
+    def _restyle_user_bubbles(self) -> None:
+        bubble_w = self._user_bubble_width()
+        inner_w = max(120, bubble_w - 24)
+        wrap = max(100, inner_w - 4)
+        for item in list(getattr(self, "_user_bubbles", [])):
+            frame = item.get("frame")
+            try:
+                if frame is None or not frame.winfo_exists():
+                    continue
+                frame.configure(fg_color=INK, border_color=BORDER)
+                item["message"].configure(text_color=USER_TEXT, width=inner_w, wraplength=wrap)
+                chip = item.get("chip")
+                if chip is not None and chip.winfo_exists():
+                    chip.configure(bg=_tone(INK))
+            except tk.TclError:
+                continue
 
     def _copy_agent_message(self, text: str) -> None:
         body = (text or "").rstrip()
@@ -4050,15 +4481,11 @@ class App(ctk.CTk):
             inner.tag_add("checkpoint", start, inner.index("end-1c"))
             return
         if role == "user":
-            inner.insert("end", "Вы\n", ("label",))
             copy_text = user_copy_text(body)
-            inner.insert("end", body + "\n")
-            if copy_text:
-                mark = inner.index("end-1c")
-                chip = self._make_copy_chip(copy_text, USER_BG)
-                inner.window_create("end", window=chip, padx=0, pady=2)
-                inner.insert("end", "\n")
-                inner.tag_add("usercopy", mark, inner.index("end-1c"))
+            bubble = self._make_user_bubble(body, copy_text)
+            self._user_bubbles.append(bubble)
+            inner.window_create("end", window=bubble["frame"], padx=0, pady=4)
+            inner.insert("end", "\n")
             self._insert_time(inner, stamp)
         elif role == "agent":
             inner.insert("end", "Ассистент\n", ("label",))
@@ -4088,6 +4515,7 @@ class App(ctk.CTk):
             return
         self._stream_open = False
         self._user_spans = []
+        self._user_bubbles = []
         self._retry_buttons = []
         self._checkpoint_buttons = []
         self._reset_tool_groups()
@@ -4178,6 +4606,7 @@ class App(ctk.CTk):
         if box is getattr(self, "chat", None):
             self._stream_open = False
             self._user_spans = []
+            self._user_bubbles = []
             self._retry_buttons = []
             self._checkpoint_buttons = []
             self._reset_tool_groups()

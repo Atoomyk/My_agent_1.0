@@ -79,6 +79,50 @@ def git_status(root: Path) -> GitResult:
     return run_git(root, ["status", "--short", "--branch"])
 
 
+def parse_status_head(output: str) -> tuple[str, int, int]:
+    """Ветка, число изменённых tracked, число untracked из `git status --short --branch`."""
+    branch = "—"
+    modified = 0
+    untracked = 0
+    for raw in (output or "").splitlines():
+        line = raw.rstrip()
+        if line.startswith("##"):
+            part = line[2:].strip().split("...")[0].strip()
+            branch = part.split()[0] if part else "—"
+            continue
+        if len(line) < 2:
+            continue
+        if line.startswith("??"):
+            untracked += 1
+        else:
+            modified += 1
+    return branch, modified, untracked
+
+
+def format_git_badge(branch: str, modified: int, untracked: int) -> str:
+    if modified <= 0 and untracked <= 0:
+        dirty = "clean"
+    else:
+        parts: list[str] = []
+        if modified > 0:
+            parts.append(f"M{modified}")
+        if untracked > 0:
+            parts.append(f"U{untracked}")
+        dirty = " ".join(parts)
+    name = (branch or "—").strip() or "—"
+    return f"{name} · {dirty}"
+
+
+def git_badge(root: Path) -> str:
+    """Короткая строка для шапки: `main · M2 U1` или пусто, если не репозиторий."""
+    try:
+        result = git_status(root)
+    except GitError:
+        return ""
+    branch, modified, untracked = parse_status_head(result.output)
+    return format_git_badge(branch, modified, untracked)
+
+
 def git_diff(root: Path, path: str | None = None, staged: bool = False) -> GitResult:
     args = ["diff", "--no-color"]
     if staged:
@@ -88,6 +132,43 @@ def git_diff(root: Path, path: str | None = None, staged: bool = False) -> GitRe
         rel = relative_posix(root, full)
         args.extend(["--", rel])
     return run_git(root, args)
+
+
+def preview_commit_diff(root: Path, paths: list[str] | None, add_all: bool) -> str:
+    """Diff того, что уйдёт в commit после add (без изменения индекса)."""
+    root = ensure_repo(root)
+    if add_all:
+        result = run_git(root, ["diff", "HEAD", "--no-color"])
+        body = (result.output or "").strip()
+        return body or "(нет текстового diff по tracked; смотри status — untracked/бинарные)"
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in list(paths or []):
+        text = str(raw or "").strip().replace("\\", "/")
+        if not text or text in seen:
+            continue
+        full = resolve_inside(root, text)
+        rel = relative_posix(root, full)
+        seen.add(rel)
+        cleaned.append(rel)
+    if not cleaned:
+        return "(нет путей для diff)"
+    result = run_git(root, ["diff", "HEAD", "--no-color", "--", *cleaned])
+    body = (result.output or "").strip()
+    # Untracked: diff HEAD пуст — пометим.
+    notes: list[str] = []
+    for rel in cleaned:
+        path = root / rel
+        if path.is_file():
+            tracked = run_git(root, ["ls-files", "--", rel])
+            if tracked.code == 0 and not (tracked.output or "").strip():
+                notes.append(f"new file: {rel}")
+    parts: list[str] = []
+    if body:
+        parts.append(body)
+    if notes:
+        parts.append("\n".join(notes))
+    return "\n\n".join(parts).strip() or "(нет текстового diff)"
 
 
 def git_log(root: Path, limit: int = 8) -> GitResult:

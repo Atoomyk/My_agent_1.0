@@ -89,3 +89,14 @@ def rules_summary(root: Path | None) -> str:
     if not sources:
         return "Правила не найдены (AGENTS.md или .projectagent/rules)."
     return "Правила: " + ", ".join(sources)
+
+
+def rule_chip_text(root: Path | None) -> str:
+    """Короткая подпись чипа над композером; пусто, если правил нет."""
+    files = list_rule_files(root)
+    if not files:
+        return ""
+    names = [path.name for path in files]
+    if len(names) == 1:
+        return f"правила: {names[0]}"
+    return f"правила: {names[0]} +{len(names) - 1}"

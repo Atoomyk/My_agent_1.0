@@ -33,6 +33,7 @@ from project_agent.testing import (
     normalize_preset,
     normalize_timeout,
     preset_command,
+    run_argv,
 )
 from project_agent.tools import Toolbox
 from project_agent.websearch import parse_ddg
@@ -481,6 +482,48 @@ class TestRunnerTests(unittest.TestCase):
         self.assertLessEqual(len(clipped), 110)
         self.assertIn("…", clipped)
 
+    def test_run_argv_streams_output(self):
+        chunks: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_argv(
+                root,
+                [sys.executable, "-c", "print('line-one'); print('line-two')"],
+                timeout=30,
+                on_output=chunks.append,
+            )
+        self.assertEqual(result.code, 0)
+        self.assertFalse(result.timed_out)
+        self.assertFalse(result.stopped)
+        self.assertIn("line-one", result.output)
+        self.assertIn("line-two", result.output)
+        joined = "".join(chunks)
+        self.assertIn("line-one", joined)
+        self.assertIn("line-two", joined)
+
+    def test_run_allowed_emits_run_output(self):
+        events: list[tuple] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {
+                "test_timeout": 60,
+                "allowed_commands": [],
+                "api_key": "",
+                "mcp_servers": [],
+            }
+            box = Toolbox(
+                SecretVault(),
+                lambda *_args, **_kwargs: True,
+                McpHub(),
+                lambda: settings,
+            )
+            box.set_root(root)
+            box.on_run_output = lambda event, **payload: events.append((event, payload))
+            outcome = box.execute("run_allowed", {"id": "unittest", "summary": "stream"})
+        self.assertTrue(any(item[0] == "start" for item in events))
+        self.assertTrue(any(item[0] == "end" for item in events))
+        self.assertIn("run_allowed", outcome.journal)
+
     def test_run_tests_tool_whitelist(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -604,7 +647,16 @@ class GitOpsTests(unittest.TestCase):
         import shutil
         import subprocess
 
-        from project_agent.gitops import git_diff, git_log, git_status, preview_unified
+        from project_agent.gitops import (
+            format_git_badge,
+            git_badge,
+            git_diff,
+            git_log,
+            git_status,
+            parse_status_head,
+            preview_commit_diff,
+            preview_unified,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -623,6 +675,14 @@ class GitOpsTests(unittest.TestCase):
             status = git_status(root)
             self.assertEqual(status.code, 0)
             self.assertIn("a.txt", status.output)
+            branch, modified, untracked = parse_status_head(status.output)
+            self.assertTrue(branch)
+            self.assertGreaterEqual(modified, 1)
+            self.assertEqual(untracked, 0)
+            self.assertIn("M", format_git_badge(branch, modified, untracked))
+            self.assertIn("·", git_badge(root))
+            commit_preview = preview_commit_diff(root, ["a.txt"], False)
+            self.assertIn("+two", commit_preview)
             diff = git_diff(root, "a.txt")
             self.assertIn("+two", diff.output)
             log = git_log(root, 5)
@@ -662,6 +722,8 @@ class GitOpsTests(unittest.TestCase):
             self.assertTrue(notes)
             self.assertIn("git commit", notes[0][0])
             self.assertIn("add two", notes[0][2])
+            self.assertIn("будет в commit", notes[0][2])
+            self.assertIn("+two", notes[0][2])
             self.assertIn("git commit: ok", ok.journal)
             clean = box.execute("git", {"action": "status"})
             self.assertNotIn("a.txt", clean.model_text)
@@ -832,17 +894,21 @@ class ContextAttachTests(unittest.TestCase):
 
 class ProjectRulesTests(unittest.TestCase):
     def test_load_agents_and_dir_rules(self):
-        from project_agent.rules import load_project_rules, rules_summary
+        from project_agent.rules import load_project_rules, rule_chip_text, rules_summary
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
             root.mkdir()
             self.assertEqual(rules_summary(root), "Правила не найдены (AGENTS.md или .projectagent/rules).")
+            self.assertEqual(rule_chip_text(root), "")
             (root / "AGENTS.md").write_text("Пиши кратко.\n", encoding="utf-8")
+            self.assertEqual(rule_chip_text(root), "правила: AGENTS.md")
             rules_dir = root / ".projectagent" / "rules"
             rules_dir.mkdir(parents=True)
             (rules_dir / "style.md").write_text("Без эмодзи.\n", encoding="utf-8")
             (rules_dir / "extra.txt").write_text("Тесты обязательны.\n", encoding="utf-8")
+            chip = rule_chip_text(root)
+            self.assertTrue(chip.startswith("правила: AGENTS.md +"))
             block, sources = load_project_rules(root)
             self.assertIn("AGENTS.md", sources)
             self.assertIn(".projectagent/rules/extra.txt", sources)
