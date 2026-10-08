@@ -41,6 +41,7 @@ def default_config() -> dict:
         "agent_mode": "agent",
         "context_limit": 256000,
         "auto_write_project": False,
+        "prefer_cheap_provider": False,
     }
 
 
@@ -170,6 +171,14 @@ def _context_limit(raw) -> int:
 
 
 def _auto_write_project(raw) -> bool:
+    return _flag(raw)
+
+
+def _prefer_cheap_provider(raw) -> bool:
+    return _flag(raw)
+
+
+def _flag(raw) -> bool:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, (int, float)):
@@ -255,6 +264,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
     merged["context_limit"] = _context_limit(data.get("context_limit"))
     merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
+    merged["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
     return merged, None
 
 
@@ -277,6 +287,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
     payload["context_limit"] = _context_limit(data.get("context_limit"))
     payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
+    payload["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
     _write_config(path, payload)
 
 

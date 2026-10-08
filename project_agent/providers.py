@@ -128,6 +128,11 @@ class _HttpProvider:
         self.settings = settings
         self._cancel.clear()
 
+    def _apply_provider_prefs(self, payload: dict) -> dict:
+        if self.settings.get("prefer_cheap_provider"):
+            return {**payload, "provider": {"sort": "price"}}
+        return payload
+
     def cancel(self) -> None:
         self._cancel.set()
         http = self._http
@@ -358,11 +363,13 @@ class OpenAIProvider(_HttpProvider):
         if self._cancel.is_set():
             raise Stopped()
         self.scrub_inplace(redact)
-        payload = {
-            "model": self.settings.get("model") or "",
-            "messages": [{"role": "system", "content": self.system}, *self.messages],
-            "tools": [openai_tool(tool) for tool in tools],
-        }
+        payload = self._apply_provider_prefs(
+            {
+                "model": self.settings.get("model") or "",
+                "messages": [{"role": "system", "content": self.system}, *self.messages],
+                "tools": [openai_tool(tool) for tool in tools],
+            }
+        )
         headers = {"Content-Type": "application/json"}
         key = (self.settings.get("api_key") or "").strip()
         if key:
@@ -390,13 +397,15 @@ class OpenAIProvider(_HttpProvider):
             raise ApiError("Слишком мало истории для сжатия")
         self.scrub_inplace(redact)
         transcript = flatten_messages_for_summary(self.messages)
-        payload = {
-            "model": self.settings.get("model") or "",
-            "messages": [
-                {"role": "system", "content": "Ты сжимаешь историю чата для продолжения работы над проектом."},
-                {"role": "user", "content": build_summary_user_text(transcript)},
-            ],
-        }
+        payload = self._apply_provider_prefs(
+            {
+                "model": self.settings.get("model") or "",
+                "messages": [
+                    {"role": "system", "content": "Ты сжимаешь историю чата для продолжения работы над проектом."},
+                    {"role": "user", "content": build_summary_user_text(transcript)},
+                ],
+            }
+        )
         headers = {"Content-Type": "application/json"}
         key = (self.settings.get("api_key") or "").strip()
         if key:
@@ -446,14 +455,16 @@ class AnthropicProvider(_HttpProvider):
         if self._cancel.is_set():
             raise Stopped()
         self.scrub_inplace(redact)
-        payload = {
-            "model": self.settings.get("model") or "",
-            "max_tokens": 4096,
-            "system": self.system,
-            "messages": self.messages,
-            "tools": [anthropic_tool(tool) for tool in tools],
-            "stream": True,
-        }
+        payload = self._apply_provider_prefs(
+            {
+                "model": self.settings.get("model") or "",
+                "max_tokens": 4096,
+                "system": self.system,
+                "messages": self.messages,
+                "tools": [anthropic_tool(tool) for tool in tools],
+                "stream": True,
+            }
+        )
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
@@ -477,12 +488,14 @@ class AnthropicProvider(_HttpProvider):
             raise ApiError("Слишком мало истории для сжатия")
         self.scrub_inplace(redact)
         transcript = flatten_messages_for_summary(self.messages)
-        payload = {
-            "model": self.settings.get("model") or "",
-            "max_tokens": 2048,
-            "system": "Ты сжимаешь историю чата для продолжения работы над проектом.",
-            "messages": [{"role": "user", "content": build_summary_user_text(transcript)}],
-        }
+        payload = self._apply_provider_prefs(
+            {
+                "model": self.settings.get("model") or "",
+                "max_tokens": 2048,
+                "system": "Ты сжимаешь историю чата для продолжения работы над проектом.",
+                "messages": [{"role": "user", "content": build_summary_user_text(transcript)}],
+            }
+        )
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",

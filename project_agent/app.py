@@ -811,6 +811,25 @@ class SettingsWindow(ctk.CTkToplevel):
         app._entry(page, "Модель", app.model_var, "имя модели", top=4, gap=2)
         app._entry(page, "Ключ", app.api_key_var, "", secret=True, top=4, gap=2)
         app._entry(page, "Лимит шагов", app.steps_var, "25", top=4, gap=2)
+        ctk.CTkSwitch(
+            page,
+            text="Выбирать самый дешёвый провайдер",
+            variable=app.prefer_cheap_var,
+            text_color=TEXT,
+            progress_color=CTX_OK,
+            button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER,
+            font=("Segoe UI", 12),
+        ).pack(fill="x", padx=8, pady=(10, 2))
+        ctk.CTkLabel(
+            page,
+            text="В запрос добавляется provider: { sort: \"price\" }. Выкл — авторежим агрегатора. "
+            "Настройка общая, не в профиле. Генерацию изображений не затрагивает.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=("Segoe UI", 11),
+        ).pack(fill="x", padx=8, pady=(0, 2))
         ctk.CTkLabel(page, text="Генерация изображений", anchor="w", text_color=TEXT, font=("Segoe UI", 13)).pack(
             fill="x", padx=8, pady=(10, 2)
         )
@@ -1101,6 +1120,8 @@ class App(ctk.CTk):
         self.allowed_box = None
         self.auto_write_project = False
         self.auto_write_var = ctk.BooleanVar(value=False)
+        self.prefer_cheap_provider = False
+        self.prefer_cheap_var = ctk.BooleanVar(value=False)
         self._build()
         self._load()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2515,6 +2536,8 @@ class App(ctk.CTk):
         self.allowed_commands = normalize_allowed_commands(data.get("allowed_commands"))
         self.auto_write_project = bool(data.get("auto_write_project"))
         self.auto_write_var.set(self.auto_write_project)
+        self.prefer_cheap_provider = bool(data.get("prefer_cheap_provider"))
+        self.prefer_cheap_var.set(self.prefer_cheap_provider)
         self._set_agent_mode(data.get("agent_mode") or "agent", persist=False)
         from project_agent.context_usage import normalize_context_limit
 
@@ -2746,6 +2769,8 @@ class App(ctk.CTk):
         settings["context_limit"] = self.context_limit
         settings["auto_write_project"] = bool(self.auto_write_var.get())
         self.auto_write_project = settings["auto_write_project"]
+        settings["prefer_cheap_provider"] = bool(self.prefer_cheap_var.get())
+        self.prefer_cheap_provider = settings["prefer_cheap_provider"]
         return settings
 
     def _read_allowed_commands(self) -> list[dict]:
