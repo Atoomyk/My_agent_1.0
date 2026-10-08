@@ -166,14 +166,13 @@ def kill_process(process: subprocess.Popen) -> None:
         return
 
 
-def run_preset(
+def run_argv(
     root: Path,
-    preset: str,
+    command: list[str] | str,
     timeout: int,
     stop: threading.Event | None = None,
     holder: dict | None = None,
 ) -> TestRun:
-    command = preset_command(preset)
     timeout = normalize_timeout(timeout)
     env = os.environ.copy()
     for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "API_KEY", "PROJECTAGENT_API_KEY"):
@@ -213,3 +212,13 @@ def run_preset(
         timed_out=timed_out,
         stopped=stopped,
     )
+
+
+def run_preset(
+    root: Path,
+    preset: str,
+    timeout: int,
+    stop: threading.Event | None = None,
+    holder: dict | None = None,
+) -> TestRun:
+    return run_argv(root, preset_command(preset), timeout, stop, holder)

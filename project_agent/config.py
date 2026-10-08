@@ -34,6 +34,7 @@ def default_config() -> dict:
         "test_preset": "",
         "test_timeout": 120,
         "test_fix_rounds": 3,
+        "allowed_commands": [],
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
@@ -156,6 +157,12 @@ def _agent_mode(raw) -> str:
     return normalize_agent_mode(raw)
 
 
+def _allowed_commands(raw) -> list[dict]:
+    from project_agent.allowed import normalize_allowed_commands
+
+    return normalize_allowed_commands(raw)
+
+
 def _context_limit(raw) -> int:
     from project_agent.context_usage import normalize_context_limit
 
@@ -244,6 +251,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["test_preset"] = _test_preset(data.get("test_preset"))
     merged["test_timeout"] = _test_timeout(data.get("test_timeout"))
     merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    merged["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
     merged["context_limit"] = _context_limit(data.get("context_limit"))
     merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
@@ -265,6 +273,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["test_preset"] = _test_preset(data.get("test_preset"))
     payload["test_timeout"] = _test_timeout(data.get("test_timeout"))
     payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    payload["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
     payload["context_limit"] = _context_limit(data.get("context_limit"))
     payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))

@@ -21,6 +21,7 @@ from project_agent.paths import (
 )
 from project_agent.providers import request_image
 from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is_secret_blob, literals_from_settings
+from project_agent.allowed import list_allowed_ids, normalize_allowed_commands, resolve_allowed
 from project_agent.testing import (
     LABEL_BY_PRESET,
     fail_fingerprint,
@@ -28,9 +29,19 @@ from project_agent.testing import (
     normalize_fix_rounds,
     normalize_preset,
     normalize_timeout,
+    run_argv,
     run_preset,
 )
-from project_agent.index_store import build_index, find_paths, index_summary, load_index, touch_file
+from project_agent.index_store import (
+    build_index,
+    find_importers,
+    find_paths,
+    find_symbols,
+    index_summary,
+    list_imports,
+    load_index,
+    touch_file,
+)
 from project_agent.gitops import (
     GitError,
     git_commit,
@@ -140,11 +151,17 @@ TOOL_SPECS = [
     },
     {
         "name": "project_index",
-        "description": "Индекс путей файлов проекта (не содержимое). action=summary|refresh|find. Для find укажи query — подстрока пути.",
+        "description": (
+            "Индекс проекта: пути и лёгкие символы/импорты Python (не LSP). "
+            "action=summary|refresh|find|find_symbol|imports|importers. "
+            "find/find_symbol/importers — query; imports — path к .py. "
+            "В ответ только совпадения, не весь индекс."
+        ),
         "parameters": _schema(
             {
-                "action": _string("summary, refresh или find."),
-                "query": _string("Подстрока пути для find, например app.py или tests/."),
+                "action": _string("summary, refresh, find, find_symbol, imports или importers."),
+                "query": _string("Подстрока пути/символа/модуля."),
+                "path": _string("Для imports: путь к .py относительно корня."),
             },
             ["action"],
         ),
@@ -155,6 +172,22 @@ TOOL_SPECS = [
         "parameters": _schema(
             {"summary": _string("Короткая причина запуска без секретов.")},
             [],
+        ),
+    },
+    {
+        "name": "run_allowed",
+        "description": (
+            "Запустить команду из жёсткого allowlist по id. "
+            "Встроенные: unittest, pytest, npm_test, build_ps1; плюс свои id из настроек → Проект. "
+            "Всегда подтверждение. Нет произвольного shell и свободных аргументов. "
+            "Для цикла правок+тестов предпочитай run_tests."
+        ),
+        "parameters": _schema(
+            {
+                "id": _string("Id из allowlist, например unittest или build_ps1."),
+                "summary": _string("Короткая причина запуска без секретов."),
+            },
+            ["id"],
         ),
     },
     {
@@ -662,7 +695,55 @@ class Toolbox:
             if len(found) >= 80:
                 body += "\n(список обрезан)"
             return ToolOutcome(body, f"project_index: find {len(found)}")
-        return ToolOutcome("action: summary, refresh или find.", "project_index: неизвестно")
+        if action in {"find_symbol", "symbol", "symbols"}:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome("Для find_symbol нужна подстрока query.", "project_index: find_symbol пусто")
+            found, data = find_symbols(root, query)
+            if not found:
+                py_count = len((data.get("files") or {}))
+                return ToolOutcome(
+                    f"По символу «{query}» ничего нет. Проиндексировано .py: {py_count}.",
+                    "project_index: find_symbol 0",
+                )
+            body = "\n".join(found)
+            if len(found) >= 80:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: find_symbol {len(found)}")
+        if action == "imports":
+            path = str(args.get("path") or args.get("query") or "").strip()
+            if not path:
+                return ToolOutcome("Для imports нужен path к .py.", "project_index: imports пусто")
+            found, data = list_imports(root, path)
+            if path not in (data.get("files") or {}) and not found:
+                return ToolOutcome(
+                    f"Файл «{path}» не в символьном индексе (нужен .py ≤1 МБ). Обновите refresh.",
+                    "project_index: imports нет",
+                )
+            if not found:
+                return ToolOutcome(f"В «{path}» импортов не найдено.", "project_index: imports 0")
+            body = "\n".join(found)
+            if len(found) >= 80:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: imports {len(found)}")
+        if action in {"importers", "who_imports"}:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome("Для importers нужна подстрока query (модуль/имя).", "project_index: importers пусто")
+            found, data = find_importers(root, query)
+            if not found:
+                return ToolOutcome(
+                    f"Импортеров «{query}» не найдено. .py в индексе: {len(data.get('files') or {})}.",
+                    "project_index: importers 0",
+                )
+            body = "\n".join(found)
+            if len(found) >= 80:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: importers {len(found)}")
+        return ToolOutcome(
+            "action: summary, refresh, find, find_symbol, imports или importers.",
+            "project_index: неизвестно",
+        )
 
     def _tool_run_tests(self, args: dict) -> ToolOutcome:
         root = self._require_root()
@@ -741,6 +822,53 @@ class Toolbox:
             body + self._touched_suffix(),
             f"run_tests {label}: {status} {self._test_runs}/{rounds}",
         )
+
+    def _tool_run_allowed(self, args: dict) -> ToolOutcome:
+        root = self._require_root()
+        settings = self.settings() or {}
+        custom = normalize_allowed_commands(settings.get("allowed_commands"))
+        command_id = str(args.get("id") or "").strip()
+        timeout = normalize_timeout(settings.get("test_timeout"))
+        try:
+            resolved_id, command = resolve_allowed(root, command_id, custom)
+        except ValueError as exc:
+            known = ", ".join(list_allowed_ids(custom))
+            return ToolOutcome(
+                f"{exc}. Доступные id: {known}." if "allowlist" not in str(exc).lower() else str(exc),
+                f"run_allowed: ошибка",
+            )
+        summary = self._summary(
+            args.get("summary"),
+            f"Allowlist «{resolved_id}», таймаут {timeout} с",
+            0,
+        )
+        detail = format_command(command)
+        if self._stopped() or not self.confirm(f"run_allowed:{resolved_id}", summary, detail):
+            return ToolOutcome(
+                "Пользователь отказался запускать команду. Не повторяй без новой причины.",
+                f"run_allowed {resolved_id}: отказ",
+            )
+        if self._stopped():
+            return ToolOutcome("Остановлено.", f"run_allowed {resolved_id}: остановлено")
+        try:
+            result = run_argv(root, command, timeout, self.stop, self._test_holder)
+        except ValueError as exc:
+            return ToolOutcome(str(exc), f"run_allowed {resolved_id}: ошибка")
+        except OSError as exc:
+            return ToolOutcome(f"Не удалось запустить: {exc}", f"run_allowed {resolved_id}: ошибка")
+        if result.stopped or self._stopped():
+            return ToolOutcome("Запуск остановлен.", f"run_allowed {resolved_id}: остановлено")
+        if result.timed_out:
+            body = (
+                f"Таймаут {timeout} с.\nКоманда: {format_command(result.command)}\n\n{result.output}"
+            ).strip()
+            return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: таймаут")
+        code = 0 if result.code is None else int(result.code)
+        status = "OK" if code == 0 else f"FAIL ({code})"
+        body = (
+            f"{status}.\nКоманда: {format_command(result.command)}\n\n{result.output}"
+        ).strip()
+        return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: {status}")
 
     def _tool_git(self, args: dict) -> ToolOutcome:
         root = self._require_root()

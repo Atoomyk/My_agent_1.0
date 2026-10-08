@@ -847,7 +847,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         ctk.CTkLabel(
             page,
-            text="Агент может запускать только выбранный пресет. Произвольный терминал недоступен. Каждый запуск спрашивает подтверждение.",
+            text="Пресет тестов — для run_tests. Allowlist — для run_allowed (сборка и разовые команды). Произвольный shell недоступен. Каждый запуск с подтверждением.",
             wraplength=400,
             justify="left",
             text_color=MUTED,
@@ -858,6 +858,28 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         app._entry(page, "Таймаут тестов (сек)", app.test_timeout_var, "120")
         app._entry(page, "Лимит запусков тестов за ход", app.test_fix_rounds_var, "3")
+        app._field(page, "Свои команды allowlist")
+        ctk.CTkLabel(
+            page,
+            text="Встроенные id: unittest, pytest, npm_test, build_ps1. Свои — по одной строке: id: arg1 arg2 …",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=("Segoe UI", 11),
+        ).pack(fill="x", padx=8, pady=(0, 4))
+        from project_agent.allowed import format_allowed_text
+
+        app.allowed_box = ctk.CTkTextbox(
+            page,
+            height=88,
+            fg_color=FIELD,
+            text_color=TEXT,
+            border_color=BORDER,
+            border_width=1,
+            font=("Consolas", 11),
+        )
+        app.allowed_box.pack(fill="x", padx=8, pady=4)
+        app.allowed_box.insert("1.0", format_allowed_text(getattr(app, "allowed_commands", [])))
         app._field(page, "Правила проекта")
         app.rules_label = ctk.CTkLabel(
             page,
@@ -932,8 +954,8 @@ class SettingsWindow(ctk.CTkToplevel):
             "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
             "По умолчанию запись файла спрашивает подтверждение. Переключатель выше снимает диалог "
             "только для write_file / apply_patch внутри открытой папки проекта.\n\n"
-            "Генерация изображения, запуск тестов и git commit всегда спрашивают подтверждение.\n\n"
-            "Команд произвольного терминала нет. Тесты — только пресет unittest, pytest или npm test из настроек.\n\n"
+            "Генерация изображения, run_tests, run_allowed и git commit всегда спрашивают подтверждение.\n\n"
+            "Произвольного shell нет. Тесты — пресет; прочие команды — только id из allowlist (встроенные + свои в Проект).\n\n"
             "Браузер не встроен: только MCP Playwright из настроек (если добавлен).\n\n"
             "Агент не выходит за выбранную папку проекта."
         )
@@ -958,6 +980,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.app.profile_menu = None
         self.app.index_label = None
         self.app.rules_label = None
+        self.app.allowed_box = None
         self.app._settings_window = None
         self.destroy()
 
@@ -1062,6 +1085,8 @@ class App(ctk.CTk):
         self.test_preset_var = ctk.StringVar(value="Выключено")
         self.test_timeout_var = ctk.StringVar(value="120")
         self.test_fix_rounds_var = ctk.StringVar(value="3")
+        self.allowed_commands: list[dict] = []
+        self.allowed_box = None
         self.auto_write_project = False
         self.auto_write_var = ctk.BooleanVar(value=False)
         self._build()
@@ -2345,6 +2370,9 @@ class App(ctk.CTk):
         self.test_preset_var.set(LABEL_BY_PRESET.get(self.test_preset, "Выключено"))
         self.test_timeout_var.set(str(normalize_timeout(data.get("test_timeout"))))
         self.test_fix_rounds_var.set(str(normalize_fix_rounds(data.get("test_fix_rounds"))))
+        from project_agent.allowed import normalize_allowed_commands
+
+        self.allowed_commands = normalize_allowed_commands(data.get("allowed_commands"))
         self.auto_write_project = bool(data.get("auto_write_project"))
         self.auto_write_var.set(self.auto_write_project)
         self._set_agent_mode(data.get("agent_mode") or "agent", persist=False)
@@ -2505,11 +2533,28 @@ class App(ctk.CTk):
         settings["test_preset"] = PRESET_LABELS.get(self.test_preset_var.get(), self.test_preset)
         settings["test_timeout"] = normalize_timeout(self.test_timeout_var.get())
         settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
+        settings["allowed_commands"] = self._read_allowed_commands()
         settings["agent_mode"] = self.agent_mode
         settings["context_limit"] = self.context_limit
         settings["auto_write_project"] = bool(self.auto_write_var.get())
         self.auto_write_project = settings["auto_write_project"]
         return settings
+
+    def _read_allowed_commands(self) -> list[dict]:
+        from project_agent.allowed import normalize_allowed_commands, parse_allowed_text
+
+        box = self.allowed_box
+        if box is None:
+            return normalize_allowed_commands(self.allowed_commands)
+        try:
+            exists = bool(box.winfo_exists())
+        except tk.TclError:
+            exists = False
+        if not exists:
+            return normalize_allowed_commands(self.allowed_commands)
+        parsed = parse_allowed_text(box.get("1.0", "end-1c"))
+        self.allowed_commands = parsed
+        return parsed
 
     def _set_agent_mode(self, mode: str, persist: bool = True) -> None:
         from project_agent.tools import normalize_agent_mode

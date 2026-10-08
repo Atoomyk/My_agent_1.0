@@ -705,7 +705,7 @@ class IndexStoreTests(unittest.TestCase):
                     os.environ["APPDATA"] = previous
 
     def test_project_index_tool(self):
-        from project_agent.index_store import build_index
+        from project_agent.index_store import build_index, load_symbols
 
         with tempfile.TemporaryDirectory() as tmp:
             previous = os.environ.get("APPDATA")
@@ -713,19 +713,67 @@ class IndexStoreTests(unittest.TestCase):
             try:
                 root = Path(tmp) / "proj"
                 root.mkdir()
-                (root / "a.py").write_text("x\n", encoding="utf-8")
+                (root / "a.py").write_text(
+                    "import os\n"
+                    "from pathlib import Path\n"
+                    "\n"
+                    "class Foo:\n"
+                    "    def bar(self):\n"
+                    "        def nested():\n"
+                    "            return 1\n"
+                    "        return nested()\n"
+                    "\n"
+                    "def top():\n"
+                    "    return 2\n",
+                    encoding="utf-8",
+                )
+                (root / "b.py").write_text("from a import Foo\n", encoding="utf-8")
                 build_index(root)
+                symbols = load_symbols(root)
+                self.assertIn("a.py", symbols["files"])
                 box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {"api_key": "", "mcp_servers": []})
                 box.set_root(root)
                 summary = box.execute("project_index", {"action": "summary"})
                 self.assertIn("файлов", summary.model_text)
+                self.assertIn("символов", summary.model_text)
                 found = box.execute("project_index", {"action": "find", "query": "a.py"})
                 self.assertIn("a.py", found.model_text)
+                sym = box.execute("project_index", {"action": "find_symbol", "query": "Foo"})
+                self.assertIn("Foo", sym.model_text)
+                self.assertIn("Foo.bar", sym.model_text)
+                self.assertNotIn("nested", sym.model_text)
+                imports = box.execute("project_index", {"action": "imports", "path": "a.py"})
+                self.assertIn("import os", imports.model_text)
+                self.assertIn("pathlib", imports.model_text)
+                importers = box.execute("project_index", {"action": "importers", "query": "a"})
+                self.assertIn("b.py", importers.model_text)
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)
                 else:
                     os.environ["APPDATA"] = previous
+
+    def test_parse_python_symbols(self):
+        from project_agent.symbols import parse_python_file
+
+        symbols, imports = parse_python_file(
+            "from x import y as z\n"
+            "import a.b\n"
+            "class C:\n"
+            "    def m(self):\n"
+            "        def inner():\n"
+            "            pass\n"
+            "def f():\n"
+            "    pass\n"
+        )
+        kinds = {(item["qualname"], item["kind"]) for item in symbols}
+        self.assertIn(("C", "class"), kinds)
+        self.assertIn(("C.m", "method"), kinds)
+        self.assertIn(("f", "def"), kinds)
+        self.assertFalse(any(item["name"] == "inner" for item in symbols))
+        modules = {item["module"] for item in imports}
+        self.assertIn("x", modules)
+        self.assertIn("a.b", modules)
 
 
 class ContextAttachTests(unittest.TestCase):
@@ -809,8 +857,7 @@ class ProjectRulesTests(unittest.TestCase):
             system = agent._system()
             self.assertIn("Правила проекта", system)
             self.assertIn("Пиши кратко.", system)
-            self.assertIn("команда пресета", system)
-            self.assertIn("npm test", system)
+            self.assertIn("run_allowed", system)
             self.assertIn("Режим: Agent", system)
             agent._agent_mode = "ask"
             ask_system = agent._system()
@@ -837,6 +884,61 @@ class ToolRunningLabelTests(unittest.TestCase):
         )
         self.assertEqual(tool_running_label("run_tests", {}), "run_tests")
         self.assertEqual(tool_running_label("read_file", {"path": "a.py"}), "read_file a.py")
+
+
+class AllowedCommandTests(unittest.TestCase):
+    def test_resolve_builtin_and_custom(self):
+        from project_agent.allowed import (
+            parse_allowed_text,
+            resolve_allowed,
+            list_allowed_ids,
+            normalize_allowed_commands,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "build.ps1").write_text("Write-Host ok\n", encoding="utf-8")
+            command_id, argv = resolve_allowed(root, "unittest", [])
+            self.assertEqual(command_id, "unittest")
+            self.assertIn("-m", argv)
+            self.assertIn("unittest", argv)
+            custom = [{"id": "ruff_check", "argv": ["python", "-m", "ruff", "check"]}]
+            self.assertEqual(normalize_allowed_commands(custom)[0]["id"], "ruff_check")
+            resolved, cmd = resolve_allowed(root, "ruff_check", custom)
+            self.assertEqual(resolved, "ruff_check")
+            self.assertEqual(cmd, ["python", "-m", "ruff", "check"])
+            self.assertIn("ruff_check", list_allowed_ids(custom))
+            with self.assertRaises(ValueError):
+                parse_allowed_text("unittest: python -m unittest")
+            with self.assertRaises(ValueError):
+                parse_allowed_text("bad: cmd /c dir")
+            with self.assertRaises(ValueError):
+                resolve_allowed(root, "nope", [])
+
+    def test_run_allowed_tool_confirm_and_plan_block(self):
+        notes = []
+
+        def confirm(path, summary, detail=""):
+            notes.append((path, summary, detail))
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {
+                "api_key": "",
+                "mcp_servers": [],
+                "agent_mode": "agent",
+                "test_timeout": 30,
+                "allowed_commands": [{"id": "py_help", "argv": [sys.executable, "-c", "print(42)"]}],
+            }
+            box = Toolbox(SecretVault(), confirm, McpHub(), lambda: settings)
+            box.set_root(root)
+            ok = box.execute("run_allowed", {"id": "py_help", "summary": "probe"})
+            self.assertIn("42", ok.model_text)
+            self.assertTrue(notes)
+            settings["agent_mode"] = "plan"
+            blocked = box.execute("run_allowed", {"id": "py_help", "summary": "probe"})
+            self.assertIn("Plan", blocked.model_text)
 
 
 class AgentModeTests(unittest.TestCase):

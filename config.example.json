@@ -13,6 +13,7 @@
   "test_preset": "",
   "test_timeout": 120,
   "test_fix_rounds": 3,
+  "allowed_commands": [],
   "active_profile": "",
   "profiles": [],
   "mcp_servers": [],
