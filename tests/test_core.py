@@ -731,6 +731,41 @@ class TestRunnerTests(unittest.TestCase):
             self.assertEqual(box.touched_paths(), ["a.py"])
 
 
+class FindAndDiagTests(unittest.TestCase):
+    def test_search_project_hits(self):
+        import tempfile
+        from pathlib import Path
+
+        from project_agent.findfiles import search_project
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "a.py").write_text("hello\nfindme here\n", encoding="utf-8")
+            (root / "b.txt").write_text("nothing\n", encoding="utf-8")
+            hits = search_project(root, "findme")
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0].path, "a.py")
+            self.assertEqual(hits[0].line, 2)
+
+    def test_parse_traceback_and_compile(self):
+        import tempfile
+        from pathlib import Path
+
+        from project_agent.diagnostics import compile_project_python, parse_python_locations
+
+        tb = 'File "src/app.py", line 12, in main\n    boom()\nNameError: x'
+        hits = parse_python_locations(tb, None)
+        self.assertTrue(any(h.path.endswith("app.py") and h.line == 12 for h in hits))
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bad = root / "bad.py"
+            bad.write_text("def broken(\n", encoding="utf-8")
+            diags = compile_project_python(root)
+            self.assertTrue(diags)
+            self.assertEqual(diags[0].path, "bad.py")
+            self.assertGreaterEqual(diags[0].line, 1)
+
+
 class GitOpsTests(unittest.TestCase):
     def test_parse_status_paths_and_dirty_dirs(self):
         from project_agent.gitops import dirty_ancestor_dirs, parse_status_paths

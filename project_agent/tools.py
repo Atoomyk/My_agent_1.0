@@ -561,45 +561,18 @@ class Toolbox:
             raise ValueError("пустой запрос")
         pattern = str(args.get("glob") or "")
         root = self._require_root()
-        matches = []
-        scanned = 0
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [name for name in dirnames if name not in IGNORE_DIRS]
-            for filename in filenames:
-                if len(matches) >= MAX_MATCHES or scanned >= MAX_SCAN_FILES:
-                    break
-                full = Path(dirpath) / filename
-                rel = relative_posix(root, full)
-                if pattern and not _glob_match(rel, pattern):
-                    continue
-                if is_binary_name(full) or is_secret_blob(full):
-                    continue
-                try:
-                    if full.stat().st_size > MAX_FILE_BYTES:
-                        continue
-                    data = full.read_bytes()
-                except OSError:
-                    continue
-                if b"\x00" in data[:8192]:
-                    continue
-                try:
-                    text = data.decode("utf-8-sig")
-                except UnicodeDecodeError:
-                    continue
-                scanned += 1
-                if "-----BEGIN" in text and "PRIVATE KEY-----" in text:
-                    continue
-                for number, line in enumerate(text.splitlines(), 1):
-                    if query not in line:
-                        continue
-                    hidden = self._scrub(line, full)
-                    matches.append(f"{rel}:{number}: {hidden[:160]}")
-                    if len(matches) >= MAX_MATCHES:
-                        break
-        body = "\n".join(matches) if matches else "Совпадений нет."
-        if len(matches) >= MAX_MATCHES:
+        from project_agent.findfiles import search_project
+
+        hits = search_project(root, query, glob=pattern, limit=MAX_MATCHES, max_scan=MAX_SCAN_FILES)
+        lines = []
+        for hit in hits:
+            full = root / hit.path
+            hidden = self._scrub(hit.text, full if full.is_file() else root)
+            lines.append(f"{hit.path}:{hit.line}: {hidden[:160]}")
+        body = "\n".join(lines) if lines else "Совпадений нет."
+        if len(hits) >= MAX_MATCHES:
             body += f"\n(список обрезан, максимум {MAX_MATCHES})"
-        return ToolOutcome(body, f"search: {len(matches)} совпадений")
+        return ToolOutcome(body, f"search: {len(hits)} совпадений")
 
     def _tool_write_file(self, args: dict) -> ToolOutcome:
         full = self._inside(str(args.get("path") or ""))

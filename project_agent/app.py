@@ -960,6 +960,71 @@ class NameDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class GotoLineDialog(ctk.CTkToplevel):
+    def __init__(self, master, current: int = 1, maximum: int = 1) -> None:
+        super().__init__(master)
+        self.result: int | None = None
+        self._closed = False
+        self._maximum = max(1, int(maximum or 1))
+        ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
+        self.title("Перейти к строке")
+        self.geometry("360x160")
+        self.resizable(False, False)
+        self.configure(fg_color=INK)
+        self.transient(master)
+        self.grab_set()
+        ctk.CTkLabel(
+            self,
+            text=f"Номер строки (1–{self._maximum})",
+            anchor="w",
+            text_color=MUTED,
+            font=(ui, 12),
+        ).pack(fill="x", padx=16, pady=(16, 4))
+        self.entry = ctk.CTkEntry(
+            self,
+            fg_color=FIELD,
+            border_color=BORDER,
+            text_color=TEXT,
+            height=36,
+            corner_radius=12,
+            font=(ui, 12),
+        )
+        self.entry.pack(fill="x", padx=16, pady=4)
+        self.entry.insert(0, str(max(1, int(current or 1))))
+        self.entry.select_range(0, "end")
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=12)
+        quiet_button(row, "Отмена", self._cancel, width=120, mark="close", family=ui).pack(side="left", padx=8)
+        quiet_button(row, "Перейти", self._ok, width=140, primary=True, mark="check", family=ui).pack(
+            side="left", padx=8
+        )
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.entry.bind("<Return>", lambda _event: self._ok())
+        self.after(50, self.entry.focus)
+
+    def _ok(self) -> None:
+        if self._closed:
+            return
+        raw = (self.entry.get() or "").strip()
+        try:
+            line = int(raw)
+        except ValueError:
+            return
+        self._closed = True
+        self.result = max(1, min(line, self._maximum))
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
+
 class FontPickDialog(ctk.CTkToplevel):
     _HEAD_CYR = "— С кириллицей —"
     _HEAD_LAT = "— Без кириллицы —"
@@ -1482,6 +1547,11 @@ class App(ctk.CTk):
         self._search_index = -1
         self._search_query = ""
         self._closing = False
+        self._fs_watcher = None
+        self._watcher_job = None
+        self._file_util_mode = "find"
+        self._find_hits: list = []
+        self._diag_hits: list = []
         self.checkpoints = CheckpointStack()
         self.vault = SecretVault()
         self.mcp = McpHub()
@@ -1625,7 +1695,8 @@ class App(ctk.CTk):
         self.file_pane = ctk.CTkFrame(side, fg_color="transparent")
         self.file_pane.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.file_pane.grid_columnconfigure(0, weight=1)
-        self.file_pane.grid_rowconfigure(1, weight=1)
+        self.file_pane.grid_rowconfigure(1, weight=3)
+        self.file_pane.grid_rowconfigure(2, weight=2)
         files_top = ctk.CTkFrame(self.file_pane, fg_color="transparent")
         files_top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         files_top.grid_columnconfigure(0, weight=1)
@@ -1649,6 +1720,7 @@ class App(ctk.CTk):
         self.tree.bind("<<TreeviewSelect>>", self._on_file_click)
         self.tree.bind("<Button-3>", self._file_menu)
         self._configure_git_tree_tags()
+        self._build_file_util_panel()
         self.chat_tree = ttk.Treeview(self.chat_pane, show="tree", selectmode="browse", style="Chats.Treeview")
         self.chat_tree.grid(row=0, column=0, sticky="nsew")
         chat_scroll = ctk.CTkScrollbar(
@@ -1842,21 +1914,60 @@ class App(ctk.CTk):
         editor_head.grid_columnconfigure(0, weight=1)
         self.editor_title = ctk.CTkLabel(editor_head, text="", anchor="w", text_color=TEXT)
         self.editor_title.grid(row=0, column=0, sticky="ew")
-        quiet_button(editor_head, "Сохранить", self._save_editor, width=128, mark="save").grid(row=0, column=1, padx=(8, 4))
-        quiet_button(editor_head, "Закрыть", self._close_editor, width=112, mark="close").grid(row=0, column=2)
+        # Высота как у «Сжать» в футере (24); без крупных glyph-иконок.
+        quiet_button(editor_head, "Строка", self._goto_editor_line, width=52, height=24).grid(
+            row=0, column=1, padx=(6, 2)
+        )
+        quiet_button(editor_head, "Сохранить", lambda: self._save_editor(confirm=False), width=72, height=24).grid(
+            row=0, column=2, padx=2
+        )
+        quiet_button(editor_head, "Закрыть", self._close_editor, width=64, height=24).grid(
+            row=0, column=3, padx=(2, 0)
+        )
+        editor_body = ctk.CTkFrame(self.editor_frame, fg_color=FIELD, corner_radius=0)
+        self.editor_body = editor_body
+        editor_body.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        editor_body.grid_columnconfigure(1, weight=1)
+        editor_body.grid_rowconfigure(0, weight=1)
+        self.editor_gutter = tk.Text(
+            editor_body,
+            width=3,
+            wrap="none",
+            bd=0,
+            highlightthickness=0,
+            takefocus=0,
+            cursor="arrow",
+            padx=2,
+            pady=2,
+            bg=_tone(PANEL),
+            fg=_tone(MUTED),
+            font=self._editor_gutter_font(),
+            state="disabled",
+        )
+        self.editor_gutter.grid(row=0, column=0, sticky="nsw")
         self.editor_box = ctk.CTkTextbox(
-            self.editor_frame,
+            editor_body,
             wrap="none",
             fg_color=FIELD,
             text_color=TEXT,
             border_width=0,
             corner_radius=0,
-            font=self._code_font(13),
+            font=self._editor_text_font(),
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
-        self.editor_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        self.editor_box._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
+        self.editor_box.grid(row=0, column=1, sticky="nsew")
+        inner = self.editor_box._textbox
+        inner.configure(yscrollcommand=self._on_editor_scroll)
+        if getattr(self.editor_box, "_scrollbar", None) is not None:
+            self.editor_box._scrollbar.configure(command=self._editor_yview)
+        elif getattr(self.editor_box, "_y_scrollbar", None) is not None:
+            self.editor_box._y_scrollbar.configure(command=self._editor_yview)
+        inner.bind("<Control-KeyPress>", self._on_editor_control, add="+")
+        for seq in ("<KeyRelease>", "<ButtonRelease-1>", "<MouseWheel>", "<Configure>"):
+            inner.bind(seq, self._on_editor_change, add="+")
+        inner.bind("<<Modified>>", self._on_editor_modified, add="+")
+        self.editor_gutter.bind("<MouseWheel>", self._on_gutter_wheel)
 
         bottom = ctk.CTkFrame(self.center, fg_color=INK, corner_radius=0)
         self.bottom = bottom
@@ -1999,6 +2110,12 @@ class App(ctk.CTk):
     def _code_font(self, size: int, weight: str = "normal") -> tuple:
         return self._font(size, self.code_font, weight)
 
+    def _editor_gutter_font(self, weight: str = "normal") -> tuple:
+        return self._code_font(10, weight)
+
+    def _editor_text_font(self, weight: str = "normal") -> tuple:
+        return self._code_font(12, weight)
+
     def _px_font(self, size: int, family: str | None = None, weight: str = "normal") -> tuple:
         scale = ctk.ScalingTracker.get_widget_scaling(self)
         return (family or self.ui_font, -round(size * scale), weight)
@@ -2040,6 +2157,214 @@ class App(ctk.CTk):
             except tk.TclError:
                 continue
 
+    def _build_file_util_panel(self) -> None:
+        """Поиск по файлам + диагностики под деревом (P0.4 / P0.5)."""
+        panel = ctk.CTkFrame(self.file_pane, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER)
+        self.file_util_panel = panel
+        panel.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(2, weight=1)
+        mode_row = ctk.CTkFrame(panel, fg_color="transparent")
+        mode_row.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
+        self.file_find_mode_btn = quiet_button(mode_row, "Поиск", lambda: self._set_file_util_mode("find"), width=64, height=24)
+        self.file_find_mode_btn.pack(side="left", padx=(0, 4))
+        self.file_diag_mode_btn = quiet_button(
+            mode_row, "Проблемы", lambda: self._set_file_util_mode("problems"), width=80, height=24
+        )
+        self.file_diag_mode_btn.pack(side="left")
+        self.file_util_status = ctk.CTkLabel(mode_row, text="", anchor="e", text_color=MUTED, font=self._font(10))
+        self.file_util_status.pack(side="right")
+
+        self.file_find_row = ctk.CTkFrame(panel, fg_color="transparent")
+        self.file_find_row.grid(row=1, column=0, sticky="ew", padx=6, pady=2)
+        self.file_find_row.grid_columnconfigure(0, weight=1)
+        self.file_find_var = ctk.StringVar(value="")
+        self.file_find_entry = ctk.CTkEntry(
+            self.file_find_row,
+            textvariable=self.file_find_var,
+            placeholder_text="Найти в файлах…",
+            height=26,
+            fg_color=FIELD,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=self._font(11),
+        )
+        self.file_find_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.file_find_entry.bind("<Return>", lambda _e: self._run_file_find())
+        quiet_button(self.file_find_row, "Найти", self._run_file_find, width=56, height=24).grid(row=0, column=1)
+
+        self.file_diag_row = ctk.CTkFrame(panel, fg_color="transparent")
+        self.file_diag_row.grid(row=1, column=0, sticky="ew", padx=6, pady=2)
+        quiet_button(self.file_diag_row, "Проверить py", self._run_py_compile_check, width=100, height=24).pack(
+            side="left"
+        )
+        quiet_button(self.file_diag_row, "Из вывода", self._diag_from_output, width=88, height=24).pack(
+            side="left", padx=(4, 0)
+        )
+        quiet_button(self.file_diag_row, "Очистить", self._clear_diagnostics, width=72, height=24).pack(side="left", padx=(4, 0))
+
+        list_holder = ctk.CTkFrame(panel, fg_color="transparent")
+        list_holder.grid(row=2, column=0, sticky="nsew", padx=6, pady=(2, 6))
+        list_holder.grid_columnconfigure(0, weight=1)
+        list_holder.grid_rowconfigure(0, weight=1)
+        self.file_hit_list = tk.Listbox(
+            list_holder,
+            activestyle="dotbox",
+            exportselection=False,
+            bd=0,
+            highlightthickness=0,
+            bg=_tone(FIELD),
+            fg=_tone(TEXT),
+            selectbackground=_tone(SELECT),
+            selectforeground=_tone(TEXT),
+            font=self._code_font(10),
+        )
+        self.file_hit_list.grid(row=0, column=0, sticky="nsew")
+        hit_scroll = ctk.CTkScrollbar(
+            list_holder,
+            command=self.file_hit_list.yview,
+            fg_color=PANEL,
+            button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER,
+        )
+        hit_scroll.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+        self.file_hit_list.configure(yscrollcommand=hit_scroll.set)
+        self.file_hit_list.bind("<Double-Button-1>", self._on_file_hit_activate)
+        self.file_hit_list.bind("<Return>", self._on_file_hit_activate)
+        self._set_file_util_mode("find")
+
+    def _set_file_util_mode(self, mode: str) -> None:
+        self._file_util_mode = "problems" if mode == "problems" else "find"
+        if self._file_util_mode == "find":
+            self.file_find_row.grid()
+            self.file_diag_row.grid_remove()
+            self._fill_file_hit_list(self._find_hits)
+        else:
+            self.file_find_row.grid_remove()
+            self.file_diag_row.grid()
+            self._fill_file_hit_list(self._diag_hits)
+
+    def _style_file_util_panel(self) -> None:
+        panel = getattr(self, "file_util_panel", None)
+        if panel is None:
+            return
+        try:
+            panel.configure(fg_color=PANEL, border_color=BORDER)
+            self.file_find_entry.configure(fg_color=FIELD, border_color=BORDER, text_color=TEXT, font=self._font(11))
+            self.file_util_status.configure(text_color=MUTED, font=self._font(10))
+            self.file_hit_list.configure(
+                bg=_tone(FIELD),
+                fg=_tone(TEXT),
+                selectbackground=_tone(SELECT),
+                selectforeground=_tone(TEXT),
+                font=self._code_font(10),
+            )
+        except tk.TclError:
+            return
+
+    def _fill_file_hit_list(self, items: list) -> None:
+        box = getattr(self, "file_hit_list", None)
+        if box is None:
+            return
+        try:
+            box.delete(0, "end")
+            for item in items:
+                box.insert("end", item.label())
+        except tk.TclError:
+            return
+        count = len(items)
+        if self._file_util_mode == "find":
+            self.file_util_status.configure(text=f"{count}" if count else "")
+        else:
+            self.file_util_status.configure(text=f"{count}" if count else "чисто")
+
+    def _run_file_find(self) -> None:
+        if self.project is None:
+            self.set_status("Сначала выберите папку проекта")
+            return
+        query = (self.file_find_var.get() or "").strip()
+        if not query:
+            self.set_status("Введите строку поиска")
+            return
+        from project_agent.findfiles import search_project
+
+        self._find_hits = search_project(self.project, query, limit=80)
+        self._set_file_util_mode("find")
+        if not self._find_hits:
+            self.set_status("Совпадений нет")
+        else:
+            self.set_status(f"Найдено: {len(self._find_hits)}")
+
+    def _run_py_compile_check(self) -> None:
+        if self.project is None:
+            self.set_status("Сначала выберите папку проекта")
+            return
+        from project_agent.diagnostics import compile_project_python
+
+        self.set_status("Проверка синтаксиса…")
+        self.update_idletasks()
+        self._diag_hits = compile_project_python(self.project)
+        self._set_file_util_mode("problems")
+        if not self._diag_hits:
+            self.set_status("Синтаксис Python: ок")
+        else:
+            self.set_status(f"Проблемы: {len(self._diag_hits)}")
+
+    def _diag_from_output(self) -> None:
+        if self.project is None:
+            self.set_status("Сначала выберите папку проекта")
+            return
+        text = ""
+        if self._output_slots:
+            text = str(self._output_slots[0].get("text") or "")
+        if not text.strip():
+            self.set_status("Вывод пуст")
+            return
+        from project_agent.diagnostics import parse_python_locations
+
+        self._diag_hits = parse_python_locations(text, self.project)
+        self._set_file_util_mode("problems")
+        if not self._diag_hits:
+            self.set_status("В выводе нет path:line")
+        else:
+            self.set_status(f"Из вывода: {len(self._diag_hits)}")
+
+    def _clear_diagnostics(self) -> None:
+        self._diag_hits = []
+        if self._file_util_mode == "problems":
+            self._fill_file_hit_list(self._diag_hits)
+        self.set_status("Проблемы очищены")
+
+    def _ingest_run_diagnostics(self, text: str, status: str) -> None:
+        blob = f"{status}\n{text}"
+        if not any(mark in blob for mark in ("Traceback", "FAIL", "ERROR", "Error", "Sorry:")):
+            return
+        from project_agent.diagnostics import parse_python_locations
+
+        hits = parse_python_locations(text, self.project)
+        if not hits:
+            return
+        self._diag_hits = hits
+        self._set_file_util_mode("problems")
+        self.set_status(f"Проблемы из прогона: {len(hits)}")
+
+    def _on_file_hit_activate(self, _event=None) -> None:
+        box = getattr(self, "file_hit_list", None)
+        if box is None:
+            return
+        try:
+            selection = box.curselection()
+        except tk.TclError:
+            return
+        if not selection:
+            return
+        index = int(selection[0])
+        items = self._find_hits if self._file_util_mode == "find" else self._diag_hits
+        if index < 0 or index >= len(items):
+            return
+        item = items[index]
+        self._open_file_at(str(item.path), int(item.line or 1))
+
     def _show_folder(self) -> None:
         letter = (self.project.name[:1] if self.project is not None else "") or "·"
         self.project_badge.configure(text=letter.upper())
@@ -2050,6 +2375,65 @@ class App(ctk.CTk):
         self._refresh_rules_label()
         self._refresh_attach()
         self._refresh_git_badge()
+        self._restart_project_watch()
+
+    def _restart_project_watch(self) -> None:
+        self._stop_project_watch()
+        if self.project is None or self._closing:
+            return
+        from project_agent.fswatch import HAS_WATCHDOG, ProjectWatcher
+
+        if not HAS_WATCHDOG:
+            return
+        if self._fs_watcher is None:
+            self._fs_watcher = ProjectWatcher()
+        ok = self._fs_watcher.start(self.project, self._on_fs_change)
+        if not ok:
+            return
+
+    def _stop_project_watch(self) -> None:
+        job = self._watcher_job
+        self._watcher_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        watcher = self._fs_watcher
+        if watcher is not None:
+            watcher.stop()
+
+    def _on_fs_change(self) -> None:
+        """Колбэк из потока watchdog → в UI-поток с debounce."""
+        if self._closing:
+            return
+        try:
+            self.after(0, self._schedule_watcher_refresh)
+        except Exception:
+            return
+
+    def _schedule_watcher_refresh(self) -> None:
+        if self._closing or self.project is None:
+            return
+        job = self._watcher_job
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._watcher_job = self.after(450, self._run_watcher_refresh)
+
+    def _run_watcher_refresh(self) -> None:
+        self._watcher_job = None
+        if self._closing or self.project is None:
+            return
+        try:
+            self._refresh_tree()
+            self._refresh_git_badge()
+            if self.editor_open and not self._editor_dirty():
+                self._reload_clean_editor()
+        except Exception:
+            return
 
     def _refresh_git_badge(self) -> None:
         label = getattr(self, "git_label", None)
@@ -2751,6 +3135,17 @@ class App(ctk.CTk):
             return
         if self.editor_open and relative == self.editor_path:
             return
+        self._open_file_at(relative, 1)
+
+    def _open_file_at(self, relative: str, line: int = 1) -> None:
+        if self.project is None:
+            return
+        relative = str(relative or "").replace("\\", "/").strip().lstrip("./")
+        if not relative:
+            return
+        if self.editor_open and relative == self.editor_path:
+            self._jump_editor_line(line)
+            return
         try:
             text = self._editor_source(relative)
         except PathError as exc:
@@ -2760,6 +3155,20 @@ class App(ctk.CTk):
             if not self._ask(self.editor_path, "Открыть другой файл без записи?"):
                 return
         self._show_editor(relative, text)
+        self.after(20, lambda: self._jump_editor_line(line))
+
+    def _jump_editor_line(self, line: int) -> None:
+        if not self.editor_open:
+            return
+        try:
+            target = max(1, min(int(line or 1), self._editor_line_count()))
+            self.editor_box.mark_set("insert", f"{target}.0")
+            self.editor_box.see(f"{target}.0")
+            self.editor_box.focus_set()
+            self._sync_editor_gutter()
+            self.set_status(f"{self.editor_path}:{target}")
+        except (tk.TclError, ValueError, TypeError):
+            return
 
     def _show_editor(self, relative: str, text: str) -> None:
         self.editor_path = relative
@@ -2770,6 +3179,11 @@ class App(ctk.CTk):
             self.editor_box.insert("1.0", text)
         self.editor_box.mark_set("insert", "1.0")
         self.editor_box.see("1.0")
+        try:
+            self.editor_box._textbox.edit_modified(False)
+        except tk.TclError:
+            pass
+        self._update_editor_gutter()
         if not self.editor_open:
             self.work.add(self.editor_frame, stretch="always", minsize=240, sticky="nsew")
             self.editor_open = True
@@ -2793,8 +3207,130 @@ class App(ctk.CTk):
     def _editor_text(self) -> str:
         return self.editor_box.get("1.0", "end-1c")
 
+    def _editor_line_count(self) -> int:
+        try:
+            return max(1, int(str(self.editor_box._textbox.index("end-1c")).split(".")[0]))
+        except (tk.TclError, ValueError, AttributeError):
+            return 1
+
     def _editor_dirty(self) -> bool:
         return self.editor_open and self._editor_text() != self.editor_saved
+
+    def _style_editor_gutter(self) -> None:
+        gutter = getattr(self, "editor_gutter", None)
+        if gutter is None:
+            return
+        try:
+            gutter.configure(
+                bg=_tone(PANEL),
+                fg=_tone(MUTED),
+                font=self._editor_gutter_font(),
+                insertbackground=_tone(TEXT),
+            )
+        except tk.TclError:
+            return
+        body = getattr(self, "editor_body", None)
+        if body is not None:
+            try:
+                body.configure(fg_color=FIELD)
+            except tk.TclError:
+                pass
+
+    def _update_editor_gutter(self, _event=None) -> None:
+        gutter = getattr(self, "editor_gutter", None)
+        box = getattr(self, "editor_box", None)
+        if gutter is None or box is None:
+            return
+        try:
+            lines = self._editor_line_count()
+            digits = max(3, len(str(lines)))
+            content = "\n".join(f"{i:>{digits}}" for i in range(1, lines + 1))
+            gutter.configure(state="normal", width=digits + 1)
+            gutter.delete("1.0", "end")
+            gutter.insert("1.0", content)
+            gutter.configure(state="disabled")
+            self._sync_editor_gutter()
+        except tk.TclError:
+            return
+
+    def _sync_editor_gutter(self) -> None:
+        gutter = getattr(self, "editor_gutter", None)
+        box = getattr(self, "editor_box", None)
+        if gutter is None or box is None:
+            return
+        try:
+            first, _last = box._textbox.yview()
+            gutter.yview_moveto(first)
+        except tk.TclError:
+            return
+
+    def _on_editor_scroll(self, first, last) -> None:
+        scrollbar = getattr(self.editor_box, "_scrollbar", None) or getattr(self.editor_box, "_y_scrollbar", None)
+        if scrollbar is not None:
+            try:
+                scrollbar.set(first, last)
+            except tk.TclError:
+                pass
+        self._sync_editor_gutter()
+
+    def _editor_yview(self, *args) -> None:
+        try:
+            self.editor_box._textbox.yview(*args)
+        except tk.TclError:
+            return
+        self._sync_editor_gutter()
+
+    def _on_editor_change(self, _event=None) -> None:
+        self.after_idle(self._update_editor_gutter)
+
+    def _on_editor_modified(self, _event=None) -> None:
+        try:
+            if self.editor_box._textbox.edit_modified():
+                self.editor_box._textbox.edit_modified(False)
+                self._update_editor_gutter()
+        except tk.TclError:
+            return
+
+    def _on_gutter_wheel(self, event) -> str | None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        steps = int(-delta / 120) if delta else 0
+        if steps == 0 and delta:
+            steps = -1 if delta > 0 else 1
+        if steps:
+            try:
+                self.editor_box._textbox.yview_scroll(steps, "units")
+            except tk.TclError:
+                return "break"
+            self._sync_editor_gutter()
+        return "break"
+
+    def _on_editor_control(self, event):
+        if not (int(getattr(event, "state", 0) or 0) & 0x4):
+            return
+        key = str(getattr(event, "keysym", "") or "").lower()
+        code = int(getattr(event, "keycode", 0) or 0)
+        # S / Ы (save), G / П (goto) — keycode устойчив к раскладке на Windows.
+        if key in {"s", "ы"} or code == 83:
+            self._save_editor(confirm=False)
+            return "break"
+        if key in {"g", "п"} or code == 71:
+            self._goto_editor_line()
+            return "break"
+        return _on_layout_clipboard(event)
+
+    def _goto_editor_line(self) -> None:
+        if not self.editor_open:
+            return
+        try:
+            current = int(str(self.editor_box._textbox.index("insert")).split(".")[0])
+        except (tk.TclError, ValueError):
+            current = 1
+        dialog = GotoLineDialog(self, current=current, maximum=self._editor_line_count())
+        self.wait_window(dialog)
+        line = dialog.result
+        if line is None:
+            return
+        self._jump_editor_line(line)
 
     def _place_editor_sash(self, tries: int = 0) -> None:
         if not self.editor_open:
@@ -2819,14 +3355,14 @@ class App(ctk.CTk):
             return
         self.editor_width = max(240, total - left)
 
-    def _save_editor(self) -> None:
+    def _save_editor(self, confirm: bool = False) -> None:
         if not self.editor_open or self.project is None:
             return
         text = self._editor_text()
         if text == self.editor_saved:
             self.set_status("Изменений нет")
             return
-        if not self._ask(self.editor_path, "Записать файл?"):
+        if confirm and not self._ask(self.editor_path, "Записать файл?"):
             return
         try:
             full = resolve_inside(self.project, self.editor_path)
@@ -2858,6 +3394,12 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_box.delete("1.0", "end")
+        try:
+            self.editor_gutter.configure(state="normal")
+            self.editor_gutter.delete("1.0", "end")
+            self.editor_gutter.configure(state="disabled")
+        except tk.TclError:
+            pass
         self.editor_title.configure(text="")
         return True
 
@@ -3307,6 +3849,10 @@ class App(ctk.CTk):
             self.placeholder.configure(fg=_tone(HINT), bg=_tone(FIELD), font=self._font(11))
         if hasattr(self, "git_label"):
             self._refresh_git_badge()
+        if hasattr(self, "editor_box"):
+            self._style_editor_gutter()
+        if hasattr(self, "file_util_panel"):
+            self._style_file_util_panel()
         if hasattr(self, "output_frame"):
             self.output_frame.configure(fg_color=PANEL)
             self.output_title.configure(text_color=MUTED)
@@ -3372,7 +3918,11 @@ class App(ctk.CTk):
         if hasattr(self, "placeholder"):
             self.placeholder.configure(font=self._font(11))
         if hasattr(self, "editor_box"):
-            self.editor_box.configure(font=self._code_font(13))
+            self.editor_box.configure(font=self._editor_text_font())
+            self._style_editor_gutter()
+            self._update_editor_gutter()
+        if hasattr(self, "file_util_panel"):
+            self._style_file_util_panel()
         if hasattr(self, "output_box"):
             self.output_box.configure(font=self._code_font(12))
         if hasattr(self, "search_count"):
@@ -5174,6 +5724,8 @@ class App(ctk.CTk):
             .replace("▶ ", "")
         )
         self.run_indicator.configure(text=f"{mark}: {status}" if status else mark)
+        if self.project is not None and self._output_slots:
+            self._ingest_run_diagnostics(str(self._output_slots[0].get("text") or ""), status or "")
 
     def set_status(self, text: str) -> None:
         shown = text
@@ -5717,6 +6269,7 @@ class App(ctk.CTk):
         if not self._release_editor(ask=True):
             return
         self._closing = True
+        self._stop_project_watch()
         self.stop_event.set()
         try:
             self._store_chat()
