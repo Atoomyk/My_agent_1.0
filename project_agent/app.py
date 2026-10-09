@@ -496,6 +496,11 @@ def _paint_copy(draw: ImageDraw.ImageDraw, color: str) -> None:
     draw.rounded_rectangle((7, 11, 20, 25), radius=2, outline=color, width=2)
 
 
+def _paint_search(draw: ImageDraw.ImageDraw, color: str) -> None:
+    draw.ellipse((6, 6, 20, 20), outline=color, width=2)
+    draw.line((18, 18, 26, 26), fill=color, width=2)
+
+
 def _tree_kind_for_name(name: str, is_dir: bool) -> str:
     if is_dir:
         return "folder"
@@ -662,6 +667,7 @@ _PAINT = {
     "gear": _paint_gear,
     "dots": _paint_dots,
     "copy": _paint_copy,
+    "search": _paint_search,
 }
 
 
@@ -1695,15 +1701,17 @@ class App(ctk.CTk):
         self.file_pane = ctk.CTkFrame(side, fg_color="transparent")
         self.file_pane.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.file_pane.grid_columnconfigure(0, weight=1)
-        self.file_pane.grid_rowconfigure(1, weight=3)
-        self.file_pane.grid_rowconfigure(2, weight=2)
+        self.file_pane.grid_rowconfigure(1, weight=1)
+        self.file_pane.grid_rowconfigure(2, weight=0)
         files_top = ctk.CTkFrame(self.file_pane, fg_color="transparent")
         files_top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         files_top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(files_top, text="Структура", anchor="w", text_color=MUTED, font=self._font(12)).grid(
             row=0, column=0, sticky="w", padx=(6, 0)
         )
-        icon_button(files_top, "refresh", self._refresh_tree, size=28).grid(row=0, column=1)
+        self.file_util_toggle = icon_button(files_top, "search", self.toggle_file_util_panel, size=28)
+        self.file_util_toggle.grid(row=0, column=1, padx=(0, 2))
+        icon_button(files_top, "refresh", self._refresh_tree, size=28).grid(row=0, column=2)
         tree_holder = ctk.CTkFrame(self.file_pane, fg_color="transparent")
         tree_holder.grid(row=1, column=0, sticky="nsew")
         tree_holder.grid_columnconfigure(0, weight=1)
@@ -1720,7 +1728,9 @@ class App(ctk.CTk):
         self.tree.bind("<<TreeviewSelect>>", self._on_file_click)
         self.tree.bind("<Button-3>", self._file_menu)
         self._configure_git_tree_tags()
+        self._file_util_open = False
         self._build_file_util_panel()
+        self._hide_file_util_panel()
         self.chat_tree = ttk.Treeview(self.chat_pane, show="tree", selectmode="browse", style="Chats.Treeview")
         self.chat_tree.grid(row=0, column=0, sticky="nsew")
         chat_scroll = ctk.CTkScrollbar(
@@ -2233,6 +2243,55 @@ class App(ctk.CTk):
         self.file_hit_list.bind("<Return>", self._on_file_hit_activate)
         self._set_file_util_mode("find")
 
+    def toggle_file_util_panel(self) -> None:
+        if self._file_util_open:
+            self._hide_file_util_panel()
+        else:
+            self._show_file_util_panel()
+
+    def _show_file_util_panel(self, mode: str | None = None) -> None:
+        panel = getattr(self, "file_util_panel", None)
+        if panel is None:
+            return
+        if mode is not None:
+            self._set_file_util_mode(mode)
+        try:
+            panel.grid()
+            self.file_pane.grid_rowconfigure(1, weight=3)
+            self.file_pane.grid_rowconfigure(2, weight=2)
+        except tk.TclError:
+            return
+        self._file_util_open = True
+        toggle = getattr(self, "file_util_toggle", None)
+        if toggle is not None:
+            try:
+                toggle.configure(fg_color=BUTTON_HOVER)
+            except tk.TclError:
+                pass
+        if self._file_util_mode == "find":
+            try:
+                self.file_find_entry.focus_set()
+            except tk.TclError:
+                pass
+
+    def _hide_file_util_panel(self) -> None:
+        panel = getattr(self, "file_util_panel", None)
+        if panel is None:
+            return
+        try:
+            panel.grid_remove()
+            self.file_pane.grid_rowconfigure(1, weight=1)
+            self.file_pane.grid_rowconfigure(2, weight=0)
+        except tk.TclError:
+            return
+        self._file_util_open = False
+        toggle = getattr(self, "file_util_toggle", None)
+        if toggle is not None:
+            try:
+                toggle.configure(fg_color="transparent")
+            except tk.TclError:
+                pass
+
     def _set_file_util_mode(self, mode: str) -> None:
         self._file_util_mode = "problems" if mode == "problems" else "find"
         if self._file_util_mode == "find":
@@ -2259,6 +2318,13 @@ class App(ctk.CTk):
                 selectforeground=_tone(TEXT),
                 font=self._code_font(10),
             )
+            toggle = getattr(self, "file_util_toggle", None)
+            if toggle is not None:
+                toggle.configure(
+                    image=glyph("search"),
+                    fg_color=BUTTON_HOVER if self._file_util_open else "transparent",
+                    hover_color=BUTTON_HOVER,
+                )
         except tk.TclError:
             return
 
@@ -2345,7 +2411,7 @@ class App(ctk.CTk):
         if not hits:
             return
         self._diag_hits = hits
-        self._set_file_util_mode("problems")
+        self._show_file_util_panel("problems")
         self.set_status(f"Проблемы из прогона: {len(hits)}")
 
     def _on_file_hit_activate(self, _event=None) -> None:
