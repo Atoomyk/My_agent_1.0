@@ -59,6 +59,7 @@ from project_agent.context_attach import (
 )
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
+from project_agent.editor_tabs import EditorTabs
 from project_agent.paths import (
     PathError,
     list_entries,
@@ -1280,59 +1281,56 @@ class NameDialog(ctk.CTkToplevel):
         self.destroy()
 
 
-class GotoLineDialog(ctk.CTkToplevel):
-    def __init__(self, master, current: int = 1, maximum: int = 1) -> None:
+class SaveChangesDialog(ctk.CTkToplevel):
+    """Да = сохранить, Нет = закрыть без записи, None = отмена."""
+
+    def __init__(self, master, path: str) -> None:
         super().__init__(master)
-        self.result: int | None = None
+        self.result: bool | None = None
         self._closed = False
-        self._maximum = max(1, int(maximum or 1))
         ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
-        self.title("Перейти к строке")
-        self.geometry("360x160")
+        self.title("Сохранить изменения")
+        self.geometry("440x180")
         self.resizable(False, False)
         self.configure(fg_color=INK)
         self.transient(master)
         self.grab_set()
         ctk.CTkLabel(
+            self, text=path, wraplength=400, justify="left", anchor="w", text_color=TEXT, font=(ui, 13)
+        ).pack(fill="x", padx=16, pady=(16, 6))
+        ctk.CTkLabel(
             self,
-            text=f"Номер строки (1–{self._maximum})",
+            text="Сохранить изменения?",
+            wraplength=400,
+            justify="left",
             anchor="w",
             text_color=MUTED,
             font=(ui, 12),
-        ).pack(fill="x", padx=16, pady=(16, 4))
-        self.entry = ctk.CTkEntry(
-            self,
-            fg_color=FIELD,
-            border_color=BORDER,
-            text_color=TEXT,
-            height=36,
-            corner_radius=12,
-            font=(ui, 12),
-        )
-        self.entry.pack(fill="x", padx=16, pady=4)
-        self.entry.insert(0, str(max(1, int(current or 1))))
-        self.entry.select_range(0, "end")
+        ).pack(fill="x", padx=16, pady=4)
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(pady=12)
-        quiet_button(row, "Отмена", self._cancel, width=120, mark="close", family=ui).pack(side="left", padx=8)
-        quiet_button(row, "Перейти", self._ok, width=140, primary=True, mark="check", family=ui).pack(
-            side="left", padx=8
+        row.pack(pady=14)
+        quiet_button(row, "Не сохранять", self._discard, width=120, family=ui).pack(side="left", padx=6)
+        quiet_button(row, "Отмена", self._cancel, width=100, mark="close", family=ui).pack(side="left", padx=6)
+        quiet_button(row, "Сохранить", self._save, width=120, primary=True, mark="check", family=ui).pack(
+            side="left", padx=6
         )
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.bind("<Escape>", lambda _event: self._cancel())
-        self.entry.bind("<Return>", lambda _event: self._ok())
-        self.after(50, self.entry.focus)
+        self.after(50, self.focus)
 
-    def _ok(self) -> None:
+    def _save(self) -> None:
         if self._closed:
             return
-        raw = (self.entry.get() or "").strip()
-        try:
-            line = int(raw)
-        except ValueError:
+        self._closed = True
+        self.result = True
+        self.grab_release()
+        self.destroy()
+
+    def _discard(self) -> None:
+        if self._closed:
             return
         self._closed = True
-        self.result = max(1, min(line, self._maximum))
+        self.result = False
         self.grab_release()
         self.destroy()
 
@@ -1909,6 +1907,8 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_width = 420
+        self.editor_tabs = EditorTabs()
+        self._editor_tab_buttons: list = []
         self._highlight_job = None
         self._task_height = _TASK_MIN_H
         self._task_width = 0
@@ -2237,17 +2237,11 @@ class App(ctk.CTk):
         editor_head = ctk.CTkFrame(self.editor_frame, fg_color="transparent")
         editor_head.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         editor_head.grid_columnconfigure(0, weight=1)
-        self.editor_title = ctk.CTkLabel(editor_head, text="", anchor="w", text_color=TEXT)
-        self.editor_title.grid(row=0, column=0, sticky="ew")
-        # Высота как у «Сжать» в футере (24); без крупных glyph-иконок.
-        quiet_button(editor_head, "Строка", self._goto_editor_line, width=52, height=24).grid(
-            row=0, column=1, padx=(6, 2)
-        )
+        self.editor_tabs_bar = ctk.CTkFrame(editor_head, fg_color="transparent")
+        self.editor_tabs_bar.grid(row=0, column=0, sticky="ew")
+        # Высота как у «Сжать» в футере (24); закрытие — × на вкладке.
         quiet_button(editor_head, "Сохранить", lambda: self._save_editor(confirm=False), width=72, height=24).grid(
-            row=0, column=2, padx=2
-        )
-        quiet_button(editor_head, "Закрыть", self._close_editor, width=64, height=24).grid(
-            row=0, column=3, padx=(2, 0)
+            row=0, column=1, padx=(6, 0)
         )
         editor_body = ctk.CTkFrame(self.editor_frame, fg_color=FIELD, corner_radius=0)
         self.editor_body = editor_body
@@ -2812,7 +2806,7 @@ class App(ctk.CTk):
         try:
             self._refresh_tree()
             self._refresh_git_badge()
-            if self.editor_open and not self._editor_dirty():
+            if self.editor_open:
                 self._reload_clean_editor()
         except Exception:
             return
@@ -3531,7 +3525,12 @@ class App(ctk.CTk):
         relative = normalize_relative(relative)
         if not relative:
             return
-        if self.editor_open and relative == self.editor_path:
+        self._flush_editor_to_tab()
+        existing = self.editor_tabs.find(relative)
+        if existing >= 0:
+            self.editor_tabs.select(existing)
+            self._load_active_tab_into_editor()
+            self._rebuild_editor_tab_bar()
             self._jump_editor_line(line)
             return
         try:
@@ -3539,10 +3538,9 @@ class App(ctk.CTk):
         except PathError as exc:
             self.write_chat(f"Файл не открыт: {exc}")
             return
-        if self.editor_open and self._editor_dirty():
-            if not self._ask(self.editor_path, "Открыть другой файл без записи?"):
-                return
-        self._show_editor(relative, text)
+        self.editor_tabs.open(relative, text)
+        self._load_active_tab_into_editor()
+        self._rebuild_editor_tab_bar()
         self.after(20, lambda: self._jump_editor_line(line))
 
     def _jump_editor_line(self, line: int) -> None:
@@ -3558,13 +3556,20 @@ class App(ctk.CTk):
         except (tk.TclError, ValueError, TypeError):
             return
 
-    def _show_editor(self, relative: str, text: str) -> None:
-        self.editor_path = relative
-        self.editor_saved = text
-        self.editor_title.configure(text=relative)
+    def _flush_editor_to_tab(self) -> None:
+        if not self.editor_open or not self.editor_tabs:
+            return
+        self.editor_tabs.sync_active_text(self._editor_text())
+
+    def _load_active_tab_into_editor(self) -> None:
+        tab = self.editor_tabs.active()
+        if tab is None:
+            return
+        self.editor_path = tab.path
+        self.editor_saved = tab.saved
         self.editor_box.delete("1.0", "end")
-        if text:
-            self.editor_box.insert("1.0", text)
+        if tab.text:
+            self.editor_box.insert("1.0", tab.text)
         self.editor_box.mark_set("insert", "1.0")
         self.editor_box.see("1.0")
         try:
@@ -3579,15 +3584,101 @@ class App(ctk.CTk):
             self.after(30, self._place_editor_sash)
         self.editor_box.focus_set()
 
+    def _rebuild_editor_tab_bar(self) -> None:
+        bar = getattr(self, "editor_tabs_bar", None)
+        if bar is None:
+            return
+        for child in bar.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._editor_tab_buttons = []
+        face = self.ui_font or DEFAULT_UI_FONT
+        for index, tab in enumerate(self.editor_tabs.tabs):
+            active = index == self.editor_tabs.active_index
+            label = tab.label()
+            name_w = max(48, min(120, 10 + len(label) * 7))
+            wrap = ctk.CTkFrame(
+                bar,
+                fg_color=SEND if active else BUTTON,
+                corner_radius=8,
+                border_width=0 if active else 1,
+                border_color=BORDER,
+            )
+            wrap.pack(side="left", padx=(0, 4))
+            name_btn = ctk.CTkButton(
+                wrap,
+                text=label,
+                width=name_w,
+                height=22,
+                corner_radius=6,
+                border_width=0,
+                fg_color="transparent",
+                hover_color=SEND_HOVER if active else BUTTON_HOVER,
+                text_color=ON_SEND if active else TEXT,
+                font=(face, 11),
+                command=lambda i=index: self._select_editor_tab(i),
+            )
+            name_btn.pack(side="left", padx=(4, 0), pady=1)
+            close_btn = ctk.CTkButton(
+                wrap,
+                text="×",
+                width=22,
+                height=22,
+                corner_radius=6,
+                border_width=0,
+                fg_color="transparent",
+                hover_color=SEND_HOVER if active else BUTTON_HOVER,
+                text_color=ON_SEND if active else MUTED,
+                font=(face, 14),
+                command=lambda i=index: self._close_editor_tab(i),
+            )
+            close_btn.pack(side="left", padx=(0, 2), pady=1)
+            self._editor_tab_buttons.append(name_btn)
+
+    def _refresh_editor_tab_labels(self) -> None:
+        buttons = getattr(self, "_editor_tab_buttons", None) or []
+        tabs = self.editor_tabs.tabs
+        if len(buttons) != len(tabs):
+            self._rebuild_editor_tab_bar()
+            return
+        for btn, tab in zip(buttons, tabs):
+            label = tab.label()
+            try:
+                if btn.cget("text") != label:
+                    self._rebuild_editor_tab_bar()
+                    return
+            except tk.TclError:
+                self._rebuild_editor_tab_bar()
+                return
+
+    def _select_editor_tab(self, index: int) -> None:
+        if index == self.editor_tabs.active_index:
+            return
+        self._flush_editor_to_tab()
+        if self.editor_tabs.select(index) is None:
+            return
+        self._load_active_tab_into_editor()
+        self._rebuild_editor_tab_bar()
+
     def _reload_clean_editor(self) -> None:
-        if not self.editor_open or self.project is None or self._editor_dirty():
+        if not self.editor_open or self.project is None or not self.editor_tabs:
             return
-        try:
-            text = self._editor_source(self.editor_path)
-        except PathError:
-            return
-        if text != self.editor_saved:
-            self._show_editor(self.editor_path, text)
+        self._flush_editor_to_tab()
+        active_changed = False
+        for tab in list(self.editor_tabs.tabs):
+            if tab.dirty:
+                continue
+            try:
+                text = self._editor_source(tab.path)
+            except PathError:
+                continue
+            if self.editor_tabs.apply_disk_if_clean(tab.path, text):
+                active_changed = True
+        if active_changed:
+            self._load_active_tab_into_editor()
+        self._refresh_editor_tab_labels()
 
     def _editor_source(self, relative: str) -> str:
         text = read_text_file(self.project, relative)
@@ -3603,7 +3694,11 @@ class App(ctk.CTk):
             return 1
 
     def _editor_dirty(self) -> bool:
-        return self.editor_open and self._editor_text() != self.editor_saved
+        if not self.editor_open:
+            return False
+        self._flush_editor_to_tab()
+        tab = self.editor_tabs.active()
+        return bool(tab and tab.dirty)
 
     def _style_editor_gutter(self) -> None:
         gutter = getattr(self, "editor_gutter", None)
@@ -3753,6 +3848,8 @@ class App(ctk.CTk):
                 self.editor_box._textbox.edit_modified(False)
                 self._update_editor_gutter()
                 self._schedule_editor_highlight()
+                self._flush_editor_to_tab()
+                self._refresh_editor_tab_labels()
         except tk.TclError:
             return
 
@@ -3774,28 +3871,11 @@ class App(ctk.CTk):
             return
         key = str(getattr(event, "keysym", "") or "").lower()
         code = int(getattr(event, "keycode", 0) or 0)
-        # S / Ы (save), G / П (goto) — keycode устойчив к раскладке на Windows.
+        # S / Ы (save) — keycode устойчив к раскладке на Windows.
         if key in {"s", "ы"} or code == 83:
             self._save_editor(confirm=False)
             return "break"
-        if key in {"g", "п"} or code == 71:
-            self._goto_editor_line()
-            return "break"
         return _on_layout_clipboard(event)
-
-    def _goto_editor_line(self) -> None:
-        if not self.editor_open:
-            return
-        try:
-            current = int(str(self.editor_box._textbox.index("insert")).split(".")[0])
-        except (tk.TclError, ValueError):
-            current = 1
-        dialog = GotoLineDialog(self, current=current, maximum=self._editor_line_count())
-        self.wait_window(dialog)
-        line = dialog.result
-        if line is None:
-            return
-        self._jump_editor_line(line)
 
     def _place_editor_sash(self, tries: int = 0) -> None:
         if not self.editor_open:
@@ -3820,37 +3900,72 @@ class App(ctk.CTk):
             return
         self.editor_width = max(240, total - left)
 
-    def _save_editor(self, confirm: bool = False) -> None:
+    def _save_editor(self, confirm: bool = False) -> bool:
         if not self.editor_open or self.project is None:
-            return
-        text = self._editor_text()
-        if text == self.editor_saved:
-            self.set_status("Изменений нет")
-            return
-        if confirm and not self._ask(self.editor_path, "Записать файл?"):
-            return
+            return False
+        self._flush_editor_to_tab()
+        return self._save_editor_tab(self.editor_tabs.active_index, confirm=confirm)
+
+    def _save_editor_tab(self, index: int, confirm: bool = False) -> bool:
+        if self.project is None or not (0 <= index < len(self.editor_tabs)):
+            return False
+        tab = self.editor_tabs.tabs[index]
+        text = tab.text
+        if index == self.editor_tabs.active_index:
+            text = self._editor_text()
+            tab.text = text
+        if text == tab.saved:
+            if index == self.editor_tabs.active_index:
+                self.set_status("Изменений нет")
+            return True
+        if confirm and not self._ask(tab.path, "Записать файл?"):
+            return False
         try:
-            full = resolve_inside(self.project, self.editor_path)
+            full = resolve_inside(self.project, tab.path)
             if full.exists() and full.is_dir():
                 raise PathError("это папка, не файл")
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text(text, encoding="utf-8", newline="\n")
         except (OSError, PathError) as exc:
             self.write_chat(f"Файл не записан: {exc}")
-            return
-        self.editor_saved = text
+            return False
+        self.editor_tabs.mark_saved_at(index, text)
+        if index == self.editor_tabs.active_index:
+            self.editor_saved = text
+        self._refresh_editor_tab_labels()
         self._refresh_git_badge()
         self.set_status("Файл записан")
+        return True
 
-    def _close_editor(self) -> None:
-        self._release_editor(ask=True)
+    def _ask_save_changes(self, path: str) -> bool | None:
+        dialog = SaveChangesDialog(self, path)
+        self._dialog = dialog
+        self.wait_window(dialog)
+        self._dialog = None
+        return dialog.result
 
-    def _release_editor(self, ask: bool) -> bool:
-        if not self.editor_open:
-            return True
-        if ask and self._editor_dirty():
-            if not self._ask(self.editor_path, "Закрыть файл без записи?"):
-                return False
+    def _close_editor_tab(self, index: int) -> None:
+        if not self.editor_open or not (0 <= index < len(self.editor_tabs)):
+            return
+        self._flush_editor_to_tab()
+        tab = self.editor_tabs.tabs[index]
+        if tab.dirty:
+            choice = self._ask_save_changes(tab.path)
+            if choice is None:
+                return
+            if choice:
+                if not self._save_editor_tab(index, confirm=False):
+                    return
+        was_active = index == self.editor_tabs.active_index
+        nxt = self.editor_tabs.close_at(index)
+        if nxt is None:
+            self._hide_editor_panel()
+            return
+        if was_active:
+            self._load_active_tab_into_editor()
+        self._rebuild_editor_tab_bar()
+
+    def _hide_editor_panel(self) -> None:
         job = getattr(self, "_highlight_job", None)
         if job is not None:
             try:
@@ -3865,6 +3980,7 @@ class App(ctk.CTk):
         self.editor_open = False
         self.editor_path = ""
         self.editor_saved = ""
+        self.editor_tabs.close_all()
         self.editor_box.delete("1.0", "end")
         try:
             self.editor_gutter.configure(state="normal")
@@ -3872,7 +3988,16 @@ class App(ctk.CTk):
             self.editor_gutter.configure(state="disabled")
         except tk.TclError:
             pass
-        self.editor_title.configure(text="")
+        self._rebuild_editor_tab_bar()
+
+    def _release_editor(self, ask: bool) -> bool:
+        if not self.editor_open:
+            return True
+        self._flush_editor_to_tab()
+        if ask and self.editor_tabs.any_dirty():
+            if not self._ask("вкладки", "Закрыть несохранённые вкладки без записи?"):
+                return False
+        self._hide_editor_panel()
         return True
 
     def _ask(self, path: str, summary: str) -> bool:

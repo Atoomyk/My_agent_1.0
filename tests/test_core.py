@@ -826,6 +826,64 @@ class SyntaxHighlightTests(unittest.TestCase):
         self.assertEqual(tokenize("x", None), [])
 
 
+class EditorTabTests(unittest.TestCase):
+    def test_open_switch_dirty_close(self):
+        from project_agent.editor_tabs import EditorTabs
+
+        tabs = EditorTabs()
+        self.assertFalse(tabs)
+        self.assertEqual(tabs.open("a.py", "one"), 0)
+        self.assertEqual(tabs.open("b.py", "two"), 1)
+        self.assertEqual(len(tabs), 2)
+        self.assertEqual(tabs.open("a.py", "ignored"), 0)
+        self.assertEqual(tabs.active().path, "a.py")
+        self.assertEqual(tabs.active().text, "one")
+
+        tabs.sync_active_text("one!")
+        self.assertTrue(tabs.active().dirty)
+        self.assertEqual(tabs.active().label(), "a.py ●")
+        self.assertTrue(tabs.any_dirty())
+
+        tabs.select(1)
+        self.assertEqual(tabs.active().path, "b.py")
+        self.assertFalse(tabs.active().dirty)
+        tabs.mark_saved("two-saved")
+        self.assertEqual(tabs.active().saved, "two-saved")
+        self.assertFalse(tabs.active().dirty)
+
+        tabs.select(0)
+        nxt = tabs.close_active()
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt.path, "b.py")
+        self.assertEqual(len(tabs), 1)
+        tabs.open("c.py", "three")
+        self.assertEqual(len(tabs), 2)
+        tabs.select(1)
+        left = tabs.close_at(0)
+        self.assertEqual(left.path, "c.py")
+        self.assertEqual(len(tabs), 1)
+        self.assertIsNone(tabs.close_active())
+        self.assertFalse(tabs)
+
+    def test_apply_disk_if_clean(self):
+        from project_agent.editor_tabs import EditorTabs
+
+        tabs = EditorTabs()
+        tabs.open("src/x.py", "v1")
+        self.assertTrue(tabs.apply_disk_if_clean("src/x.py", "v2"))
+        self.assertEqual(tabs.active().text, "v2")
+        tabs.open("y.md", "# y")
+        self.assertFalse(tabs.apply_disk_if_clean("src/x.py", "v3"))
+        tabs.select(0)
+        self.assertEqual(tabs.active().text, "v3")
+        tabs.sync_active_text("dirty")
+        self.assertFalse(tabs.apply_disk_if_clean("src/x.py", "v4"))
+        self.assertEqual(tabs.active().text, "dirty")
+        self.assertFalse(tabs.apply_disk_if_clean("y.md", "# y2"))
+        tabs.select(1)
+        self.assertEqual(tabs.active().text, "# y2")
+
+
 class HunkTests(unittest.TestCase):
     def test_split_merge_and_turn_diff(self):
         import tempfile
