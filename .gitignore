@@ -8,3 +8,4 @@ config.json
 crash.log
 README.md
 .idea/
+.env

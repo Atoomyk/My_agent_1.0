@@ -732,6 +732,33 @@ class TestRunnerTests(unittest.TestCase):
 
 
 class GitOpsTests(unittest.TestCase):
+    def test_parse_status_paths_and_dirty_dirs(self):
+        from project_agent.gitops import dirty_ancestor_dirs, parse_status_paths
+
+        output = "\n".join(
+            [
+                "## main",
+                " M src/app.py",
+                "?? new.txt",
+                " D gone.py",
+                "A  added.py",
+                "R  old.py -> renamed.py",
+                "?? pkg/",
+            ]
+        )
+        paths = parse_status_paths(output)
+        self.assertEqual(paths.get("src/app.py"), "modified")
+        self.assertEqual(paths.get("new.txt"), "untracked")
+        self.assertEqual(paths.get("gone.py"), "deleted")
+        self.assertEqual(paths.get("added.py"), "untracked")
+        self.assertEqual(paths.get("old.py"), "deleted")
+        self.assertEqual(paths.get("renamed.py"), "untracked")
+        self.assertEqual(paths.get("pkg/"), "untracked")
+        dirs = dirty_ancestor_dirs(paths)
+        self.assertIn("src", dirs)
+        self.assertIn("pkg", dirs)
+        self.assertNotIn("src/app.py", dirs)
+
     def test_status_diff_log_and_commit_confirm(self):
         import shutil
         import subprocess
@@ -743,6 +770,7 @@ class GitOpsTests(unittest.TestCase):
             git_log,
             git_status,
             parse_status_head,
+            parse_status_paths,
             preview_commit_diff,
             preview_unified,
         )
@@ -770,6 +798,8 @@ class GitOpsTests(unittest.TestCase):
             self.assertEqual(untracked, 0)
             self.assertIn("M", format_git_badge(branch, modified, untracked))
             self.assertIn("·", git_badge(root))
+            paths = parse_status_paths(status.output)
+            self.assertEqual(paths.get("a.txt"), "modified")
             commit_preview = preview_commit_diff(root, ["a.txt"], False)
             self.assertIn("+two", commit_preview)
             diff = git_diff(root, "a.txt")

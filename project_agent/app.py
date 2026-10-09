@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import multiprocessing
+import os
 import re
 import shlex
 import threading
@@ -13,7 +14,7 @@ from tkinter import filedialog, ttk
 from tkinter import font as tkfont
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from project_agent.agent import Agent
 from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
@@ -113,6 +114,9 @@ CTX_FULL = ("#c45a4a", "#d46a5a")
 DIFF_ADD = ("#2f6b3c", "#7dba8a")
 DIFF_DEL = ("#a33d3d", "#e08a8a")
 DIFF_HUNK = ("#6a5a8a", "#b0a0d0")
+GIT_MOD = ("#b8860b", "#e0b84a")  # modified / dirty folder
+GIT_NEW = ("#2f6b3c", "#7dba8a")  # untracked / added
+GIT_DEL = ("#a33d3d", "#e08a8a")  # deleted (если ещё виден в дереве)
 SEARCH_BG = ("#efe0b8", "#4a3f24")
 SEARCH_CUR = ("#e0b86a", "#7a5e28")
 CHAT_COLUMN = 820
@@ -1396,6 +1400,8 @@ class App(ctk.CTk):
         self.auto_write_var = ctk.BooleanVar(value=False)
         self.prefer_cheap_provider = False
         self.prefer_cheap_var = ctk.BooleanVar(value=False)
+        self._git_file_status: dict[str, str] = {}
+        self._git_dirty_dirs: set[str] = set()
         self._build()
         self._load()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1492,6 +1498,7 @@ class App(ctk.CTk):
         self.tree.bind("<<TreeviewOpen>>", self._tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_click)
         self.tree.bind("<Button-3>", self._file_menu)
+        self._configure_git_tree_tags()
         self.chat_tree = ttk.Treeview(self.chat_pane, show="tree", selectmode="browse", style="Chats.Treeview")
         self.chat_tree.grid(row=0, column=0, sticky="nsew")
         chat_scroll = ctk.CTkScrollbar(
@@ -1904,14 +1911,19 @@ class App(ctk.CTk):
         except tk.TclError:
             return
         if self.project is None:
-            label.configure(text="")
+            try:
+                label.configure(text="", text_color=_tone(MUTED))
+            except tk.TclError:
+                pass
+            self._git_file_status = {}
+            self._git_dirty_dirs = set()
             return
+        text = self._reload_git_decorations(apply=True)
         try:
-            from project_agent.gitops import git_badge
-
-            label.configure(text=git_badge(self.project))
-        except Exception:
-            label.configure(text="")
+            dirty = bool(text) and not str(text).endswith(" · clean")
+            label.configure(text=text, text_color=_tone(GIT_MOD if dirty else MUTED))
+        except tk.TclError:
+            return
 
     def _on_git_badge_click(self) -> None:
         if self.project is None or self.running:
@@ -1922,11 +1934,225 @@ class App(ctk.CTk):
             result = git_status(self.project)
             body = result.output or "(чисто)"
             self.write_chat(f"git status:\n{body}")
-            self._refresh_git_badge()
+            from project_agent.gitops import dirty_ancestor_dirs, format_git_badge, parse_status_head, parse_status_paths
+
+            self._git_file_status = parse_status_paths(result.output)
+            self._git_dirty_dirs = dirty_ancestor_dirs(self._git_file_status)
+            branch, modified, untracked = parse_status_head(result.output)
+            badge = format_git_badge(branch, modified, untracked)
+            label = getattr(self, "git_label", None)
+            if label is not None:
+                try:
+                    dirty = bool(badge) and not str(badge).endswith(" · clean")
+                    label.configure(text=badge, text_color=_tone(GIT_MOD if dirty else MUTED))
+                except tk.TclError:
+                    pass
+            self._apply_git_tree_tags()
         except GitError as exc:
             self.write_chat(f"git: {exc}")
         except Exception as exc:
             self.write_chat(f"git: {exc}")
+
+    def _reload_git_decorations(self, apply: bool = False) -> str:
+        """Обновить кэш dirty-путей. Возвращает текст Git badge или ''."""
+        self._git_file_status = {}
+        self._git_dirty_dirs = set()
+        if self.project is None:
+            return ""
+        try:
+            from project_agent.gitops import (
+                dirty_ancestor_dirs,
+                format_git_badge,
+                git_status,
+                parse_status_head,
+                parse_status_paths,
+            )
+
+            result = git_status(self.project)
+            self._git_file_status = parse_status_paths(result.output)
+            self._git_dirty_dirs = dirty_ancestor_dirs(self._git_file_status)
+            branch, modified, untracked = parse_status_head(result.output)
+            badge = format_git_badge(branch, modified, untracked)
+        except Exception:
+            self._git_file_status = {}
+            self._git_dirty_dirs = set()
+            badge = ""
+        if apply:
+            self._apply_git_tree_tags()
+        return badge
+
+    def _clear_tree_label_cache(self) -> None:
+        self._tree_text_photos = {}
+        self._pil_font_cache = {}
+
+    def _tree_label_px(self) -> int:
+        scale = ctk.ScalingTracker.get_widget_scaling(self)
+        return max(14, round(14 * scale))
+
+    def _pil_ui_font(self, size: int = 14):
+        key = (self.ui_font, size)
+        cache = getattr(self, "_pil_font_cache", None)
+        if cache is None:
+            self._pil_font_cache = {}
+            cache = self._pil_font_cache
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        family = (self.ui_font or "").lower().replace(" ", "")
+        mapped = {
+            "segoeui": ["segoeui.ttf"],
+            "arial": ["arial.ttf"],
+            "tahoma": ["tahoma.ttf"],
+            "calibri": ["calibri.ttf"],
+            "verdana": ["verdana.ttf"],
+            "timesnewroman": ["times.ttf"],
+            "couriernew": ["cour.ttf"],
+        }
+        candidates: list[Path] = []
+        for name, files in mapped.items():
+            if name == family or name in family or family in name:
+                candidates.extend(fonts_dir / item for item in files)
+        raw = (self.ui_font or "").replace(" ", "")
+        if raw:
+            candidates.append(fonts_dir / f"{raw}.ttf")
+            candidates.append(fonts_dir / f"{raw}.TTF")
+        candidates.extend(
+            [
+                fonts_dir / "segoeui.ttf",
+                fonts_dir / "arial.ttf",
+                fonts_dir / "tahoma.ttf",
+            ]
+        )
+        for path in candidates:
+            try:
+                if path.is_file():
+                    font = ImageFont.truetype(str(path), size=size)
+                    cache[key] = font
+                    return font
+            except OSError:
+                continue
+        font = ImageFont.load_default()
+        cache[key] = font
+        return font
+
+    def _tree_text_photo(self, text: str, fill: str) -> ImageTk.PhotoImage:
+        mode = ctk.get_appearance_mode()
+        px = self._tree_label_px()
+        key = (text, fill, mode, self.ui_font, px)
+        cache = getattr(self, "_tree_text_photos", None)
+        if cache is None:
+            self._tree_text_photos = {}
+            cache = self._tree_text_photos
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        font = self._pil_ui_font(px)
+        left, top, right, bottom = font.getbbox(text or " ")
+        width = max(1, right - left + 2)
+        height = max(px + 6, bottom - top + 4)
+        sheet = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(sheet).text((-left + 1, -top + 1), text or " ", font=font, fill=fill)
+        photo = ImageTk.PhotoImage(sheet)
+        cache[key] = photo
+        if len(cache) > 800:
+            # Сброс при раздувании: следующие обращения пересоберут нужное.
+            self._tree_text_photos = {key: photo}
+        return photo
+
+    def _configure_git_tree_tags(self) -> None:
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+        try:
+            tree.tag_configure("file")
+            tree.tag_configure("dir")
+            tree.tag_configure("git_modified")
+            tree.tag_configure("git_untracked")
+            tree.tag_configure("git_deleted")
+            tree.tag_configure("git_dir_dirty")
+        except tk.TclError:
+            return
+
+    def _tree_item_tags(self, rel: str, is_dir: bool) -> tuple[str, ...]:
+        from project_agent.gitops import git_path_kind
+
+        if is_dir:
+            if rel == ".":
+                if self._git_file_status or self._git_dirty_dirs:
+                    return ("dir", "git_dir_dirty")
+                return ("dir",)
+            if rel in self._git_dirty_dirs or git_path_kind(self._git_file_status, rel):
+                return ("dir", "git_dir_dirty")
+            return ("dir",)
+        kind = git_path_kind(self._git_file_status, rel)
+        if kind == "modified":
+            return ("file", "git_modified")
+        if kind == "untracked":
+            return ("file", "git_untracked")
+        if kind == "deleted":
+            return ("file", "git_deleted")
+        return ("file",)
+
+    def _tree_item_fill(self, tags: tuple[str, ...] | list[str] | set[str]) -> str:
+        tagset = set(tags or ())
+        if "git_deleted" in tagset:
+            return _tone(GIT_DEL)
+        if "git_untracked" in tagset:
+            return _tone(GIT_NEW)
+        if "git_modified" in tagset or "git_dir_dirty" in tagset:
+            return _tone(GIT_MOD)
+        return _tone(TEXT)
+
+    def _tree_item_caption(self, name: str, is_dir: bool, tags: tuple[str, ...] | list[str]) -> str:
+        # У dirty-папок точка справа через 5 пробелов (цвет имени — в PIL-подписи).
+        if is_dir and "git_dir_dirty" in set(tags or ()):
+            return f"{name}     ●"
+        return name
+
+    def _tree_item_image(self, name: str, is_dir: bool, tags: tuple[str, ...] | list[str]) -> ImageTk.PhotoImage:
+        caption = self._tree_item_caption(name, is_dir, tags)
+        return self._tree_text_photo(caption, self._tree_item_fill(tags))
+
+    def _tree_entry_name(self, iid: str) -> str:
+        if iid == ".":
+            if self.project is not None:
+                return self.project.name or str(self.project)
+            return "."
+        return iid.rsplit("/", 1)[-1]
+
+    def _apply_git_tree_tags(self) -> None:
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+
+        def walk(node: str) -> None:
+            for child in tree.get_children(node):
+                iid = str(child)
+                if iid.startswith(_PENDING):
+                    continue
+                tags = set(tree.item(iid, "tags") or ())
+                is_dir = iid == "." or "dir" in tags
+                if "file" in tags:
+                    is_dir = False
+                try:
+                    new_tags = self._tree_item_tags(iid, is_dir)
+                    name = self._tree_entry_name(iid)
+                    tree.item(
+                        iid,
+                        text="",
+                        tags=new_tags,
+                        image=self._tree_item_image(name, is_dir, new_tags),
+                    )
+                except tk.TclError:
+                    continue
+                if is_dir:
+                    walk(iid)
+
+        try:
+            walk("")
+        except tk.TclError:
+            return
 
     def _refresh_rules_label(self) -> None:
         label = self.rules_label
@@ -2197,19 +2423,20 @@ class App(ctk.CTk):
         style = ttk.Style()
         if "clam" in style.theme_names():
             style.theme_use("clam")
+        # Подписи файлов — цветные PIL-image (ttk tag foreground на Windows ненадёжен).
+        self._clear_tree_label_cache()
         style.configure(
             "Project.Treeview",
             background=_tone(PANEL),
             fieldbackground=_tone(PANEL),
-            foreground=_tone(TEXT),
             borderwidth=0,
-            rowheight=24,
-            font=(self.ui_font, 10),
+            # Межстрочный зазор −30% относительно прежнего (px+8).
+            rowheight=max(self._tree_label_px() + 2, round(self._tree_label_px() + 8 * 0.7)),
+            font=(self.ui_font, 14),
         )
         style.map(
             "Project.Treeview",
             background=[("selected", _tone(SELECT))],
-            foreground=[("selected", _tone(TEXT))],
         )
         style.configure(
             "Chats.Treeview",
@@ -2223,12 +2450,29 @@ class App(ctk.CTk):
         )
         style.layout("Chats.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.layout("Project.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.layout(
+            "Project.Treeview.Item",
+            [
+                (
+                    "Treeitem.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            ("Treeitem.indicator", {"side": "left", "sticky": ""}),
+                            ("Treeitem.image", {"side": "left", "sticky": ""}),
+                            ("Treeitem.text", {"side": "left", "sticky": ""}),
+                        ],
+                    },
+                )
+            ],
+        )
         style.layout("Chats.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [("Treeitem.text", {"sticky": "nswe"})]})])
         style.map(
             "Chats.Treeview",
             background=[("selected", _tone(SELECT))],
             foreground=[("selected", _tone(TEXT))],
         )
+        self._configure_git_tree_tags()
 
     def _refresh_tree(self) -> None:
         if not hasattr(self, "tree"):
@@ -2236,9 +2480,22 @@ class App(ctk.CTk):
         reopen = self._expanded_paths()
         self.tree.delete(*self.tree.get_children())
         if self.project is None or not self.project.is_dir():
+            self._git_file_status = {}
+            self._git_dirty_dirs = set()
             self.tree.insert("", "end", text="Папка не выбрана")
             return
-        self.tree.insert("", "end", iid=".", text=self.project.name or str(self.project), open=True, tags=("dir",))
+        self._reload_git_decorations(apply=False)
+        root_tags = self._tree_item_tags(".", True)
+        root_name = self.project.name or str(self.project)
+        self.tree.insert(
+            "",
+            "end",
+            iid=".",
+            text="",
+            open=True,
+            tags=root_tags,
+            image=self._tree_item_image(root_name, True, root_tags),
+        )
         self._fill_node(".", reopen)
 
     def _expanded_paths(self) -> set[str]:
@@ -2266,8 +2523,15 @@ class App(ctk.CTk):
             return
         for name, is_dir in entries:
             rel = name if iid == "." else f"{iid}/{name}"
+            tags = self._tree_item_tags(rel, is_dir)
             self.tree.insert(
-                iid, "end", iid=rel, text=name, open=False, tags=("dir",) if is_dir else ("file",)
+                iid,
+                "end",
+                iid=rel,
+                text="",
+                open=False,
+                tags=tags,
+                image=self._tree_item_image(name, is_dir, tags),
             )
             if not is_dir:
                 continue
@@ -2288,7 +2552,10 @@ class App(ctk.CTk):
             return
         children = self.tree.get_children(iid)
         if len(children) == 1 and str(children[0]).startswith(_PENDING):
+            self._reload_git_decorations(apply=False)
             self._fill_node(iid, set())
+        else:
+            self._reload_git_decorations(apply=True)
 
     def _on_file_click(self, _event=None) -> None:
         selected = self.tree.selection()
@@ -2386,6 +2653,7 @@ class App(ctk.CTk):
             self.write_chat(f"Файл не записан: {exc}")
             return
         self.editor_saved = text
+        self._refresh_git_badge()
         self.set_status("Файл записан")
 
     def _close_editor(self) -> None:
@@ -2853,7 +3121,7 @@ class App(ctk.CTk):
         if hasattr(self, "placeholder"):
             self.placeholder.configure(fg=_tone(HINT), bg=_tone(FIELD), font=self._font(11))
         if hasattr(self, "git_label"):
-            self.git_label.configure(text_color=MUTED)
+            self._refresh_git_badge()
         if hasattr(self, "output_frame"):
             self.output_frame.configure(fg_color=PANEL)
             self.output_title.configure(text_color=MUTED)
@@ -2942,6 +3210,8 @@ class App(ctk.CTk):
                 pass
         if hasattr(self, "tree"):
             self._style_tree()
+            if self.project is not None:
+                self._refresh_tree()
         if persist:
             try:
                 if ui is not None:
@@ -4357,6 +4627,7 @@ class App(ctk.CTk):
         self._store_chat()
         self._refresh_tree()
         self._reload_clean_editor()
+        self._refresh_git_badge()
         if failed:
             self.set_status(f"Правки откачены ({len(failed)} без снимка)")
         else:

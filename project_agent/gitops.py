@@ -99,6 +99,80 @@ def parse_status_head(output: str) -> tuple[str, int, int]:
     return branch, modified, untracked
 
 
+def _unquote_git_path(raw: str) -> str:
+    text = (raw or "").strip().replace("\\", "/")
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return text.strip().strip("/")
+
+
+def _classify_xy(code: str) -> str:
+    """XY из status --short → modified|untracked|deleted."""
+    xy = (code or "  ")[:2]
+    if xy == "??":
+        return "untracked"
+    if "D" in xy and "R" not in xy and "C" not in xy and "A" not in xy:
+        return "deleted"
+    if "A" in xy and "D" not in xy:
+        return "untracked"
+    return "modified"
+
+
+def parse_status_paths(output: str) -> dict[str, str]:
+    """Пути из `git status --short` → modified|untracked|deleted (posix rel)."""
+    found: dict[str, str] = {}
+    for raw in (output or "").splitlines():
+        line = raw.rstrip()
+        if not line or line.startswith("##") or len(line) < 2:
+            continue
+        code = line[:2]
+        rest = line[3:] if len(line) > 2 and line[2] == " " else line[2:].lstrip()
+        if " -> " in rest:
+            left, right = rest.split(" -> ", 1)
+            old = _unquote_git_path(left)
+            new = _unquote_git_path(right)
+            if old:
+                found[old] = "deleted"
+            if new:
+                found[new] = "untracked"
+            continue
+        was_dir = rest.rstrip().endswith("/")
+        path = _unquote_git_path(rest)
+        if not path:
+            continue
+        key = f"{path}/" if was_dir else path
+        kind = _classify_xy(code)
+        prev = found.get(key)
+        rank = {"untracked": 1, "modified": 2, "deleted": 3}
+        if prev is None or rank.get(kind, 0) >= rank.get(prev, 0):
+            found[key] = kind
+    return found
+
+
+def dirty_ancestor_dirs(paths: dict[str, str]) -> set[str]:
+    """Родительские каталоги (posix) для dirty-путей; untracked dir (path/) сам тоже."""
+    dirs: set[str] = set()
+    for raw in paths:
+        original = str(raw or "").replace("\\", "/")
+        path = original.strip().strip("/")
+        if not path:
+            continue
+        parts = path.split("/")
+        for i in range(len(parts) - 1):
+            dirs.add("/".join(parts[: i + 1]))
+        if original.rstrip().endswith("/"):
+            dirs.add(path)
+    return dirs
+
+
+def git_path_kind(status: dict[str, str], rel: str) -> str:
+    """Статус для iid дерева (файл или папка)."""
+    path = str(rel or "").replace("\\", "/").strip().strip("/")
+    if not path or path == ".":
+        return ""
+    return status.get(path) or status.get(path + "/") or ""
+
+
 def format_git_badge(branch: str, modified: int, untracked: int) -> str:
     if modified <= 0 and untracked <= 0:
         dirty = "clean"
