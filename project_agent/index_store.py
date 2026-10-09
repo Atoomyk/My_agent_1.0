@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from project_agent.config import config_dir
-from project_agent.paths import IGNORE_DIRS, is_binary_name
+from project_agent.paths import IGNORE_DIRS, is_binary_name, normalize_relative
 from project_agent.symbols import (
     is_js_path,
     is_symbol_path,
@@ -177,7 +177,7 @@ def touch_symbols(root: Path, relative: str) -> None:
     data = load_symbols(root)
     if not data.get("built_at"):
         return
-    rel = relative.replace("\\", "/").lstrip("./")
+    rel = normalize_relative(relative)
     if not is_symbol_path(rel):
         if rel in data.get("files", {}):
             data["files"].pop(rel, None)
@@ -245,7 +245,7 @@ def touch_file(root: Path, relative: str, size: int | None = None) -> None:
     data = load_index(root)
     if not data.get("files") and not data.get("built_at"):
         return
-    rel = relative.replace("\\", "/").lstrip("./")
+    rel = normalize_relative(relative)
     full = root / rel
     binary = is_binary_name(full)
     try:
@@ -295,7 +295,7 @@ def find_symbols(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[st
 
 
 def list_imports(root: Path, relative: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
-    rel = (relative or "").replace("\\", "/").lstrip("./")
+    rel = normalize_relative(relative or "")
     data = ensure_symbols(root)
     entry = (data.get("files") or {}).get(rel)
     if entry is None:

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from project_agent.paths import IGNORE_DIRS, relative_posix
+from project_agent.paths import IGNORE_DIRS, normalize_relative, relative_posix
 
 _FILE_LINE_RE = re.compile(
     r'File\s+"(?P<path>[^"]+)",\s+line\s+(?P<line>\d+)',
@@ -39,7 +39,7 @@ def _rel_or_empty(root: Path | None, raw: str) -> str:
     if not text:
         return ""
     if root is None:
-        return text.lstrip("./")
+        return normalize_relative(text)
     try:
         full = Path(raw)
         if not full.is_absolute():

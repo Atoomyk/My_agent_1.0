@@ -115,6 +115,15 @@ class SecretTests(unittest.TestCase):
 
 
 class PathTests(unittest.TestCase):
+    def test_normalize_relative_keeps_dotfiles(self):
+        from project_agent.paths import normalize_relative
+
+        self.assertEqual(normalize_relative(".env"), ".env")
+        self.assertEqual(normalize_relative(".gitignore"), ".gitignore")
+        self.assertEqual(normalize_relative("./.env"), ".env")
+        self.assertEqual(normalize_relative("./src/app.py"), "src/app.py")
+        self.assertEqual(normalize_relative("src/app.py"), "src/app.py")
+
     def test_escape_and_ignore(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -132,16 +141,22 @@ class PathTests(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("print(1)\n", encoding="utf-8")
             (root / "readme.txt").write_text("hi\n", encoding="utf-8")
+            (root / ".env").write_text("KEY=1\n", encoding="utf-8", newline="\n")
+            (root / ".gitignore").write_text("*.pyc\n", encoding="utf-8", newline="\n")
             (root / ".git").mkdir()
             (root / ".git" / "config").write_text("secret\n", encoding="utf-8")
             (root / "node_modules").mkdir()
             entries, truncated = list_entries(root)
             self.assertFalse(truncated)
-            self.assertEqual([name for name, _is_dir in entries], ["src", "readme.txt"])
+            names = [name for name, _is_dir in entries]
+            self.assertIn(".env", names)
+            self.assertIn(".gitignore", names)
             nested, _truncated = list_entries(root, "src")
             self.assertEqual([name for name, _is_dir in nested], ["main.py"])
             (root / "plain.txt").write_bytes(b"print(1)\n")
             self.assertEqual(read_text_file(root, "plain.txt"), "print(1)\n")
+            self.assertEqual(read_text_file(root, ".env"), "KEY=1\n")
+            self.assertEqual(read_text_file(root, ".gitignore"), "*.pyc\n")
             (root / "pic.png").write_bytes(b"not-really")
             (root / "notes.txt").write_bytes(b"abc\x00def")
             (root / "wide.txt").write_bytes("привет".encode("utf-16"))
@@ -729,6 +744,86 @@ class TestRunnerTests(unittest.TestCase):
             out = box.execute("write_file", {"path": "a.py", "content": "x=1\n", "summary": "add"})
             self.assertIn("Тронутые за ход: a.py", out.model_text)
             self.assertEqual(box.touched_paths(), ["a.py"])
+
+
+class TreePathIidTests(unittest.TestCase):
+    def test_roundtrip_dotfiles(self):
+        from project_agent.app import tree_path_iid, tree_path_rel
+
+        self.assertEqual(tree_path_iid("."), "n:.")
+        self.assertEqual(tree_path_rel("n:."), ".")
+        self.assertEqual(tree_path_iid(".env"), "n:.env")
+        self.assertEqual(tree_path_rel("n:.env"), ".env")
+        self.assertEqual(tree_path_iid(".gitignore"), "n:.gitignore")
+        self.assertEqual(tree_path_rel("n:.gitignore"), ".gitignore")
+        self.assertEqual(tree_path_iid("src/app.py"), "n:src/app.py")
+        self.assertEqual(tree_path_rel("n:src/app.py"), "src/app.py")
+        self.assertFalse(tree_path_iid(".env").startswith("."))
+
+    def test_tk_accepts_prefixed_dotfile_iid(self):
+        import tkinter as tk
+        from tkinter import ttk
+
+        from project_agent.app import tree_path_iid, tree_path_rel
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            tree = ttk.Treeview(root)
+            parent = tree_path_iid(".")
+            tree.insert("", "end", iid=parent, text="root", open=True, tags=("dir",))
+            for name in (".env", ".gitignore", "readme.md"):
+                iid = tree_path_iid(name)
+                tree.insert(parent, "end", iid=iid, text=name, tags=("file",))
+                tree.selection_set(iid)
+                tree.focus(iid)
+                selected = tree.selection()
+                self.assertTrue(selected)
+                self.assertEqual(tree_path_rel(selected[0]), name)
+                self.assertIn("file", tree.item(selected[0], "tags"))
+        finally:
+            root.destroy()
+
+
+class SyntaxHighlightTests(unittest.TestCase):
+    def test_language_and_tokens(self):
+        from project_agent.syntax import (
+            TAG_COMMENT,
+            TAG_HEADING,
+            TAG_KEYWORD,
+            TAG_LITERAL,
+            TAG_MD_CODE,
+            TAG_NUMBER,
+            TAG_STRING,
+            language_for_path,
+            tokenize,
+        )
+
+        self.assertEqual(language_for_path("a/b.py"), "python")
+        self.assertEqual(language_for_path("x.JSON"), "json")
+        self.assertEqual(language_for_path("readme.md"), "markdown")
+        self.assertIsNone(language_for_path("a.bin"))
+
+        py = 'def foo():\n    # hi\n    return 42\n    s = "ok"\n'
+        tags = {tag for _a, _b, tag in tokenize(py, "python")}
+        self.assertIn(TAG_KEYWORD, tags)
+        self.assertIn(TAG_COMMENT, tags)
+        self.assertIn(TAG_NUMBER, tags)
+        self.assertIn(TAG_STRING, tags)
+
+        js = '{"a": 1, "b": true, "c": null}'
+        jtags = {tag for _a, _b, tag in tokenize(js, "json")}
+        self.assertIn(TAG_STRING, jtags)
+        self.assertIn(TAG_NUMBER, jtags)
+        self.assertIn(TAG_LITERAL, jtags)
+
+        md = "# Title\n\n```py\nx=1\n```\n> quote\n"
+        mtags = {tag for _a, _b, tag in tokenize(md, "markdown")}
+        self.assertIn(TAG_HEADING, mtags)
+        self.assertIn(TAG_MD_CODE, mtags)
+
+        self.assertEqual(tokenize("", "python"), [])
+        self.assertEqual(tokenize("x", None), [])
 
 
 class HunkTests(unittest.TestCase):

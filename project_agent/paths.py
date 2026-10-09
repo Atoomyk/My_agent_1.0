@@ -22,6 +22,14 @@ class PathError(ValueError):
     pass
 
 
+def normalize_relative(raw: str) -> str:
+    """Нормализовать относительный путь. Не трогает ведущую точку в именах (.env)."""
+    rel = str(raw or "").replace("\\", "/").strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
+
 def resolve_inside(root: Path, raw: str) -> Path:
     if raw is None:
         raw = "."

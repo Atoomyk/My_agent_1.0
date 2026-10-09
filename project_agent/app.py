@@ -59,7 +59,14 @@ from project_agent.context_attach import (
 )
 from project_agent.images import prepare_image
 from project_agent.mcp_client import McpHub
-from project_agent.paths import PathError, list_entries, read_text_file, relative_posix, resolve_inside
+from project_agent.paths import (
+    PathError,
+    list_entries,
+    normalize_relative,
+    read_text_file,
+    relative_posix,
+    resolve_inside,
+)
 from project_agent.secrets import Scrubber, SecretVault, literals_from_settings, scrub_outbound
 from project_agent.index_store import build_index, index_summary
 from project_agent.rules import rule_chip_text, rules_summary
@@ -90,7 +97,29 @@ THEME_LABELS = {
 }
 LABEL_BY_THEME = {value: key for key, value in THEME_LABELS.items()}
 _PENDING = "\uE000"
+# Prefixed tree iids: bare ".env" / ".gitignore" break Tk (look like widget paths).
+_TREE_NS = "n:"
 _NO_PROFILE = "нет профилей"
+
+
+def tree_path_iid(relative: str) -> str:
+    text = str(relative or ".").replace("\\", "/").strip()
+    if not text or text in {".", "./"}:
+        return f"{_TREE_NS}."
+    rel = normalize_relative(text)
+    if not rel or rel == ".":
+        return f"{_TREE_NS}."
+    return f"{_TREE_NS}{rel}"
+
+
+def tree_path_rel(iid: str) -> str:
+    text = str(iid or "")
+    if text.startswith(_PENDING):
+        text = text[len(_PENDING) :]
+    if text.startswith(_TREE_NS):
+        body = text[len(_TREE_NS) :]
+        return body if body else "."
+    return text or "."
 INK = ("#f6f3ee", "#1c1916")
 PANEL = ("#efeae3", "#26221e")
 FIELD = ("#fffdf8", "#161310")
@@ -119,8 +148,18 @@ GIT_NEW = ("#2f6b3c", "#7dba8a")  # untracked / added
 GIT_DEL = ("#a33d3d", "#e08a8a")  # deleted (если ещё виден в дереве)
 SEARCH_BG = ("#efe0b8", "#4a3f24")
 SEARCH_CUR = ("#e0b86a", "#7a5e28")
+# Подсветка редактора (P0.2): light / dark, без «AI-purple».
+SYN_KEYWORD = ("#8a4b2f", "#e0a070")
+SYN_STRING = CODE_TEXT
+SYN_COMMENT = MUTED
+SYN_NUMBER = ("#2f6b5a", "#7dbaa8")
+SYN_DECORATOR = ("#6a5a2a", "#c4b06a")
+SYN_HEADING = ("#3a5a7a", "#8ab0d0")
+SYN_MD_CODE = ("#0f7b8a", "#6cc7d3")
+SYN_LITERAL = ("#8a4b2f", "#e0a070")
 CHAT_COLUMN = 820
 DIFF_PREVIEW_LINES = 48
+HIGHLIGHT_DEBOUNCE_MS = 280
 
 
 def bind_wheel_scroll(view, root) -> None:
@@ -1870,6 +1909,7 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_width = 420
+        self._highlight_job = None
         self._task_height = _TASK_MIN_H
         self._task_width = 0
         self._fit_composer_job = None
@@ -2253,6 +2293,7 @@ class App(ctk.CTk):
             inner.bind(seq, self._on_editor_change, add="+")
         inner.bind("<<Modified>>", self._on_editor_modified, add="+")
         self.editor_gutter.bind("<MouseWheel>", self._on_gutter_wheel)
+        self._configure_editor_syntax_tags()
 
         bottom = ctk.CTkFrame(self.center, fg_color=INK, corner_radius=0)
         self.bottom = bottom
@@ -3025,11 +3066,12 @@ class App(ctk.CTk):
         return self._tree_text_photo(caption, self._tree_item_fill(tags), kind=kind)
 
     def _tree_entry_name(self, iid: str) -> str:
-        if iid == ".":
+        rel = tree_path_rel(iid)
+        if rel == ".":
             if self.project is not None:
                 return self.project.name or str(self.project)
             return "."
-        return iid.rsplit("/", 1)[-1]
+        return rel.rsplit("/", 1)[-1]
 
     def _apply_git_tree_tags(self) -> None:
         tree = getattr(self, "tree", None)
@@ -3041,12 +3083,13 @@ class App(ctk.CTk):
                 iid = str(child)
                 if iid.startswith(_PENDING):
                     continue
+                rel = tree_path_rel(iid)
                 tags = set(tree.item(iid, "tags") or ())
-                is_dir = iid == "." or "dir" in tags
+                is_dir = rel == "." or "dir" in tags
                 if "file" in tags:
                     is_dir = False
                 try:
-                    new_tags = self._tree_item_tags(iid, is_dir)
+                    new_tags = self._tree_item_tags(rel, is_dir)
                     name = self._tree_entry_name(iid)
                     tree.item(
                         iid,
@@ -3397,16 +3440,17 @@ class App(ctk.CTk):
         self._reload_git_decorations(apply=False)
         root_tags = self._tree_item_tags(".", True)
         root_name = self.project.name or str(self.project)
+        root_iid = tree_path_iid(".")
         self.tree.insert(
             "",
             "end",
-            iid=".",
+            iid=root_iid,
             text="",
             open=True,
             tags=root_tags,
             image=self._tree_item_image(root_name, True, root_tags),
         )
-        self._fill_node(".", reopen)
+        self._fill_node(root_iid, reopen)
 
     def _expanded_paths(self) -> set[str]:
         found: set[str] = set()
@@ -3417,7 +3461,7 @@ class App(ctk.CTk):
                 if child.startswith(_PENDING):
                     continue
                 if self.tree.item(child, "open"):
-                    found.add(child)
+                    found.add(tree_path_rel(child))
                     walk(child)
 
         walk("")
@@ -3426,18 +3470,20 @@ class App(ctk.CTk):
     def _fill_node(self, iid: str, reopen: set[str]) -> None:
         for child in self.tree.get_children(iid):
             self.tree.delete(child)
+        parent_rel = tree_path_rel(iid)
         try:
-            entries, truncated = list_entries(self.project, iid)
+            entries, truncated = list_entries(self.project, parent_rel)
         except PathError:
             self.tree.insert(iid, "end", text="(не прочитано)")
             return
         for name, is_dir in entries:
-            rel = name if iid == "." else f"{iid}/{name}"
+            rel = name if parent_rel == "." else f"{parent_rel}/{name}"
+            child_iid = tree_path_iid(rel)
             tags = self._tree_item_tags(rel, is_dir)
             self.tree.insert(
                 iid,
                 "end",
-                iid=rel,
+                iid=child_iid,
                 text="",
                 open=False,
                 tags=tags,
@@ -3446,10 +3492,10 @@ class App(ctk.CTk):
             if not is_dir:
                 continue
             if rel in reopen:
-                self.tree.item(rel, open=True)
-                self._fill_node(rel, reopen)
+                self.tree.item(child_iid, open=True)
+                self._fill_node(child_iid, reopen)
             else:
-                self.tree.insert(rel, "end", iid=f"{_PENDING}{rel}", text="")
+                self.tree.insert(child_iid, "end", iid=f"{_PENDING}{child_iid}", text="")
         if truncated:
             self.tree.insert(iid, "end", text="(список обрезан)")
 
@@ -3471,9 +3517,10 @@ class App(ctk.CTk):
         selected = self.tree.selection()
         if not selected or self.project is None:
             return
-        relative = str(selected[0])
-        if "file" not in self.tree.item(relative, "tags"):
+        iid = str(selected[0])
+        if "file" not in self.tree.item(iid, "tags"):
             return
+        relative = tree_path_rel(iid)
         if self.editor_open and relative == self.editor_path:
             return
         self._open_file_at(relative, 1)
@@ -3481,7 +3528,7 @@ class App(ctk.CTk):
     def _open_file_at(self, relative: str, line: int = 1) -> None:
         if self.project is None:
             return
-        relative = str(relative or "").replace("\\", "/").strip().lstrip("./")
+        relative = normalize_relative(relative)
         if not relative:
             return
         if self.editor_open and relative == self.editor_path:
@@ -3525,6 +3572,7 @@ class App(ctk.CTk):
         except tk.TclError:
             pass
         self._update_editor_gutter()
+        self._highlight_editor()
         if not self.editor_open:
             self.work.add(self.editor_frame, stretch="always", minsize=240, sticky="nsew")
             self.editor_open = True
@@ -3576,6 +3624,81 @@ class App(ctk.CTk):
                 body.configure(fg_color=FIELD)
             except tk.TclError:
                 pass
+        self._configure_editor_syntax_tags()
+        if self.editor_open:
+            self._highlight_editor()
+
+    def _configure_editor_syntax_tags(self) -> None:
+        from project_agent.syntax import (
+            ALL_TAGS,
+            TAG_COMMENT,
+            TAG_DECORATOR,
+            TAG_HEADING,
+            TAG_KEYWORD,
+            TAG_LITERAL,
+            TAG_MD_CODE,
+            TAG_NUMBER,
+            TAG_STRING,
+        )
+
+        box = getattr(self, "editor_box", None)
+        if box is None:
+            return
+        colors = {
+            TAG_KEYWORD: SYN_KEYWORD,
+            TAG_STRING: SYN_STRING,
+            TAG_COMMENT: SYN_COMMENT,
+            TAG_NUMBER: SYN_NUMBER,
+            TAG_DECORATOR: SYN_DECORATOR,
+            TAG_HEADING: SYN_HEADING,
+            TAG_MD_CODE: SYN_MD_CODE,
+            TAG_LITERAL: SYN_LITERAL,
+        }
+        try:
+            inner = box._textbox
+            for tag in ALL_TAGS:
+                tone = colors.get(tag, TEXT)
+                inner.tag_configure(tag, foreground=_tone(tone))
+            try:
+                inner.tag_raise("sel")
+            except tk.TclError:
+                pass
+        except tk.TclError:
+            return
+
+    def _schedule_editor_highlight(self) -> None:
+        job = getattr(self, "_highlight_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+        self._highlight_job = self.after(HIGHLIGHT_DEBOUNCE_MS, self._highlight_editor)
+
+    def _highlight_editor(self) -> None:
+        self._highlight_job = None
+        from project_agent.syntax import ALL_TAGS, language_for_path, tokenize
+
+        box = getattr(self, "editor_box", None)
+        if box is None or not self.editor_open:
+            return
+        lang = language_for_path(self.editor_path)
+        try:
+            inner = box._textbox
+            for tag in ALL_TAGS:
+                inner.tag_remove(tag, "1.0", "end")
+            if not lang:
+                return
+            text = self._editor_text()
+            spans = tokenize(text, lang)
+            for start, end, tag in spans:
+                inner.tag_add(tag, f"1.0+{start}c", f"1.0+{end}c")
+            try:
+                inner.tag_raise("sel")
+            except tk.TclError:
+                pass
+        except tk.TclError:
+            return
 
     def _update_editor_gutter(self, _event=None) -> None:
         gutter = getattr(self, "editor_gutter", None)
@@ -3629,6 +3752,7 @@ class App(ctk.CTk):
             if self.editor_box._textbox.edit_modified():
                 self.editor_box._textbox.edit_modified(False)
                 self._update_editor_gutter()
+                self._schedule_editor_highlight()
         except tk.TclError:
             return
 
@@ -3727,6 +3851,13 @@ class App(ctk.CTk):
         if ask and self._editor_dirty():
             if not self._ask(self.editor_path, "Закрыть файл без записи?"):
                 return False
+        job = getattr(self, "_highlight_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+            self._highlight_job = None
         try:
             self.work.forget(self.editor_frame)
         except tk.TclError:
@@ -4938,6 +5069,7 @@ class App(ctk.CTk):
         if "file" not in tags and "dir" not in tags:
             return None
         self.tree.selection_set(row)
+        relative = tree_path_rel(row)
         menu = tk.Menu(
             self,
             tearoff=0,
@@ -4949,10 +5081,10 @@ class App(ctk.CTk):
             font=self._px_font(12),
         )
         if "dir" in tags:
-            target = "." if row == "." else str(row)
+            target = "." if relative == "." else relative
             menu.add_command(label="Вложить папку в запрос", command=lambda: self._add_context_path(target + "/"))
         else:
-            menu.add_command(label="Вложить в запрос", command=lambda: self._add_context_path(str(row)))
+            menu.add_command(label="Вложить в запрос", command=lambda path=relative: self._add_context_path(path))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
