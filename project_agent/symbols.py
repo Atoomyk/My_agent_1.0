@@ -7,7 +7,10 @@ from pathlib import Path
 from project_agent.paths import MAX_FILE_BYTES
 
 JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
-SYMBOL_EXTENSIONS = (".py", *JS_EXTENSIONS)
+GO_EXTENSIONS = (".go",)
+PS_EXTENSIONS = (".ps1", ".psm1")
+RUST_EXTENSIONS = (".rs",)
+SYMBOL_EXTENSIONS = (".py", *JS_EXTENSIONS, *GO_EXTENSIONS, *PS_EXTENSIONS, *RUST_EXTENSIONS)
 
 _CLASS = re.compile(r"^([ \t]*)class[ \t]+([A-Za-z_][\w]*)")
 _DEF = re.compile(r"^([ \t]*)(?:async[ \t]+)?def[ \t]+([A-Za-z_][\w]*)")
@@ -86,6 +89,34 @@ def is_symbol_path(relative: str) -> bool:
 def is_js_path(relative: str) -> bool:
     lower = relative.replace("\\", "/").lower()
     return any(lower.endswith(ext) for ext in JS_EXTENSIONS)
+
+
+def is_go_path(relative: str) -> bool:
+    return relative.replace("\\", "/").lower().endswith(".go")
+
+
+def is_ps_path(relative: str) -> bool:
+    lower = relative.replace("\\", "/").lower()
+    return any(lower.endswith(ext) for ext in PS_EXTENSIONS)
+
+
+def is_rust_path(relative: str) -> bool:
+    return relative.replace("\\", "/").lower().endswith(".rs")
+
+
+def lang_label_for_path(relative: str) -> str:
+    lower = relative.replace("\\", "/").lower()
+    if lower.endswith(".py"):
+        return "py"
+    if is_js_path(lower):
+        return "js"
+    if is_go_path(lower):
+        return "go"
+    if is_ps_path(lower):
+        return "ps"
+    if is_rust_path(lower):
+        return "rs"
+    return ""
 
 
 def _indent_width(prefix: str) -> int:
@@ -381,9 +412,182 @@ def resolve_js_relative(from_file: str, module: str) -> str | None:
     return joined
 
 
-def read_python_source(full: Path) -> str | None:
+def path_module_aliases(relative: str) -> set[str]:
+    """Варианты имени модуля для поиска importers (a/b.py → a.b, a/b, b)."""
+    rel = (relative or "").replace("\\", "/").strip("/")
+    if not rel:
+        return set()
+    lower = rel.lower()
+    stem = rel
+    for ext in SYMBOL_EXTENSIONS:
+        if lower.endswith(ext):
+            stem = rel[: -len(ext)]
+            break
+    if stem.endswith("/__init__"):
+        stem = stem[: -len("/__init__")]
+    elif stem == "__init__":
+        stem = ""
+    aliases: set[str] = set()
+    if stem:
+        aliases.add(stem.lower())
+        aliases.add(stem.replace("/", ".").lower())
+        aliases.add(Path(stem).name.lower())
+    aliases.add(rel.lower())
+    aliases.add(Path(rel).name.lower())
+    return {item for item in aliases if item}
+
+
+_GO_FUNC = re.compile(r"^func\s+(?:\([^)]+\)\s*)?([A-Za-z_][\w]*)\s*\(")
+_GO_TYPE = re.compile(r"^type\s+([A-Za-z_][\w]*)\b")
+_GO_IMPORT_ONE = re.compile(r'^import\s+(?:[A-Za-z_][\w.]*\s+)?\"([^\"]+)\"')
+_GO_IMPORT_START = re.compile(r"^import\s+\(\s*$")
+_GO_IMPORT_LINE = re.compile(r'^\s*(?:[A-Za-z_][\w.]*\s+)?\"([^\"]+)\"')
+
+_PS_FUNCTION = re.compile(
+    r"^(?:function|filter|workflow)\s+(?:global:|script:|local:|private:)?([A-Za-z_][\w-]*)",
+    re.IGNORECASE,
+)
+_PS_CLASS = re.compile(r"^class\s+([A-Za-z_][\w]*)", re.IGNORECASE)
+_PS_USING = re.compile(
+    r"^using\s+(?:module|namespace|assembly)\s+([^\s;#]+)",
+    re.IGNORECASE,
+)
+
+_RS_FN = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+([A-Za-z_][\w]*)\s*(?:<[^>]*>)?\s*\("
+)
+_RS_TYPE = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|type|union)\s+([A-Za-z_][\w]*)"
+)
+_RS_MOD = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][\w]*)")
+_RS_USE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?use\s+(.+?)\s*;?\s*$")
+
+
+def parse_go_file(text: str) -> tuple[list[dict], list[dict]]:
+    symbols: list[dict] = []
+    imports: list[dict] = []
+    in_import = False
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("//", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        if in_import:
+            if line.strip() == ")":
+                in_import = False
+                continue
+            match = _GO_IMPORT_LINE.match(line)
+            if match:
+                imports.append({"module": match.group(1), "names": [], "line": number})
+            continue
+        if _GO_IMPORT_START.match(line):
+            in_import = True
+            continue
+        one = _GO_IMPORT_ONE.match(line)
+        if one:
+            imports.append({"module": one.group(1), "names": [], "line": number})
+            continue
+        fn = _GO_FUNC.match(line)
+        if fn:
+            name = fn.group(1)
+            kind = "method" if "(" in line[: line.find(name)] else "func"
+            symbols.append(_sym(name, name, kind, number, "go"))
+            continue
+        typed = _GO_TYPE.match(line)
+        if typed:
+            name = typed.group(1)
+            kind = "type"
+            if re.search(r"\bstruct\b", line):
+                kind = "struct"
+            elif re.search(r"\binterface\b", line):
+                kind = "interface"
+            symbols.append(_sym(name, name, kind, number, "go"))
+    return symbols, imports
+
+
+def parse_ps_file(text: str) -> tuple[list[dict], list[dict]]:
+    symbols: list[dict] = []
+    imports: list[dict] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#", 1)[0].rstrip()
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        fn = _PS_FUNCTION.match(stripped)
+        if fn:
+            name = fn.group(1)
+            symbols.append(_sym(name, name, "function", number, "ps"))
+            continue
+        cls = _PS_CLASS.match(stripped)
+        if cls:
+            name = cls.group(1)
+            symbols.append(_sym(name, name, "class", number, "ps"))
+            continue
+        using = _PS_USING.match(stripped)
+        if using:
+            imports.append({"module": using.group(1).strip("'\""), "names": [], "line": number})
+    return symbols, imports
+
+
+def parse_rust_file(text: str) -> tuple[list[dict], list[dict]]:
+    symbols: list[dict] = []
+    imports: list[dict] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("//", 1)[0].rstrip()
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        fn = _RS_FN.match(stripped)
+        if fn:
+            name = fn.group(1)
+            symbols.append(_sym(name, name, "fn", number, "rs"))
+            continue
+        typed = _RS_TYPE.match(stripped)
+        if typed:
+            name = typed.group(1)
+            head = stripped.split(name, 1)[0]
+            if "struct" in head:
+                kind = "struct"
+            elif "enum" in head:
+                kind = "enum"
+            elif "trait" in head:
+                kind = "trait"
+            elif "union" in head:
+                kind = "union"
+            else:
+                kind = "type"
+            symbols.append(_sym(name, name, kind, number, "rs"))
+            continue
+        mod = _RS_MOD.match(stripped)
+        if mod:
+            name = mod.group(1)
+            symbols.append(_sym(name, name, "mod", number, "rs"))
+            continue
+        use = _RS_USE.match(stripped)
+        if use:
+            clause = use.group(1).strip()
+            module = clause.split("::{", 1)[0].split(" as ", 1)[0].strip()
+            names: list[str] = []
+            if "::{" in clause and clause.endswith("}"):
+                inner = clause.rsplit("::{", 1)[-1].rstrip("}")
+                for part in inner.split(","):
+                    piece = part.strip().split(" as ", 1)[0].strip()
+                    if piece and piece != "self" and piece != "*":
+                        names.append(piece)
+                    elif piece == "*":
+                        names.append("*")
+            imports.append({"module": module, "names": names, "line": number})
+    return symbols, imports
+
+
+def read_source_text(full: Path) -> str | None:
     try:
-        if not full.is_file() or full.suffix.lower() != ".py":
+        if not full.is_file() or full.suffix.lower() not in {
+            ".py",
+            *JS_EXTENSIONS,
+            *GO_EXTENSIONS,
+            *PS_EXTENSIONS,
+            *RUST_EXTENSIONS,
+        }:
             return None
         size = full.stat().st_size
         if size > MAX_FILE_BYTES:
@@ -397,24 +601,18 @@ def read_python_source(full: Path) -> str | None:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         return None
+
+
+def read_python_source(full: Path) -> str | None:
+    if full.suffix.lower() != ".py":
+        return None
+    return read_source_text(full)
 
 
 def read_js_source(full: Path) -> str | None:
-    try:
-        if not full.is_file() or full.suffix.lower() not in JS_EXTENSIONS:
-            return None
-        size = full.stat().st_size
-        if size > MAX_FILE_BYTES:
-            return None
-        data = full.read_bytes()
-    except OSError:
+    if full.suffix.lower() not in JS_EXTENSIONS:
         return None
-    if b"\x00" in data[:8192]:
-        return None
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return None
+    return read_source_text(full)
 
 
 def scan_python_file(full: Path) -> tuple[list[dict], list[dict]] | None:
@@ -432,9 +630,18 @@ def scan_js_file(full: Path) -> tuple[list[dict], list[dict]] | None:
 
 
 def scan_source_file(full: Path) -> tuple[list[dict], list[dict]] | None:
+    text = read_source_text(full)
+    if text is None:
+        return None
     suffix = full.suffix.lower()
     if suffix == ".py":
-        return scan_python_file(full)
+        return parse_python_file(text)
     if suffix in JS_EXTENSIONS:
-        return scan_js_file(full)
+        return parse_js_file(text)
+    if suffix in GO_EXTENSIONS:
+        return parse_go_file(text)
+    if suffix in PS_EXTENSIONS:
+        return parse_ps_file(text)
+    if suffix in RUST_EXTENSIONS:
+        return parse_rust_file(text)
     return None

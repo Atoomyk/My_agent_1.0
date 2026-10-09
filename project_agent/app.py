@@ -1870,6 +1870,8 @@ class App(ctk.CTk):
         self._file_util_mode = "find"
         self._find_hits: list = []
         self._diag_hits: list = []
+        self._symbol_hits: list = []
+        self._symbol_query_mode = "symbol"
         self.checkpoints = CheckpointStack()
         self.vault = SecretVault()
         self.mcp = McpHub()
@@ -2478,7 +2480,7 @@ class App(ctk.CTk):
                 continue
 
     def _build_file_util_panel(self) -> None:
-        """Поиск по файлам + диагностики под деревом (P0.4 / P0.5)."""
+        """Поиск / символы / диагностики под деревом (P0.4 / P0.5 / P1.9)."""
         panel = ctk.CTkFrame(self.file_pane, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER)
         self.file_util_panel = panel
         panel.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
@@ -2488,6 +2490,10 @@ class App(ctk.CTk):
         mode_row.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         self.file_find_mode_btn = quiet_button(mode_row, "Поиск", lambda: self._set_file_util_mode("find"), width=64, height=24)
         self.file_find_mode_btn.pack(side="left", padx=(0, 4))
+        self.file_symbol_mode_btn = quiet_button(
+            mode_row, "Символы", lambda: self._set_file_util_mode("symbols"), width=72, height=24
+        )
+        self.file_symbol_mode_btn.pack(side="left", padx=(0, 4))
         self.file_diag_mode_btn = quiet_button(
             mode_row, "Проблемы", lambda: self._set_file_util_mode("problems"), width=80, height=24
         )
@@ -2512,6 +2518,28 @@ class App(ctk.CTk):
         self.file_find_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.file_find_entry.bind("<Return>", lambda _e: self._run_file_find())
         quiet_button(self.file_find_row, "Найти", self._run_file_find, width=56, height=24).grid(row=0, column=1)
+
+        self.file_symbol_row = ctk.CTkFrame(panel, fg_color="transparent")
+        self.file_symbol_row.grid(row=1, column=0, sticky="ew", padx=6, pady=2)
+        self.file_symbol_row.grid_columnconfigure(0, weight=1)
+        self.file_symbol_var = ctk.StringVar(value="")
+        self.file_symbol_entry = ctk.CTkEntry(
+            self.file_symbol_row,
+            textvariable=self.file_symbol_var,
+            placeholder_text="Имя символа или модуль…",
+            height=26,
+            fg_color=FIELD,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=self._font(11),
+        )
+        self.file_symbol_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.file_symbol_entry.bind("<Return>", lambda _e: self._run_symbol_find())
+        self.file_symbol_kind_btn = quiet_button(
+            self.file_symbol_row, "Символ", self._toggle_symbol_query_mode, width=72, height=24
+        )
+        self.file_symbol_kind_btn.grid(row=0, column=1, padx=(0, 4))
+        quiet_button(self.file_symbol_row, "Найти", self._run_symbol_find, width=56, height=24).grid(row=0, column=2)
 
         self.file_diag_row = ctk.CTkFrame(panel, fg_color="transparent")
         self.file_diag_row.grid(row=1, column=0, sticky="ew", padx=6, pady=2)
@@ -2583,6 +2611,11 @@ class App(ctk.CTk):
                 self.file_find_entry.focus_set()
             except tk.TclError:
                 pass
+        elif self._file_util_mode == "symbols":
+            try:
+                self.file_symbol_entry.focus_set()
+            except tk.TclError:
+                pass
 
     def _hide_file_util_panel(self) -> None:
         panel = getattr(self, "file_util_panel", None)
@@ -2603,15 +2636,47 @@ class App(ctk.CTk):
                 pass
 
     def _set_file_util_mode(self, mode: str) -> None:
-        self._file_util_mode = "problems" if mode == "problems" else "find"
+        if mode == "problems":
+            self._file_util_mode = "problems"
+        elif mode == "symbols":
+            self._file_util_mode = "symbols"
+        else:
+            self._file_util_mode = "find"
+        self.file_find_row.grid_remove()
+        self.file_symbol_row.grid_remove()
+        self.file_diag_row.grid_remove()
         if self._file_util_mode == "find":
             self.file_find_row.grid()
-            self.file_diag_row.grid_remove()
             self._fill_file_hit_list(self._find_hits)
+        elif self._file_util_mode == "symbols":
+            self.file_symbol_row.grid()
+            self._sync_symbol_kind_button()
+            self._fill_file_hit_list(self._symbol_hits)
         else:
-            self.file_find_row.grid_remove()
             self.file_diag_row.grid()
             self._fill_file_hit_list(self._diag_hits)
+
+    def _sync_symbol_kind_button(self) -> None:
+        btn = getattr(self, "file_symbol_kind_btn", None)
+        if btn is None:
+            return
+        label = "Importers" if self._symbol_query_mode == "importers" else "Символ"
+        try:
+            btn.configure(text=label)
+        except tk.TclError:
+            return
+
+    def _toggle_symbol_query_mode(self) -> None:
+        self._symbol_query_mode = "importers" if self._symbol_query_mode == "symbol" else "symbol"
+        self._sync_symbol_kind_button()
+        entry = getattr(self, "file_symbol_entry", None)
+        if entry is None:
+            return
+        hint = "Модуль / путь — кто импортирует…" if self._symbol_query_mode == "importers" else "Имя символа или модуль…"
+        try:
+            entry.configure(placeholder_text=hint)
+        except tk.TclError:
+            pass
 
     def _style_file_util_panel(self) -> None:
         panel = getattr(self, "file_util_panel", None)
@@ -2620,6 +2685,7 @@ class App(ctk.CTk):
         try:
             panel.configure(fg_color=PANEL, border_color=BORDER)
             self.file_find_entry.configure(fg_color=FIELD, border_color=BORDER, text_color=TEXT, font=self._font(11))
+            self.file_symbol_entry.configure(fg_color=FIELD, border_color=BORDER, text_color=TEXT, font=self._font(11))
             self.file_util_status.configure(text_color=MUTED, font=self._font(10))
             self.file_hit_list.configure(
                 bg=_tone(FIELD),
@@ -2649,10 +2715,10 @@ class App(ctk.CTk):
         except tk.TclError:
             return
         count = len(items)
-        if self._file_util_mode == "find":
-            self.file_util_status.configure(text=f"{count}" if count else "")
-        else:
+        if self._file_util_mode == "problems":
             self.file_util_status.configure(text=f"{count}" if count else "чисто")
+        else:
+            self.file_util_status.configure(text=f"{count}" if count else "")
 
     def _run_file_find(self) -> None:
         if self.project is None:
@@ -2670,6 +2736,30 @@ class App(ctk.CTk):
             self.set_status("Совпадений нет")
         else:
             self.set_status(f"Найдено: {len(self._find_hits)}")
+
+    def _run_symbol_find(self) -> None:
+        if self.project is None:
+            self.set_status("Сначала выберите папку проекта")
+            return
+        query = (self.file_symbol_var.get() or "").strip()
+        if not query:
+            self.set_status("Введите имя символа или модуля")
+            return
+        from project_agent.index_store import search_importers, search_symbols
+
+        if self._symbol_query_mode == "importers":
+            hits, _data = search_importers(self.project, query, limit=80)
+            self._symbol_hits = hits
+            label = "Importers"
+        else:
+            hits, _data = search_symbols(self.project, query, limit=80)
+            self._symbol_hits = hits
+            label = "Символы"
+        self._set_file_util_mode("symbols")
+        if not self._symbol_hits:
+            self.set_status(f"{label}: нет совпадений")
+        else:
+            self.set_status(f"{label}: {len(self._symbol_hits)}")
 
     def _run_py_compile_check(self) -> None:
         if self.project is None:
@@ -2735,7 +2825,12 @@ class App(ctk.CTk):
         if not selection:
             return
         index = int(selection[0])
-        items = self._find_hits if self._file_util_mode == "find" else self._diag_hits
+        if self._file_util_mode == "find":
+            items = self._find_hits
+        elif self._file_util_mode == "symbols":
+            items = self._symbol_hits
+        else:
+            items = self._diag_hits
         if index < 0 or index >= len(items):
             return
         item = items[index]

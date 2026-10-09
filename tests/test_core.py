@@ -1280,6 +1280,97 @@ class IndexStoreTests(unittest.TestCase):
         self.assertEqual(resolve_js_relative("src/app.tsx", "../lib/util"), "lib/util")
         self.assertIsNone(resolve_js_relative("src/app.tsx", "react"))
 
+    def test_parse_go_ps_rust_symbols(self):
+        from project_agent.symbols import parse_go_file, parse_ps_file, parse_rust_file, path_module_aliases
+
+        go_syms, go_imps = parse_go_file(
+            "package main\n"
+            "import (\n"
+            '  "fmt"\n'
+            '  alias "example.com/pkg"\n'
+            ")\n"
+            "type Server struct{}\n"
+            "type Handler interface{}\n"
+            "func New() *Server { return nil }\n"
+            "func (s *Server) Serve() {}\n"
+        )
+        go_kinds = {(item["qualname"], item["kind"]) for item in go_syms}
+        self.assertIn(("Server", "struct"), go_kinds)
+        self.assertIn(("Handler", "interface"), go_kinds)
+        self.assertIn(("New", "func"), go_kinds)
+        self.assertIn(("Serve", "method"), go_kinds)
+        self.assertEqual({item["module"] for item in go_imps}, {"fmt", "example.com/pkg"})
+
+        ps_syms, ps_imps = parse_ps_file(
+            "using module Foo.Bar\n"
+            "function Get-ItemName {\n"
+            "}\n"
+            "class Widget {\n"
+            "}\n"
+        )
+        self.assertIn(("Get-ItemName", "function"), {(s["qualname"], s["kind"]) for s in ps_syms})
+        self.assertIn(("Widget", "class"), {(s["qualname"], s["kind"]) for s in ps_syms})
+        self.assertEqual(ps_imps[0]["module"], "Foo.Bar")
+
+        rs_syms, rs_imps = parse_rust_file(
+            "use std::io::{Read, Write};\n"
+            "pub mod util;\n"
+            "pub struct Config {}\n"
+            "pub enum Kind { A, B }\n"
+            "pub trait Runner {}\n"
+            "pub fn boot() {}\n"
+        )
+        rs_kinds = {(item["qualname"], item["kind"]) for item in rs_syms}
+        self.assertIn(("util", "mod"), rs_kinds)
+        self.assertIn(("Config", "struct"), rs_kinds)
+        self.assertIn(("Kind", "enum"), rs_kinds)
+        self.assertIn(("Runner", "trait"), rs_kinds)
+        self.assertIn(("boot", "fn"), rs_kinds)
+        self.assertEqual(rs_imps[0]["module"], "std::io")
+        self.assertIn("Read", rs_imps[0]["names"])
+        aliases = path_module_aliases("pkg/util.py")
+        self.assertIn("pkg.util", aliases)
+        self.assertIn("pkg/util", aliases)
+        self.assertIn("util", aliases)
+
+    def test_search_symbols_and_importers_hits(self):
+        from project_agent.index_store import build_index, search_importers, search_symbols
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                (root / "pkg").mkdir()
+                (root / "pkg" / "util.py").write_text(
+                    "class Helper:\n    def run(self):\n        pass\n",
+                    encoding="utf-8",
+                )
+                (root / "main.py").write_text("from pkg.util import Helper\n", encoding="utf-8")
+                (root / "main.go").write_text(
+                    "package main\nfunc Boot() {}\n",
+                    encoding="utf-8",
+                )
+                (root / "build.ps1").write_text("function Invoke-Build {}\n", encoding="utf-8")
+                (root / "lib.rs").write_text("pub fn start() {}\n", encoding="utf-8")
+                build_index(root)
+                syms, _ = search_symbols(root, "Helper")
+                self.assertTrue(any(hit.path == "pkg/util.py" and "Helper" in hit.text for hit in syms))
+                go_hits, _ = search_symbols(root, "Boot")
+                self.assertTrue(any(hit.path == "main.go" for hit in go_hits))
+                ps_hits, _ = search_symbols(root, "Invoke-Build")
+                self.assertTrue(any(hit.path == "build.ps1" for hit in ps_hits))
+                rs_hits, _ = search_symbols(root, "start")
+                self.assertTrue(any(hit.path == "lib.rs" for hit in rs_hits))
+                importers, _ = search_importers(root, "pkg/util.py")
+                self.assertTrue(any(hit.path == "main.py" and "Helper" in hit.text for hit in importers))
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
 
 class ContextAttachTests(unittest.TestCase):
     def test_parse_and_load_context(self):

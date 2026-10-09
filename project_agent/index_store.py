@@ -4,13 +4,18 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from project_agent.config import config_dir
 from project_agent.paths import IGNORE_DIRS, is_binary_name, normalize_relative
 from project_agent.symbols import (
+    is_go_path,
     is_js_path,
+    is_ps_path,
+    is_rust_path,
     is_symbol_path,
+    path_module_aliases,
     resolve_js_relative,
     scan_source_file,
 )
@@ -18,7 +23,20 @@ from project_agent.symbols import (
 MAX_INDEX_FILES = 8_000
 MAX_FIND = 80
 INDEX_VERSION = 1
-SYMBOLS_VERSION = 2
+SYMBOLS_VERSION = 3
+
+
+@dataclass(frozen=True)
+class SymbolHit:
+    path: str
+    line: int
+    text: str
+
+    def label(self, width: int = 120) -> str:
+        snippet = (self.text or "").strip().replace("\t", " ")
+        if len(snippet) > width:
+            snippet = snippet[: width - 1] + "…"
+        return f"{self.path}:{self.line}: {snippet}"
 
 
 def index_root() -> Path:
@@ -273,25 +291,57 @@ def touch_file(root: Path, relative: str, size: int | None = None) -> None:
     touch_symbols(root, rel)
 
 
-def find_symbols(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
+def _importer_needles(query: str) -> set[str]:
+    text = (query or "").strip().lower().replace("\\", "/")
+    if not text:
+        return set()
+    needles = set(path_module_aliases(text))
+    needles.add(text)
+    dotted = text.replace("/", ".")
+    needles.add(dotted)
+    if dotted.endswith(".__init__"):
+        needles.add(dotted[: -len(".__init__")])
+    return {item for item in needles if item}
+
+
+def _import_haystack(path: str, module: str, names: list[str]) -> str:
+    parts = [module, *names]
+    if is_js_path(path):
+        resolved = resolve_js_relative(path, module)
+        if resolved:
+            parts.append(resolved)
+            parts.extend(path_module_aliases(resolved))
+    parts.extend(path_module_aliases(module.replace(".", "/") + ".py"))
+    parts.append(module.replace(".", "/"))
+    return " ".join(str(part).lower() for part in parts if part)
+
+
+def search_symbols(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[SymbolHit], dict]:
     query = (query or "").strip().lower()
     data = ensure_symbols(root)
     if not query:
         return [], data
-    found: list[str] = []
+    found: list[SymbolHit] = []
     for path, entry in sorted((data.get("files") or {}).items()):
         for symbol in entry.get("symbols") or []:
             name = str(symbol.get("name") or "")
             qual = str(symbol.get("qualname") or name)
             kind = str(symbol.get("kind") or "")
             line = int(symbol.get("line") or 0)
+            lang = str(symbol.get("lang") or "")
             hay = f"{qual} {name}".lower()
             if query not in hay:
                 continue
-            found.append(f"{qual} ({kind}) {path}:{line}")
+            suffix = f" [{lang}]" if lang else ""
+            found.append(SymbolHit(path=path, line=line or 1, text=f"{qual} ({kind}){suffix}"))
             if len(found) >= limit:
                 return found, data
     return found, data
+
+
+def find_symbols(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
+    hits, data = search_symbols(root, query, limit=limit)
+    return [f"{hit.text} {hit.path}:{hit.line}" for hit in hits], data
 
 
 def list_imports(root: Path, relative: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
@@ -314,35 +364,33 @@ def list_imports(root: Path, relative: str, limit: int = MAX_FIND) -> tuple[list
     return lines, data
 
 
-def find_importers(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
-    query = (query or "").strip().lower().replace("\\", "/")
+def search_importers(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[SymbolHit], dict]:
+    needles = _importer_needles(query)
     data = ensure_symbols(root)
-    if not query:
+    if not needles:
         return [], data
-    query_stem = query
-    for ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py"):
-        if query_stem.endswith(ext):
-            query_stem = query_stem[: -len(ext)]
-            break
-    found: list[str] = []
+    found: list[SymbolHit] = []
     for path, entry in sorted((data.get("files") or {}).items()):
         for item in entry.get("imports") or []:
             module = str(item.get("module") or "")
             names = [str(n) for n in (item.get("names") or [])]
             line = int(item.get("line") or 0)
-            hay = " ".join([module, *names]).lower()
-            resolved = resolve_js_relative(path, module) if is_js_path(path) else None
-            if resolved:
-                hay = f"{hay} {resolved.lower()}"
-            if query not in hay and query_stem not in hay:
+            hay = _import_haystack(path, module, names)
+            if not any(needle in hay for needle in needles):
                 continue
             if names:
-                found.append(f"{path}:{line} from {module} import {', '.join(names)}")
+                text = f"from {module} import {', '.join(names)}"
             else:
-                found.append(f"{path}:{line} import {module}")
+                text = f"import {module}"
+            found.append(SymbolHit(path=path, line=line or 1, text=text))
             if len(found) >= limit:
                 return found, data
     return found, data
+
+
+def find_importers(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
+    hits, data = search_importers(root, query, limit=limit)
+    return [f"{hit.path}:{hit.line} {hit.text}" for hit in hits], data
 
 
 def find_paths(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[str], dict]:
@@ -375,9 +423,19 @@ def index_summary(root: Path) -> str:
         sym_files = symbols.get("files") or {}
         py_count = sum(1 for path in sym_files if str(path).lower().endswith(".py"))
         js_count = sum(1 for path in sym_files if is_js_path(str(path)))
+        go_count = sum(1 for path in sym_files if is_go_path(str(path)))
+        ps_count = sum(1 for path in sym_files if is_ps_path(str(path)))
+        rs_count = sum(1 for path in sym_files if is_rust_path(str(path)))
         sym_count = sum(len(item.get("symbols") or []) for item in sym_files.values())
-        langs = f"{py_count} .py"
+        parts = [f"{py_count} .py"]
         if js_count:
-            langs += f", {js_count} JS/TS"
+            parts.append(f"{js_count} JS/TS")
+        if go_count:
+            parts.append(f"{go_count} Go")
+        if ps_count:
+            parts.append(f"{ps_count} PS")
+        if rs_count:
+            parts.append(f"{rs_count} Rust")
+        langs = ", ".join(parts)
         return f"Индекс: {count} файлов, {langs} / {sym_count} символов, обновлён {built}{note}."
     return f"Индекс: {count} файлов, обновлён {built}{note}."

@@ -175,7 +175,7 @@ TOOL_SPECS = [
         "description": (
             "Индекс проекта: пути и лёгкие символы/импорты Python и JS/TS (не LSP). "
             "action=summary|refresh|find|find_symbol|imports|importers. "
-            "find/find_symbol/importers — query; imports — path к .py/.js/.ts/…. "
+            "find/find_symbol/importers — query; imports — path к .py/.js/.ts/.go/.ps1/.rs. "
             "В ответ только совпадения, не весь индекс."
         ),
         "parameters": _schema(
@@ -786,7 +786,7 @@ class Toolbox:
             path = str(args.get("path") or args.get("query") or "").strip()
             if not path:
                 return ToolOutcome(
-                    "Для imports нужен path к .py/.js/.ts/….",
+                    "Для imports нужен path к .py/.js/.ts/.go/.ps1/.rs.",
                     "project_index: imports пусто",
                 )
             found, data = list_imports(root, path)
