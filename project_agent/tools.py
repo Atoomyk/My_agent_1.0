@@ -596,12 +596,19 @@ class Toolbox:
             summary = self._summary(args.get("summary"), f"Запись, правка файла", hidden)
         else:
             summary = self._summary(args.get("summary"), f"Запись, новый файл, {content.count(chr(10)) + 1} строк", hidden)
-        detail = preview_unified(self._scrub(before, full), self._scrub(content, full), rel)
-        if self._stopped() or not self._confirm_project_write(rel, summary, detail):
+        scrubbed_before = self._scrub(before, full)
+        scrubbed_after = self._scrub(content, full)
+        detail = preview_unified(scrubbed_before, scrubbed_after, rel)
+        decision = self._confirm_project_write(
+            rel, summary, detail, before=scrubbed_before, after=scrubbed_after
+        )
+        if self._stopped() or decision is False:
             return ToolOutcome(
                 "Пользователь отказался записывать файл. Не повторяй эту запись без новой причины.",
                 f"write_file {rel}: отказ",
             )
+        if isinstance(decision, str):
+            content = self.vault.restore(decision)
         self._snapshot_before_write(rel, full)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8", newline="\n")
@@ -640,12 +647,19 @@ class Toolbox:
         plus, minus = _diff_stat(original, updated)
         hidden = self.vault.count(diff)
         summary = self._summary(args.get("summary"), f"Правка +{plus} -{minus}", hidden)
-        detail = preview_unified(self._scrub(original, full), self._scrub(updated, full), rel)
-        if self._stopped() or not self._confirm_project_write(rel, summary, detail):
+        scrubbed_before = self._scrub(original, full)
+        scrubbed_after = self._scrub(updated, full)
+        detail = preview_unified(scrubbed_before, scrubbed_after, rel)
+        decision = self._confirm_project_write(
+            rel, summary, detail, before=scrubbed_before, after=scrubbed_after
+        )
+        if self._stopped() or decision is False:
             return ToolOutcome(
                 "Пользователь отказался применять правку. Не повторяй её без новой причины.",
                 f"apply_patch {rel}: отказ",
             )
+        if isinstance(decision, str):
+            updated = self.vault.restore(decision)
         self._snapshot_before_write(rel, full)
         full.write_text(updated, encoding="utf-8", newline="\n")
         try:
@@ -1303,17 +1317,50 @@ class Toolbox:
             return bool(raw)
         return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
 
-    def _confirm_project_write(self, path: str, summary: str, detail: str = "") -> bool:
+    def _confirm_project_write(
+        self,
+        path: str,
+        summary: str,
+        detail: str = "",
+        *,
+        before: str | None = None,
+        after: str | None = None,
+    ) -> bool | str:
+        """False — отказ; True — принять целиком; str — частичный merge хунков."""
         if self._auto_write_project():
             return True
-        return self._confirm(path, summary, detail)
+        return self._confirm_write(path, summary, detail, before=before, after=after)
+
+    def _confirm_write(
+        self,
+        path: str,
+        summary: str,
+        detail: str = "",
+        *,
+        before: str | None = None,
+        after: str | None = None,
+    ) -> bool | str:
+        try:
+            result = self.confirm(path, summary, detail, before=before, after=after)
+        except TypeError:
+            try:
+                result = self.confirm(path, summary, detail)
+            except TypeError:
+                body = summary if not detail else f"{summary}\n\n{detail[:4000]}"
+                result = self.confirm(path, body)
+        if result is False or result is None:
+            return False
+        if isinstance(result, str):
+            return result
+        return True
 
     def _confirm(self, path: str, summary: str, detail: str = "") -> bool:
         try:
-            return bool(self.confirm(path, summary, detail))
+            result = self.confirm(path, summary, detail)
         except TypeError:
             body = summary if not detail else f"{summary}\n\n{detail[:4000]}"
-            return bool(self.confirm(path, body))
+            result = self.confirm(path, body)
+        return bool(result)
 
     def _summary(self, given, fallback: str, hidden: int) -> str:
         text = str(given or "").strip() or fallback

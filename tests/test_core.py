@@ -731,6 +731,83 @@ class TestRunnerTests(unittest.TestCase):
             self.assertEqual(box.touched_paths(), ["a.py"])
 
 
+class HunkTests(unittest.TestCase):
+    def test_split_merge_and_turn_diff(self):
+        import tempfile
+        from pathlib import Path
+
+        from project_agent.hunks import (
+            build_turn_diff,
+            merge_hunks,
+            parse_unified_hunks,
+            split_hunks,
+        )
+
+        before = "keep\nold_a\nmiddle\nold_b\nend\n"
+        after = "keep\nnew_a\nmiddle\nnew_b\nend\n"
+        hunks = split_hunks(before, after)
+        self.assertGreaterEqual(len(hunks), 2)
+        self.assertEqual(merge_hunks(before, after, None), after)
+        self.assertEqual(merge_hunks(before, after, set()), before)
+        only_first = merge_hunks(before, after, {0})
+        self.assertIn("new_a", only_first)
+        self.assertIn("old_b", only_first)
+        self.assertNotIn("new_b", only_first)
+        only_second = merge_hunks(before, after, {1})
+        self.assertIn("old_a", only_second)
+        self.assertIn("new_b", only_second)
+        from project_agent.gitops import preview_unified
+
+        unified = preview_unified(before, after, "x.py")
+        self.assertGreaterEqual(len(parse_unified_hunks(unified)), 1)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "a.py").write_text(after, encoding="utf-8")
+            files = {
+                "a.py": {"existed": True, "content": before, "skipped": False},
+                "ghost.py": {"existed": True, "content": "x\n", "skipped": True},
+            }
+            body = build_turn_diff(root, files)
+            self.assertIn("a.py", body)
+            self.assertIn("new_a", body)
+            self.assertIn("ghost.py", body)
+
+    def test_write_accepts_partial_hunk_merge(self):
+        import tempfile
+        from pathlib import Path
+
+        from project_agent.hunks import merge_hunks, split_hunks
+        from project_agent.mcp_client import McpHub
+        from project_agent.secrets import SecretVault
+        from project_agent.tools import Toolbox
+
+        before = "alpha\nbeta\ngamma\ndelta\n"
+        after = "alpha\nBETA\ngamma\nDELTA\n"
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(tmp.name) / "proj"
+            root.mkdir()
+            (root / "multi.py").write_text(before, encoding="utf-8")
+            notes = []
+
+            def confirm(path, summary, detail="", before=None, after=None):
+                notes.append(path)
+                hunks = split_hunks(before or "", after or "")
+                self.assertGreaterEqual(len(hunks), 2)
+                return merge_hunks(before or "", after or "", {0})
+
+            box = Toolbox(SecretVault(), confirm, McpHub(), lambda: {})
+            box.set_root(root)
+            out = box.execute("write_file", {"path": "multi.py", "content": after, "summary": "multi"})
+            self.assertIn("записано", out.journal)
+            written = (root / "multi.py").read_text(encoding="utf-8")
+            self.assertEqual(written, "alpha\nBETA\ngamma\ndelta\n")
+            self.assertEqual(notes, ["multi.py"])
+        finally:
+            tmp.cleanup()
+
+
 class FindAndDiagTests(unittest.TestCase):
     def test_search_project_hits(self):
         import tempfile
