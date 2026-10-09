@@ -5373,7 +5373,7 @@ class App(ctk.CTk):
         self.running = True
         self.stop_event = threading.Event()
         self._show_running(True)
-        self.set_status("Запрос отправлен")
+        self.set_status("Планирую следующие шаги…")
         thread = threading.Thread(target=self._turn, args=(model_text, prepared, settings, False), daemon=True)
         thread.start()
 
@@ -5395,7 +5395,7 @@ class App(ctk.CTk):
         self.running = True
         self.stop_event = threading.Event()
         self._show_running(True)
-        self.set_status("Повтор запроса")
+        self.set_status("Планирую следующие шаги…")
         thread = threading.Thread(
             target=self._turn,
             args=(payload["text"], payload["images"], settings, True),

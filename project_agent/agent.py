@@ -280,9 +280,10 @@ class Agent:
                     self._publish_context(settings)
                     return
                 mark = _STATUS_BY_MODE.get(self._agent_mode, "")
-                self.on_status(f"Шаг {step} из {max_steps}{mark}")
+                # Как Cursor «Planning next moves» — пока ждём решение модели (до tool / ответа).
+                self.on_status(f"Планирую следующие шаги… · {step}/{max_steps}{mark}")
                 try:
-                    turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber))
+                    turn = self.provider.complete(specs, scrubber, self._stream_hook(scrubber, mark))
                 except Stopped as exc:
                     self._emit_partial(exc, scrubber)
                     self.on_stopped("Остановлено.")
@@ -368,14 +369,17 @@ class Agent:
         self._publish_context(settings)
         self.on_status("Готово")
 
-    def _stream_hook(self, scrubber):
+    def _stream_hook(self, scrubber, mode_mark: str = ""):
         if self.on_stream is None:
             return None
         parts: list[str] = []
-        state = {"last": 0.0}
+        state = {"last": 0.0, "wrote": False}
 
         def on_piece(piece: str) -> None:
             parts.append(piece)
+            if not state["wrote"] and "".join(parts).strip():
+                state["wrote"] = True
+                self.on_status(f"Пишу ответ…{mode_mark}")
             now = time.monotonic()
             if now - state["last"] < 0.05:
                 return
