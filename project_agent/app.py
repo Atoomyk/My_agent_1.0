@@ -161,6 +161,8 @@ SYN_LITERAL = ("#8a4b2f", "#e0a070")
 CHAT_COLUMN = 820
 DIFF_PREVIEW_LINES = 48
 HIGHLIGHT_DEBOUNCE_MS = 280
+SIDE_DEFAULT = 248
+SIDE_MIN = 180
 
 
 def bind_wheel_scroll(view, root) -> None:
@@ -1909,6 +1911,7 @@ class App(ctk.CTk):
         self.editor_path = ""
         self.editor_saved = ""
         self.editor_width = 420
+        self.side_width = SIDE_DEFAULT
         self.editor_tabs = EditorTabs()
         self._editor_tab_buttons: list = []
         self._highlight_job = None
@@ -1955,8 +1958,7 @@ class App(ctk.CTk):
         self.bind_class("Entry", "<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.grid_columnconfigure(0, weight=0, minsize=36)
         self.grid_columnconfigure(1, weight=0, minsize=1)
-        self.grid_columnconfigure(2, weight=0, minsize=248)
-        self.grid_columnconfigure(3, weight=1)
+        self.grid_columnconfigure(2, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=36)
@@ -1980,9 +1982,20 @@ class App(ctk.CTk):
         icon_button(rail, "gear", self.open_settings, size=28).place(relx=0.5, rely=1.0, y=-12, anchor="s")
         ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
 
-        side = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=248)
-        side.grid(row=0, column=2, sticky="nsew")
-        side.grid_propagate(False)
+        self.body = tk.PanedWindow(
+            self,
+            orient="horizontal",
+            sashwidth=6,
+            sashrelief="flat",
+            bd=0,
+            bg=_tone(INK),
+            sashcursor="sb_h_double_arrow",
+        )
+        self.body.grid(row=0, column=2, sticky="nsew")
+        self.body.bind("<ButtonRelease-1>", self._remember_side_width)
+
+        side = ctk.CTkFrame(self.body, fg_color=PANEL, corner_radius=0)
+        self.side = side
         side.grid_columnconfigure(0, weight=1)
         side.grid_rowconfigure(3, weight=1)
         head = ctk.CTkFrame(side, fg_color="transparent")
@@ -2059,9 +2072,10 @@ class App(ctk.CTk):
         self.chat_tree.bind("<Button-3>", self._chat_menu)
         self.side_tabs.set("Файлы")
         self._show_side_tab("Файлы")
+        self.body.add(side, stretch="never", minsize=SIDE_MIN, sticky="nsew")
 
         self.work = tk.PanedWindow(
-            self,
+            self.body,
             orient="horizontal",
             sashwidth=6,
             sashrelief="flat",
@@ -2069,12 +2083,13 @@ class App(ctk.CTk):
             bg=_tone(INK),
             sashcursor="sb_h_double_arrow",
         )
-        self.work.grid(row=0, column=3, sticky="nsew")
         self.work.bind("<ButtonRelease-1>", self._remember_editor_width)
         self.center = ctk.CTkFrame(self.work, fg_color=INK, corner_radius=0)
         self.center.grid_columnconfigure(0, weight=1)
         self.center.grid_rowconfigure(1, weight=1)
         self.work.add(self.center, stretch="always", minsize=360, sticky="nsew")
+        self.body.add(self.work, stretch="always", minsize=360, sticky="nsew")
+        self.after(30, self._place_side_sash)
         head_bar = ctk.CTkFrame(self.center, fg_color="transparent")
         self.head_bar = head_bar
         head_bar.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 6))
@@ -2093,7 +2108,7 @@ class App(ctk.CTk):
             head_bar, text="", anchor="e", text_color=MUTED, font=self._font(11), width=1
         )
         self.run_indicator.grid(row=0, column=2, padx=(4, 6), sticky="e")
-        self.output_toggle = quiet_button(head_bar, "Вывод", self.toggle_output_panel, width=72)
+        self.output_toggle = quiet_button(head_bar, "Вывод", self.toggle_output_panel, width=48, height=24)
         self.output_toggle.grid(row=0, column=3, sticky="e")
         self.center.grid_rowconfigure(2, weight=0)
         self.mid_split = tk.PanedWindow(
@@ -3972,6 +3987,32 @@ class App(ctk.CTk):
             return "break"
         return _on_layout_clipboard(event)
 
+    def _place_side_sash(self, tries: int = 0) -> None:
+        body = getattr(self, "body", None)
+        if body is None:
+            return
+        total = body.winfo_width()
+        if total < SIDE_MIN + 360:
+            if tries < 10:
+                self.after(50, lambda: self._place_side_sash(tries + 1))
+            return
+        width = max(SIDE_MIN, min(int(self.side_width or SIDE_DEFAULT), total - 360))
+        try:
+            body.sash_place(0, width, 1)
+        except tk.TclError:
+            return
+
+    def _remember_side_width(self, _event=None) -> None:
+        body = getattr(self, "body", None)
+        if body is None:
+            return
+        try:
+            left, _top = body.sash_coord(0)
+        except tk.TclError:
+            return
+        self.side_width = max(SIDE_MIN, int(left))
+        self._fit_labels()
+
     def _place_editor_sash(self, tries: int = 0) -> None:
         if not self.editor_open:
             return
@@ -4528,6 +4569,8 @@ class App(ctk.CTk):
         ctk.set_appearance_mode(theme)
         self._restore_theme_windows()
         self.after(60, self._restore_theme_windows)
+        if hasattr(self, "body"):
+            self.body.configure(bg=_tone(INK))
         if hasattr(self, "work"):
             self.work.configure(bg=_tone(INK))
         if hasattr(self, "mid_split"):
