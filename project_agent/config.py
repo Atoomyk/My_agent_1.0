@@ -37,6 +37,7 @@ def default_config() -> dict:
         "test_timeout": 120,
         "test_fix_rounds": 3,
         "allowed_commands": [],
+        "agent_shell_enabled": False,
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
@@ -189,6 +190,10 @@ def _prefer_cheap_provider(raw) -> bool:
     return _flag(raw)
 
 
+def _agent_shell_enabled(raw) -> bool:
+    return _flag(raw)
+
+
 def _flag(raw) -> bool:
     if isinstance(raw, bool):
         return raw
@@ -272,6 +277,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["test_timeout"] = _test_timeout(data.get("test_timeout"))
     merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     merged["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
+    merged["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
     merged["context_limit"] = _context_limit(data.get("context_limit"))
     merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
@@ -297,6 +303,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["test_timeout"] = _test_timeout(data.get("test_timeout"))
     payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
     payload["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
+    payload["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
     payload["context_limit"] = _context_limit(data.get("context_limit"))
     payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))

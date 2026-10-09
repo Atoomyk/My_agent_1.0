@@ -21,7 +21,12 @@ from project_agent.paths import (
 )
 from project_agent.providers import request_image
 from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is_secret_blob, literals_from_settings
-from project_agent.allowed import list_allowed_ids, normalize_allowed_commands, resolve_allowed
+from project_agent.allowed import (
+    list_allowed_ids,
+    normalize_allowed_commands,
+    resolve_allowed,
+    resolve_shell_argv,
+)
 from project_agent.testing import (
     LABEL_BY_PRESET,
     fail_brief,
@@ -33,6 +38,7 @@ from project_agent.testing import (
     preset_command,
     run_argv,
     run_preset,
+    spawn_detached,
 )
 from project_agent.index_store import (
     build_index,
@@ -69,6 +75,7 @@ MAX_SCAN_FILES = 2000
 MAX_LIST_DIR = 120
 MAX_WRITE_CHARS = 1_000_000
 MAX_TOOL_RESULT_CHARS = 24_000
+SHELL_MAX_PER_TURN = 3
 
 
 def _schema(properties: dict, required: list[str]) -> dict:
@@ -77,6 +84,15 @@ def _schema(properties: dict, required: list[str]) -> dict:
 
 def _string(description: str) -> dict:
     return {"type": "string", "description": description}
+
+
+def _flag_bool(raw) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    value = str(raw or "").strip().lower()
+    return value in ("1", "true", "yes", "on")
 
 
 TOOL_SPECS = [
@@ -184,6 +200,7 @@ TOOL_SPECS = [
         "description": (
             "Запустить команду из жёсткого allowlist по id. "
             "Встроенные: unittest, pytest, npm_test, build_ps1; плюс свои id из настроек → Проект. "
+            "Свои с суффиксом id! — detach (GUI/долгое без ожидания). "
             "Всегда подтверждение. Нет произвольного shell и свободных аргументов. "
             "Для цикла правок+тестов предпочитай run_tests."
         ),
@@ -193,6 +210,33 @@ TOOL_SPECS = [
                 "summary": _string("Короткая причина запуска без секретов."),
             },
             ["id"],
+        ),
+    },
+    {
+        "name": "run_shell",
+        "description": (
+            "Почти свободный запуск argv в корне проекта (не интерактивный терминал). "
+            "Только если включено в настройках → Проект. Всегда подтверждение. "
+            "Лимит 3 запуска за ход. Без shell-метасимволов (|;&`$<>) и без cmd / powershell -Command. "
+            "Предпочитай run_tests и run_allowed; run_shell — только если нет подходящего пресета или id. "
+            "Передай argv (массив) или command (строка → shlex). "
+            "detach=true — запуск без ожидания (GUI), иначе ждём до таймаута."
+        ),
+        "parameters": _schema(
+            {
+                "summary": _string("Короткая причина запуска без секретов."),
+                "argv": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Аргументы команды. Если задан — приоритетнее command.",
+                },
+                "command": _string("Строка команды; разбирается shlex, если argv нет."),
+                "detach": {
+                    "type": "boolean",
+                    "description": "true — запустить и отпустить (GUI); false/пусто — ждать вывод.",
+                },
+            },
+            ["summary"],
         ),
     },
     {
@@ -285,12 +329,16 @@ def mode_allows_writes(mode: str) -> bool:
     return normalize_agent_mode(mode) in WRITE_MODES
 
 
-def tools_for_mode(mode: str) -> list[dict]:
+def tools_for_mode(mode: str, settings: dict | None = None) -> list[dict]:
     mode = normalize_agent_mode(mode)
     if mode in READONLY_MODES:
         names = PLAN_TOOL_NAMES if mode == "plan" else ASK_TOOL_NAMES
         return [spec for spec in TOOL_SPECS if spec["name"] in names]
-    return list(TOOL_SPECS)
+    specs = list(TOOL_SPECS)
+    enabled = bool((settings or {}).get("agent_shell_enabled"))
+    if not enabled:
+        specs = [spec for spec in specs if spec["name"] != "run_shell"]
+    return specs
 
 
 @dataclass
@@ -312,6 +360,7 @@ class Toolbox:
         self._image_http = None
         self._test_holder: dict = {}
         self._test_runs = 0
+        self._shell_runs = 0
         self._last_fail_key = ""
         self._fail_locked = False
         self._touched: list[str] = []
@@ -332,6 +381,7 @@ class Toolbox:
 
     def begin_turn(self) -> None:
         self._test_runs = 0
+        self._shell_runs = 0
         self._last_fail_key = ""
         self._fail_locked = False
         self._touched = []
@@ -382,8 +432,9 @@ class Toolbox:
 
     def execute(self, name: str, arguments) -> ToolOutcome:
         try:
-            mode = normalize_agent_mode((self.settings() or {}).get("agent_mode"))
-            allowed = {spec["name"] for spec in tools_for_mode(mode)}
+            settings = self.settings() or {}
+            mode = normalize_agent_mode(settings.get("agent_mode"))
+            allowed = {spec["name"] for spec in tools_for_mode(mode, settings)}
             if mode in READONLY_MODES and name not in allowed:
                 if mode == "plan":
                     outcome = ToolOutcome(
@@ -794,7 +845,7 @@ class Toolbox:
         rounds = normalize_fix_rounds(settings.get("test_fix_rounds"))
         if self._fail_locked:
             return ToolOutcome(
-                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed и другие инструменты; "
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed/run_shell и другие инструменты; "
                 "кратко опиши проблему и перечисли тронутые файлы."
                 + self._touched_suffix(),
                 "run_tests: стоп повтор",
@@ -894,25 +945,34 @@ class Toolbox:
         timeout = normalize_timeout(settings.get("test_timeout"))
         if self._fail_locked:
             return ToolOutcome(
-                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed и другие инструменты; "
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed/run_shell и другие инструменты; "
                 "кратко опиши проблему и перечисли тронутые файлы."
                 + self._touched_suffix(),
                 "run_allowed: стоп повтор",
             )
         try:
-            resolved_id, command = resolve_allowed(root, command_id, custom)
+            resolved_id, command, detach = resolve_allowed(root, command_id, custom)
         except ValueError as exc:
             known = ", ".join(list_allowed_ids(custom))
             return ToolOutcome(
                 f"{exc}. Доступные id: {known}." if "allowlist" not in str(exc).lower() else str(exc),
                 f"run_allowed: ошибка",
             )
-        summary = self._summary(
-            args.get("summary"),
-            f"Allowlist «{resolved_id}», таймаут {timeout} с",
-            0,
-        )
+        if detach:
+            summary = self._summary(
+                args.get("summary"),
+                f"Allowlist «{resolved_id}» (detach, без ожидания)",
+                0,
+            )
+        else:
+            summary = self._summary(
+                args.get("summary"),
+                f"Allowlist «{resolved_id}», таймаут {timeout} с",
+                0,
+            )
         detail = format_command(command)
+        if detach:
+            detail = f"[detach]\n{detail}"
         if self._stopped() or not self.confirm(f"run_allowed:{resolved_id}", summary, detail):
             return ToolOutcome(
                 "Пользователь отказался запускать команду. Не повторяй без новой причины.",
@@ -921,6 +981,8 @@ class Toolbox:
         if self._stopped():
             return ToolOutcome("Остановлено.", f"run_allowed {resolved_id}: остановлено")
         title = f"run_allowed · {resolved_id}"
+        if detach:
+            return self._run_detached(title, root, command, f"run_allowed {resolved_id}")
         self._emit_run("start", title=title, command=format_command(command))
         try:
             result = run_argv(
@@ -977,6 +1039,154 @@ class Toolbox:
         ).strip()
         self._emit_run("end", title=title, status=status)
         return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: {status}")
+
+    def _tool_run_shell(self, args: dict) -> ToolOutcome:
+        root = self._require_root()
+        settings = self.settings() or {}
+        mode = normalize_agent_mode(settings.get("agent_mode"))
+        if mode in READONLY_MODES:
+            label = "Plan" if mode == "plan" else "Ask"
+            return ToolOutcome(
+                f"Режим {label}: run_shell недоступен.",
+                f"run_shell: запрещено в {label}",
+            )
+        if not bool(settings.get("agent_shell_enabled")):
+            return ToolOutcome(
+                "run_shell выключен. Включите «Почти свободный shell» в настройках → Проект.",
+                "run_shell: выключено",
+            )
+        if self._fail_locked:
+            return ToolOutcome(
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed/run_shell и другие инструменты; "
+                "кратко опиши проблему и перечисли тронутые файлы."
+                + self._touched_suffix(),
+                "run_shell: стоп повтор",
+            )
+        if self._shell_runs >= SHELL_MAX_PER_TURN:
+            return ToolOutcome(
+                f"Лимит запусков run_shell за этот ход ({SHELL_MAX_PER_TURN}). "
+                "Кратко опиши, что осталось, и остановись."
+                + self._touched_suffix(),
+                f"run_shell: лимит {SHELL_MAX_PER_TURN}",
+            )
+        timeout = normalize_timeout(settings.get("test_timeout"))
+        detach = _flag_bool(args.get("detach"))
+        try:
+            command = resolve_shell_argv(args)
+        except ValueError as exc:
+            return ToolOutcome(str(exc), "run_shell: ошибка")
+        rendered = format_command(command)
+        if detach:
+            summary = self._summary(args.get("summary"), "Shell detach (без ожидания)", 0)
+            detail = f"[detach]\n{rendered}"
+        else:
+            summary = self._summary(args.get("summary"), f"Shell, таймаут {timeout} с", 0)
+            detail = rendered
+        if self._stopped() or not self.confirm("run_shell", summary, detail):
+            return ToolOutcome(
+                "Пользователь отказался запускать команду. Не повторяй без новой причины.",
+                "run_shell: отказ",
+            )
+        if self._stopped():
+            return ToolOutcome("Остановлено.", "run_shell: остановлено")
+        title = "run_shell"
+        if detach:
+            outcome = self._run_detached(title, root, command, "run_shell")
+            if outcome.journal.endswith(": ошибка"):
+                return outcome
+            self._shell_runs += 1
+            mark = f"{self._shell_runs}/{SHELL_MAX_PER_TURN}"
+            outcome.model_text = (outcome.model_text + f"\nЗапуск {mark}.").strip()
+            outcome.journal = f"run_shell: detach {mark}"
+            return outcome
+        self._emit_run("start", title=title, command=rendered)
+        try:
+            result = run_argv(
+                root,
+                command,
+                timeout,
+                self.stop,
+                self._test_holder,
+                on_output=lambda chunk: self._emit_run("chunk", text=chunk),
+            )
+        except ValueError as exc:
+            self._emit_run("end", title=title, status="ошибка")
+            return ToolOutcome(str(exc), "run_shell: ошибка")
+        except OSError as exc:
+            self._emit_run("end", title=title, status="ошибка")
+            return ToolOutcome(f"Не удалось запустить: {exc}", "run_shell: ошибка")
+        if result.stopped or self._stopped():
+            self._emit_run("end", title=title, status="остановлено")
+            return ToolOutcome("Запуск остановлен.", "run_shell: остановлено")
+        self._shell_runs += 1
+        if result.timed_out:
+            body = (
+                f"Таймаут {timeout} с. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+                f"Команда: {format_command(result.command)}\n\n{result.output}"
+            ).strip()
+            self._emit_run("end", title=title, status=f"таймаут {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+            return ToolOutcome(
+                body + self._touched_suffix(),
+                f"run_shell: таймаут {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+            )
+        code = 0 if result.code is None else int(result.code)
+        status = "OK" if code == 0 else f"FAIL ({code})"
+        if code != 0:
+            fail_key = f"shell:{fail_fingerprint(result.output, code)}"
+            if fail_key and fail_key == self._last_fail_key:
+                self._fail_locked = True
+                body = (
+                    f"СТОП: {status} — то же падение shell, что в предыдущем запуске. "
+                    f"Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}. Больше не вызывай инструменты; "
+                    f"опиши проблему человеку и перечисли тронутые файлы.\n"
+                    f"Команда: {format_command(result.command)}\n\n{result.output}"
+                ).strip()
+                self._emit_run(
+                    "end",
+                    title=title,
+                    status=f"повтор {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                )
+                return ToolOutcome(
+                    body + self._fail_context(result.output, code),
+                    f"run_shell: повтор {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                )
+            self._last_fail_key = fail_key
+            body = (
+                f"{status}. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+                f"Команда: {format_command(result.command)}\n\n{result.output}"
+            ).strip()
+            self._emit_run("end", title=title, status=f"{status} {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+            return ToolOutcome(
+                body + self._fail_context(result.output, code),
+                f"run_shell: {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+            )
+        self._last_fail_key = ""
+        body = (
+            f"{status}. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+            f"Команда: {format_command(result.command)}\n\n{result.output}"
+        ).strip()
+        self._emit_run("end", title=title, status=f"{status} {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+        return ToolOutcome(
+            body + self._touched_suffix(),
+            f"run_shell: {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+        )
+
+    def _run_detached(self, title: str, root, command, journal_prefix: str) -> ToolOutcome:
+        rendered = format_command(command)
+        self._emit_run("start", title=title, command=f"[detach] {rendered}")
+        try:
+            result = spawn_detached(root, command)
+        except ValueError as exc:
+            self._emit_run("end", title=title, status="ошибка")
+            return ToolOutcome(str(exc), f"{journal_prefix}: ошибка")
+        except OSError as exc:
+            self._emit_run("end", title=title, status="ошибка")
+            return ToolOutcome(f"Не удалось запустить: {exc}", f"{journal_prefix}: ошибка")
+        body = (
+            f"OK (detach).\nКоманда: {format_command(result.command)}\n\n{result.output}"
+        ).strip()
+        self._emit_run("end", title=title, status=f"detach pid={result.pid}")
+        return ToolOutcome(body + self._touched_suffix(), f"{journal_prefix}: detach pid={result.pid}")
 
     def _tool_git(self, args: dict) -> ToolOutcome:
         root = self._require_root()

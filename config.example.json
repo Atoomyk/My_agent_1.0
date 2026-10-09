@@ -14,6 +14,7 @@
   "test_timeout": 120,
   "test_fix_rounds": 3,
   "allowed_commands": [],
+  "agent_shell_enabled": false,
   "active_profile": "",
   "profiles": [],
   "mcp_servers": [],

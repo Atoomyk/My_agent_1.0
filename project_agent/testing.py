@@ -45,6 +45,13 @@ class TestRun:
     stopped: bool
 
 
+@dataclass
+class DetachRun:
+    command: list[str] | str
+    pid: int
+    output: str
+
+
 def format_command(command: list[str] | str) -> str:
     if isinstance(command, str):
         return command
@@ -206,6 +213,53 @@ def kill_process(process: subprocess.Popen) -> None:
         return
 
 
+def _scrub_run_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "API_KEY", "PROJECTAGENT_API_KEY"):
+        env.pop(key, None)
+    return env
+
+
+def spawn_detached(root: Path, command: list[str] | str) -> DetachRun:
+    """Запуск без ожидания и без kill по таймауту (GUI / долгие процессы)."""
+    if isinstance(command, str):
+        if not command.strip():
+            raise ValueError("пустая команда")
+    elif not command:
+        raise ValueError("пустой argv")
+    kwargs: dict = {
+        "cwd": str(root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": _scrub_run_env(),
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        # Не CREATE_NO_WINDOW — GUI должно открыться. Отрыв от родителя.
+        flags = 0
+        flags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        kwargs["creationflags"] = flags
+        kwargs["close_fds"] = False  # на Windows с PIPE/redirects иначе нельзя; DEVNULL ок с False
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **kwargs)
+    pid = int(process.pid or 0)
+    # Не ждём: процесс отсоединён. Сброс returncode глушит ResourceWarning при GC.
+    try:
+        process.poll()
+    except OSError:
+        pass
+    if process.returncode is None:
+        process.returncode = 0
+    return DetachRun(
+        command=command,
+        pid=pid,
+        output=f"Запущено без ожидания (detach), pid={pid}. Процесс не убивается по таймауту хода.",
+    )
+
+
 def run_argv(
     root: Path,
     command: list[str] | str,
@@ -215,9 +269,7 @@ def run_argv(
     on_output: Callable[[str], None] | None = None,
 ) -> TestRun:
     timeout = normalize_timeout(timeout)
-    env = os.environ.copy()
-    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "API_KEY", "PROJECTAGENT_API_KEY"):
-        env.pop(key, None)
+    env = _scrub_run_env()
     process = subprocess.Popen(
         command,
         cwd=str(root),

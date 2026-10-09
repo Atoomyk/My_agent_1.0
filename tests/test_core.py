@@ -293,6 +293,40 @@ class ClipboardTests(unittest.TestCase):
             root.destroy()
 
 
+class DialogScrollTests(unittest.TestCase):
+    def test_bind_wheel_scroll_moves_text(self):
+        import customtkinter as ctk
+        import tkinter as tk
+
+        from project_agent.app import ConfirmDialog, bind_wheel_scroll
+
+        root = ctk.CTk()
+        root.withdraw()
+        try:
+            box = tk.Text(root, height=4, width=20)
+            box.pack()
+            box.insert("1.0", "\n".join(f"line-{i}" for i in range(80)))
+            bind_wheel_scroll(box, root)
+            before = box.yview()
+            box.event_generate("<MouseWheel>", delta=-120)
+            root.update_idletasks()
+            after = box.yview()
+            self.assertNotEqual(before, after)
+
+            detail = "\n".join(f"+ line {i}" for i in range(60))
+            dialog = ConfirmDialog(root, "path/file.py", "summary", detail)
+            root.update_idletasks()
+            self.assertIsNotNone(dialog._box)
+            inner = dialog._box._textbox
+            start = inner.yview()
+            dialog.event_generate("<MouseWheel>", delta=-120)
+            root.update_idletasks()
+            self.assertNotEqual(start, inner.yview())
+            dialog.refuse()
+        finally:
+            root.destroy()
+
+
 class PatchTests(unittest.TestCase):
     def test_search_and_unified(self):
         original = "alpha\nbeta\ngamma\n"
@@ -1114,6 +1148,7 @@ class ToolRunningLabelTests(unittest.TestCase):
 class AllowedCommandTests(unittest.TestCase):
     def test_resolve_builtin_and_custom(self):
         from project_agent.allowed import (
+            format_allowed_text,
             parse_allowed_text,
             resolve_allowed,
             list_allowed_ids,
@@ -1123,16 +1158,24 @@ class AllowedCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "build.ps1").write_text("Write-Host ok\n", encoding="utf-8")
-            command_id, argv = resolve_allowed(root, "unittest", [])
+            command_id, argv, detach = resolve_allowed(root, "unittest", [])
             self.assertEqual(command_id, "unittest")
+            self.assertFalse(detach)
             self.assertIn("-m", argv)
             self.assertIn("unittest", argv)
             custom = [{"id": "ruff_check", "argv": ["python", "-m", "ruff", "check"]}]
             self.assertEqual(normalize_allowed_commands(custom)[0]["id"], "ruff_check")
-            resolved, cmd = resolve_allowed(root, "ruff_check", custom)
+            resolved, cmd, det = resolve_allowed(root, "ruff_check", custom)
             self.assertEqual(resolved, "ruff_check")
             self.assertEqual(cmd, ["python", "-m", "ruff", "check"])
+            self.assertFalse(det)
             self.assertIn("ruff_check", list_allowed_ids(custom))
+            parsed = parse_allowed_text(f"gui_app!: {sys.executable} -c pass")
+            self.assertTrue(parsed[0]["detach"])
+            self.assertIn("gui_app!:", format_allowed_text(parsed))
+            _, gui_cmd, gui_det = resolve_allowed(root, "gui_app", parsed)
+            self.assertTrue(gui_det)
+            self.assertEqual(gui_cmd[0], sys.executable)
             with self.assertRaises(ValueError):
                 parse_allowed_text("unittest: python -m unittest")
             with self.assertRaises(ValueError):
@@ -1166,6 +1209,209 @@ class AllowedCommandTests(unittest.TestCase):
             self.assertIn("Plan", blocked.model_text)
 
 
+class RunShellTests(unittest.TestCase):
+    def test_resolve_shell_argv_and_rejects(self):
+        from project_agent.allowed import resolve_shell_argv
+
+        self.assertEqual(
+            resolve_shell_argv({"argv": [sys.executable, "-c", "print(1)"]}),
+            [sys.executable, "-c", "print(1)"],
+        )
+        parsed = resolve_shell_argv({"command": f'"{sys.executable}" -c "print(1)"'})
+        self.assertEqual(parsed[0], sys.executable)
+        self.assertIn("-c", parsed)
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"command": "echo hi | cat"})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"argv": ["cmd", "/c", "dir"]})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"argv": ["powershell", "-Command", "Get-Date"]})
+
+    def test_run_shell_disabled_modes_limit_fingerprint(self):
+        notes = []
+        events = []
+
+        def confirm(path, summary, detail=""):
+            notes.append((path, summary, detail))
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {
+                "api_key": "",
+                "mcp_servers": [],
+                "agent_mode": "agent",
+                "test_timeout": 30,
+                "agent_shell_enabled": False,
+            }
+            box = Toolbox(SecretVault(), confirm, McpHub(), lambda: settings)
+            box.set_root(root)
+            box.begin_turn()
+            off = box.execute(
+                "run_shell",
+                {"summary": "probe", "argv": [sys.executable, "-c", "print(7)"]},
+            )
+            self.assertIn("выключен", off.model_text.lower())
+            self.assertFalse(notes)
+
+            settings["agent_shell_enabled"] = True
+            box.on_run_output = lambda event, **payload: events.append((event, payload))
+            ok = box.execute(
+                "run_shell",
+                {"summary": "probe", "argv": [sys.executable, "-c", "print(77)"]},
+            )
+            self.assertIn("77", ok.model_text)
+            self.assertIn("run_shell", ok.journal)
+            self.assertTrue(notes)
+            self.assertTrue(any(item[0] == "start" for item in events))
+            self.assertTrue(any(item[0] == "end" for item in events))
+
+            settings["agent_mode"] = "plan"
+            plan_blocked = box.execute(
+                "run_shell",
+                {"summary": "nope", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("Plan", plan_blocked.model_text)
+            settings["agent_mode"] = "ask"
+            ask_blocked = box.execute(
+                "run_shell",
+                {"summary": "nope", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("Ask", ask_blocked.model_text)
+
+            settings["agent_mode"] = "agent"
+            box.begin_turn()
+            for _ in range(3):
+                box.execute(
+                    "run_shell",
+                    {"summary": "ok", "argv": [sys.executable, "-c", "print(1)"]},
+                )
+            limited = box.execute(
+                "run_shell",
+                {"summary": "more", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("Лимит", limited.model_text)
+            self.assertIn("лимит", limited.journal)
+
+            box.begin_turn()
+            fail_script = root / "fail_once.py"
+            fail_script.write_text("raise SystemExit(7)\n", encoding="utf-8")
+            fail_args = {
+                "summary": "fail",
+                "argv": [sys.executable, str(fail_script)],
+            }
+            first = box.execute("run_shell", fail_args)
+            self.assertIn("FAIL", first.model_text)
+            self.assertFalse(box.fail_locked)
+            second = box.execute("run_shell", fail_args)
+            self.assertIn("СТОП", second.model_text)
+            self.assertTrue(box.fail_locked)
+            third = box.execute("run_shell", fail_args)
+            self.assertIn("стоп повтор", third.journal)
+
+    def test_tools_for_mode_hides_run_shell_when_off(self):
+        from project_agent.tools import tools_for_mode
+
+        self.assertNotIn("run_shell", {s["name"] for s in tools_for_mode("agent")})
+        self.assertNotIn("run_shell", {s["name"] for s in tools_for_mode("ask")})
+        on = {s["name"] for s in tools_for_mode("agent", {"agent_shell_enabled": True})}
+        self.assertIn("run_shell", on)
+        debug_on = {s["name"] for s in tools_for_mode("debug", {"agent_shell_enabled": True})}
+        self.assertIn("run_shell", debug_on)
+        plan_on = {s["name"] for s in tools_for_mode("plan", {"agent_shell_enabled": True})}
+        self.assertNotIn("run_shell", plan_on)
+
+    def test_run_shell_and_allowed_detach(self):
+        import subprocess
+        import time
+
+        from project_agent.testing import spawn_detached
+
+        def _kill(pid: int) -> None:
+            if pid <= 0:
+                return
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                try:
+                    os.kill(pid, 15)
+                except OSError:
+                    pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "detached_ok.txt"
+            slow_py = root / "slow_detach.py"
+            slow_py.write_text(
+                "from pathlib import Path\nimport time\nPath('detached_ok.txt').write_text('ok')\ntime.sleep(60)\n",
+                encoding="utf-8",
+            )
+            t0 = time.monotonic()
+            launched = spawn_detached(root, [sys.executable, str(slow_py)])
+            self.assertLess(time.monotonic() - t0, 5.0, "detach не должен ждать дочерний sleep")
+            self.assertGreater(launched.pid, 0)
+            try:
+                for _ in range(50):
+                    if marker.is_file():
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(marker.is_file(), "detach-процесс не успел создать маркер")
+
+                shell_py = root / "shell_mark.py"
+                shell_py.write_text(
+                    "from pathlib import Path\nPath('from_shell.txt').write_text('y')\n",
+                    encoding="utf-8",
+                )
+                allowed_py = root / "allowed_mark.py"
+                allowed_py.write_text(
+                    "from pathlib import Path\nPath('from_allowed.txt').write_text('x')\n",
+                    encoding="utf-8",
+                )
+                settings = {
+                    "api_key": "",
+                    "mcp_servers": [],
+                    "agent_mode": "agent",
+                    "test_timeout": 15,
+                    "agent_shell_enabled": True,
+                    "allowed_commands": [
+                        {
+                            "id": "mark_gui",
+                            "argv": [sys.executable, str(allowed_py.name)],
+                            "detach": True,
+                        }
+                    ],
+                }
+                box = Toolbox(SecretVault(), lambda *_a, **_k: True, McpHub(), lambda: settings)
+                box.set_root(root)
+                box.begin_turn()
+                shell = box.execute(
+                    "run_shell",
+                    {
+                        "summary": "detach shell",
+                        "detach": True,
+                        "argv": [sys.executable, str(shell_py.name)],
+                    },
+                )
+                self.assertIn("detach", shell.journal.lower())
+                self.assertIn("OK", shell.model_text)
+                allowed = box.execute("run_allowed", {"id": "mark_gui", "summary": "detach allowed"})
+                self.assertIn("detach", allowed.journal.lower())
+                for _ in range(50):
+                    if (root / "from_shell.txt").is_file() and (root / "from_allowed.txt").is_file():
+                        break
+                    time.sleep(0.05)
+                self.assertTrue((root / "from_shell.txt").is_file())
+                self.assertTrue((root / "from_allowed.txt").is_file())
+            finally:
+                _kill(launched.pid)
+
+
 class AgentModeTests(unittest.TestCase):
     def test_tools_filter_and_ask_blocks_writes(self):
         from project_agent.tools import (
@@ -1188,13 +1434,16 @@ class AgentModeTests(unittest.TestCase):
         self.assertEqual(ask_names, set(ASK_TOOL_NAMES))
         self.assertNotIn("write_file", ask_names)
         self.assertNotIn("browser", ask_names)
+        self.assertNotIn("run_shell", ask_names)
         plan_names = {spec["name"] for spec in tools_for_mode("plan")}
         self.assertEqual(plan_names, set(PLAN_TOOL_NAMES))
         self.assertNotIn("write_file", plan_names)
         self.assertNotIn("run_tests", plan_names)
+        self.assertNotIn("run_shell", plan_names)
         agent_names = {spec["name"] for spec in tools_for_mode("agent")}
         self.assertIn("write_file", agent_names)
         self.assertIn("browser", agent_names)
+        self.assertNotIn("run_shell", agent_names)
         debug_names = {spec["name"] for spec in tools_for_mode("debug")}
         self.assertEqual(debug_names, agent_names)
 

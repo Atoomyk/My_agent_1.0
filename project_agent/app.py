@@ -117,6 +117,40 @@ SEARCH_BG = ("#efe0b8", "#4a3f24")
 SEARCH_CUR = ("#e0b86a", "#7a5e28")
 CHAT_COLUMN = 820
 DIFF_PREVIEW_LINES = 48
+
+
+def bind_wheel_scroll(view, root) -> None:
+    """Колесо на Windows идёт в focused-виджет — биндим всё дерево модалки на yview."""
+
+    def on_wheel(event):
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            steps = int(-delta / 120)
+            if steps == 0:
+                steps = -1 if delta > 0 else 1
+            view.yview_scroll(steps, "units")
+        elif getattr(event, "num", None) == 4:
+            view.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            view.yview_scroll(1, "units")
+        else:
+            return None
+        return "break"
+
+    def walk(widget) -> None:
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, on_wheel, add="+")
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            walk(child)
+
+    try:
+        walk(root)
+    except tk.TclError:
+        return
 _ICONS: dict[str, ctk.CTkImage] = {}
 _FENCE = re.compile(r"^\s*```")
 _INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
@@ -647,6 +681,9 @@ class ConfirmDialog(ctk.CTkToplevel):
         accept_label = "Принять" if self._detail else "Да"
         quiet_button(row, refuse_label, self.refuse, width=120, mark="close").pack(side="left", padx=8)
         quiet_button(row, accept_label, self.allow, width=120, primary=True, mark="check").pack(side="left", padx=8)
+        if self._box is not None:
+            # После кнопок: колесо работает и с фокусом на Toplevel/кнопках (Windows).
+            bind_wheel_scroll(self._box._textbox, self)
         self.protocol("WM_DELETE_WINDOW", self.refuse)
         self.bind("<Escape>", lambda _event: self.refuse())
         self.after(50, self.focus)
@@ -826,6 +863,7 @@ class FontPickDialog(ctk.CTkToplevel):
         self.bind("<Escape>", lambda _event: self._cancel())
         self.listbox.bind("<Return>", lambda _event: self._ok())
         self.listbox.bind("<Double-Button-1>", lambda _event: self._ok())
+        bind_wheel_scroll(self.listbox, self)
         self.after(50, self.listbox.focus_set)
 
     def _append_section(self, title: str, names: list[str]) -> None:
@@ -1074,7 +1112,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         ctk.CTkLabel(
             page,
-            text="Пресет тестов — для run_tests. Allowlist — для run_allowed (сборка и разовые команды). Произвольный shell недоступен. Каждый запуск с подтверждением.",
+            text="Пресет тестов — для run_tests. Allowlist — для run_allowed. Почти свободный shell (run_shell) — по чекбоксу ниже, выкл по умолчанию. Каждый запуск с подтверждением.",
             wraplength=400,
             justify="left",
             text_color=MUTED,
@@ -1085,10 +1123,28 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         app._entry(page, "Таймаут тестов (сек)", app.test_timeout_var, "120")
         app._entry(page, "Лимит запусков тестов за ход", app.test_fix_rounds_var, "3")
+        ctk.CTkSwitch(
+            page,
+            text="Почти свободный shell для агента (run_shell)",
+            variable=app.agent_shell_var,
+            text_color=TEXT,
+            progress_color=CTX_OK,
+            button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER,
+            font=(app.ui_font, 12),
+        ).pack(fill="x", padx=8, pady=(8, 2))
+        ctk.CTkLabel(
+            page,
+            text="Выкл по умолчанию. Только Agent/Debug; confirm каждый раз; лимит 3/ход. Не интерактивный терминал.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=(app.ui_font, 11),
+        ).pack(fill="x", padx=8, pady=(0, 8))
         app._field(page, "Свои команды allowlist")
         ctk.CTkLabel(
             page,
-            text="Встроенные id: unittest, pytest, npm_test, build_ps1. Свои — по одной строке: id: arg1 arg2 …",
+            text="Встроенные id: unittest, pytest, npm_test, build_ps1. Свои — id: arg1 arg2 …. Для GUI без ожидания: id!: arg1 … (detach).",
             wraplength=400,
             justify="left",
             text_color=MUTED,
@@ -1107,6 +1163,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         app.allowed_box.pack(fill="x", padx=8, pady=4)
         app.allowed_box.insert("1.0", format_allowed_text(getattr(app, "allowed_commands", [])))
+        bind_wheel_scroll(app.allowed_box._textbox, app.allowed_box)
         app._field(page, "Правила проекта")
         app.rules_label = ctk.CTkLabel(
             page,
@@ -1142,6 +1199,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         app.mcp_list.pack(fill="x", padx=8, pady=4)
         app.mcp_list.configure(state="disabled")
+        bind_wheel_scroll(app.mcp_list._textbox, app.mcp_list)
         app._render_mcp()
         app._entry(page, "Имя MCP", app.mcp_name_var, "filesystem")
         app._entry(page, "Команда MCP", app.mcp_command_var, "python -m server")
@@ -1182,8 +1240,9 @@ class SettingsWindow(ctk.CTkToplevel):
             "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
             "По умолчанию запись файла спрашивает подтверждение. Переключатель выше снимает диалог "
             "только для write_file / apply_patch внутри открытой папки проекта.\n\n"
-            "Генерация изображения, run_tests, run_allowed и git commit всегда спрашивают подтверждение.\n\n"
-            "Произвольного shell нет. Тесты — пресет; прочие команды — только id из allowlist (встроенные + свои в Проект).\n\n"
+            "Генерация изображения, run_tests, run_allowed, run_shell и git commit всегда спрашивают подтверждение.\n\n"
+            "Почти свободный shell (run_shell) — только если включён в Проект; по умолчанию выкл. "
+            "Тесты — пресет; разовые команды — id из allowlist; shell — argv без метасимволов, лимит 3/ход.\n\n"
             "Браузер не встроен: только MCP Playwright из настроек (если добавлен).\n\n"
             "Агент не выходит за выбранную папку проекта."
         )
@@ -1331,6 +1390,8 @@ class App(ctk.CTk):
         self.test_fix_rounds_var = ctk.StringVar(value="3")
         self.allowed_commands: list[dict] = []
         self.allowed_box = None
+        self.agent_shell_enabled = False
+        self.agent_shell_var = ctk.BooleanVar(value=False)
         self.auto_write_project = False
         self.auto_write_var = ctk.BooleanVar(value=False)
         self.prefer_cheap_provider = False
@@ -2752,6 +2813,8 @@ class App(ctk.CTk):
         from project_agent.allowed import normalize_allowed_commands
 
         self.allowed_commands = normalize_allowed_commands(data.get("allowed_commands"))
+        self.agent_shell_enabled = bool(data.get("agent_shell_enabled"))
+        self.agent_shell_var.set(self.agent_shell_enabled)
         self.auto_write_project = bool(data.get("auto_write_project"))
         self.auto_write_var.set(self.auto_write_project)
         self.prefer_cheap_provider = bool(data.get("prefer_cheap_provider"))
@@ -3075,6 +3138,8 @@ class App(ctk.CTk):
         settings["test_timeout"] = normalize_timeout(self.test_timeout_var.get())
         settings["test_fix_rounds"] = normalize_fix_rounds(self.test_fix_rounds_var.get())
         settings["allowed_commands"] = self._read_allowed_commands()
+        settings["agent_shell_enabled"] = bool(self.agent_shell_var.get())
+        self.agent_shell_enabled = settings["agent_shell_enabled"]
         settings["agent_mode"] = self.agent_mode
         settings["context_limit"] = self.context_limit
         settings["auto_write_project"] = bool(self.auto_write_var.get())
@@ -4602,7 +4667,11 @@ class App(ctk.CTk):
         self._output_pending = ""
         self.open_output_panel()
         self._show_output_slot(0)
-        mark = title.replace("run_tests · ", "").replace("run_allowed · ", "")
+        mark = (
+            title.replace("run_tests · ", "")
+            .replace("run_allowed · ", "")
+            .replace("run_shell", "shell")
+        )
         self.run_indicator.configure(text=f"▶ {mark}")
 
     def _chunk_output_run(self, text: str) -> None:
@@ -4641,9 +4710,13 @@ class App(ctk.CTk):
             self._output_slots[0]["status"] = status or "готово"
             if self._output_view == 0:
                 self._show_output_slot(0)
-        mark = (title or self.run_indicator.cget("text")).replace("run_tests · ", "").replace(
-            "run_allowed · ", ""
-        ).replace("▶ ", "")
+        mark = (
+            (title or self.run_indicator.cget("text"))
+            .replace("run_tests · ", "")
+            .replace("run_allowed · ", "")
+            .replace("run_shell", "shell")
+            .replace("▶ ", "")
+        )
         self.run_indicator.configure(text=f"{mark}: {status}" if status else mark)
 
     def set_status(self, text: str) -> None:

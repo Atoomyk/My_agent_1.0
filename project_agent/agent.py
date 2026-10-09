@@ -24,9 +24,10 @@ SYSTEM_AGENT = """Ты помощник по файлам проекта. Реж
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
 Запись файла, генерация изображения, run_tests и run_allowed выполняются только после подтверждения человека. Если он отказал, не повторяй то же действие.
 Можно смотреть изображения проекта, искать в интернете, генерировать картинки, запускать пресет тестов (run_tests), команды из allowlist (run_allowed), смотреть индекс путей (project_index), работать с git (status/diff/log; commit только после подтверждения) и вызывать настроенные MCP-инструменты.
-Тесты после правок — через run_tests и пресет в настройках → Проект. Сборка и разовые allowlist-команды — run_allowed с id (unittest, pytest, npm_test, build_ps1 или свои из настроек). Произвольный shell недоступен.
+Тесты после правок — через run_tests и пресет в настройках → Проект. Сборка и разовые allowlist-команды — run_allowed с id (unittest, pytest, npm_test, build_ps1 или свои из настроек).
 Браузер не встроен: если в настройках MCP есть playwright — используй инструмент browser (navigate → snapshot → click/type по ref). Свой Chrome ProjectAgent не запускает.
-Push, reset --hard и произвольный shell недоступны.
+Push и reset --hard недоступны.
+{shell_policy}
 Чтобы быстро найти файл по имени или фрагменту пути — project_index action=find. Символы Python/JS/TS — find_symbol; импорты файла — imports+path; кто импортирует — importers. Не содержимое файлов и не LSP.
 Перед правкой читай связанные файлы (импорты, соседние модули, тесты по имени) — не правь вслепую и не крути много мелких шагов наугад.
 После правок кода, если тесты включены в настройках, запускай run_tests и по выводу решай, нужна ли ещё правка.
@@ -41,7 +42,7 @@ SYSTEM_ASK = """Ты помощник по файлам проекта. Режи
 Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
 Метки вида [[SEC:...:N]] заменяют пароли и ключи. Не пытайся их раскрыть.
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
-В Ask нельзя менять проект: нет write_file, apply_patch, run_tests, run_allowed, git commit, generate_image, browser, call_mcp_tool.
+В Ask нельзя менять проект: нет write_file, apply_patch, run_tests, run_allowed, run_shell, git commit, generate_image, browser, call_mcp_tool.
 Можно: list_dir, read_file, search, project_index (find/find_symbol/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
 Отвечай на языке пользователя. Когда ответ готов — текстом без инструментов.
 """
@@ -52,7 +53,7 @@ SYSTEM_PLAN = """Ты помощник по файлам проекта. Реж�
 Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
 Метки вида [[SEC:...:N]] заменяют пароли и ключи. Не пытайся их раскрыть.
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
-В Plan нельзя менять проект и запускать команды: нет write_file, apply_patch, run_tests, run_allowed, git commit, generate_image, browser, call_mcp_tool.
+В Plan нельзя менять проект и запускать команды: нет write_file, apply_patch, run_tests, run_allowed, run_shell, git commit, generate_image, browser, call_mcp_tool.
 Можно: list_dir, read_file, search, project_index (find/find_symbol/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
 Задача: разобрать задачу, при необходимости прочитать код, затем выдать короткий план чеклистом в чате.
 Формат шагов (по одному в строке): «- [ ] шаг» или с якорем файла «- [ ] `path/to/file`: шаг».
@@ -69,8 +70,9 @@ SYSTEM_DEBUG = """Ты помощник по файлам проекта. Реж
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
 Запись файла, генерация изображения, run_tests и run_allowed — только после подтверждения. Если отказал — не повторяй то же действие.
 Дисциплина Debug: 1) воспроизведи или собери факты (чтение кода, логи, run_tests / run_allowed); 2) кратко сформулируй гипотезу; 3) одна точечная правка; 4) снова проверь.
-Не размазывай правки по многим файлам наугад. Push, reset --hard и произвольный shell недоступны.
+Не размазывай правки по многим файлам наугад. Push и reset --hard недоступны.
 Тесты после правок — run_tests; разовые allowlist-команды — run_allowed. При FAIL смотри блок «Этот ход тронул» и «Суть падения». При повторном том же FAIL или СТОП — остановись и опиши проблему.
+{shell_policy}
 Когда задача сделана или ход остановлен: ответь текстом без инструментов и перечисли изменённые файлы. Если правок не было — скажи об этом.
 Отвечай на языке пользователя.
 """
@@ -106,6 +108,8 @@ def tool_running_label(name: str, arguments) -> str:
         return "call_mcp_tool"
     if tool == "run_tests":
         return "run_tests"
+    if tool == "run_shell":
+        return "run_shell"
     if tool in {"read_file", "write_file", "apply_patch", "view_image"}:
         path = str(args.get("path") or "").strip()
         if path:
@@ -202,10 +206,28 @@ class Agent:
         self.toolbox.cancel()
         self.mcp.close()
 
+    def _shell_policy(self) -> str:
+        settings = {}
+        try:
+            settings = self.toolbox.settings() or {}
+        except Exception:
+            settings = {}
+        if self._agent_mode not in ("agent", "debug"):
+            return "Произвольный shell недоступен."
+        if bool(settings.get("agent_shell_enabled")):
+            return (
+                "Включён run_shell (почти свободный argv в корне проекта): только после подтверждения, "
+                "лимит 3 за ход, без shell-метасимволов и без cmd / powershell -Command. "
+                "Для GUI/долгого процесса — detach=true (без ожидания); иначе ждём вывод до таймаута. "
+                "В allowlist detach — суффикс id! в настройках. "
+                "Предпочитай run_tests и run_allowed; run_shell — только если нет подходящего пресета или id."
+            )
+        return "Произвольный shell (run_shell) выключен в настройках → Проект."
+
     def _system(self) -> str:
         root = str(self.root) if self.root else ""
         template = _SYSTEM_BY_MODE.get(self._agent_mode, SYSTEM_AGENT)
-        base = template.replace("{root}", root)
+        base = template.replace("{root}", root).replace("{shell_policy}", self._shell_policy())
         block, _sources = load_project_rules(self.root)
         parts = [base]
         if block:
@@ -246,7 +268,7 @@ class Agent:
             self.provider.add_user(scrubber(text), images)
         if not resend:
             self._open_checkpoint()
-        specs = tools_for_mode(self._agent_mode)
+        specs = tools_for_mode(self._agent_mode, settings)
         self._last_tools = specs
         max_steps = int(settings.get("max_steps") or 25)
         if self._agent_mode in ("ask", "plan"):
@@ -339,7 +361,10 @@ class Agent:
             "Контекст сжат для модели (лента чата на экране не очищена). "
             f"Сводка: {preview}" + ("…" if len(preview) >= 240 else "")
         )
-        self._last_tools = tools_for_mode(normalize_agent_mode(settings.get("agent_mode")))
+        self._last_tools = tools_for_mode(
+            normalize_agent_mode(settings.get("agent_mode")),
+            settings,
+        )
         self._publish_context(settings)
         self.on_status("Готово")
 
