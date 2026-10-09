@@ -19,5 +19,8 @@
   "mcp_servers": [],
   "agent_mode": "agent",
   "context_limit": 256000,
-  "auto_write_project": false
+  "auto_write_project": false,
+  "prefer_cheap_provider": false,
+  "ui_font": "Segoe UI",
+  "code_font": "Consolas"
 }

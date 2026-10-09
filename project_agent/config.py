@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 
 CONFIG_NAME = "config.json"
+DEFAULT_UI_FONT = "Segoe UI"
+DEFAULT_CODE_FONT = "Consolas"
 AI_FIELDS = (
     "provider",
     "base_url",
@@ -42,6 +44,8 @@ def default_config() -> dict:
         "context_limit": 256000,
         "auto_write_project": False,
         "prefer_cheap_provider": False,
+        "ui_font": DEFAULT_UI_FONT,
+        "code_font": DEFAULT_CODE_FONT,
     }
 
 
@@ -132,6 +136,13 @@ def _theme(raw) -> str:
     if value in ("dark", "light"):
         return value
     return "dark"
+
+
+def _font_family(raw, default: str) -> str:
+    value = " ".join(str(raw or "").split())
+    if not value or len(value) > 80:
+        return default
+    return value
 
 
 def _test_preset(raw) -> str:
@@ -265,6 +276,8 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["context_limit"] = _context_limit(data.get("context_limit"))
     merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
     merged["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
+    merged["ui_font"] = _font_family(data.get("ui_font"), DEFAULT_UI_FONT)
+    merged["code_font"] = _font_family(data.get("code_font"), DEFAULT_CODE_FONT)
     return merged, None
 
 
@@ -288,6 +301,8 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["context_limit"] = _context_limit(data.get("context_limit"))
     payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
     payload["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
+    payload["ui_font"] = _font_family(data.get("ui_font"), DEFAULT_UI_FONT)
+    payload["code_font"] = _font_family(data.get("code_font"), DEFAULT_CODE_FONT)
     _write_config(path, payload)
 
 
@@ -336,4 +351,23 @@ def save_theme(theme: str, path: Path | None = None) -> None:
     else:
         data = default_config()
     data["theme"] = theme
+    _write_config(path, data)
+
+
+def save_font(which: str, family: str, path: Path | None = None) -> None:
+    if which not in ("ui_font", "code_font"):
+        raise ValueError("unknown font field")
+    path = path or config_path()
+    default = DEFAULT_UI_FONT if which == "ui_font" else DEFAULT_CODE_FONT
+    family = _font_family(family, default)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(data, dict):
+            raise ValueError("config.json должен быть объектом")
+    else:
+        data = default_config()
+    data[which] = family
     _write_config(path, data)

@@ -21,7 +21,16 @@ from project_agent.checkpoints import (
     parse_checkpoint_mark,
     restore_files,
 )
-from project_agent.config import default_config, load_config, needs_api_key, save_config, save_theme
+from project_agent.config import (
+    DEFAULT_CODE_FONT,
+    DEFAULT_UI_FONT,
+    default_config,
+    load_config,
+    needs_api_key,
+    save_config,
+    save_font,
+    save_theme,
+)
 from project_agent.mcp_client import McpHub
 from project_agent.patching import apply_diff
 from project_agent.paths import MAX_FILE_BYTES, PathError, list_entries, read_text_file, resolve_inside
@@ -1669,6 +1678,46 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(example["mcp_servers"], [])
         self.assertTrue(needs_api_key("openai", "", ""))
         self.assertFalse(needs_api_key("openai", "http://localhost:11434/v1", ""))
+
+    def test_font_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            data = default_config()
+            data["model"] = "keep-me"
+            data["api_key"] = "unit-test-key-123456"
+            data["ui_font"] = "Arial"
+            data["code_font"] = "Courier New"
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["ui_font"], "Arial")
+            self.assertEqual(loaded["code_font"], "Courier New")
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw.pop("ui_font")
+            raw.pop("code_font")
+            raw["extra"] = "stay"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            loaded, error = load_config(path)
+            self.assertEqual(loaded["ui_font"], DEFAULT_UI_FONT)
+            self.assertEqual(loaded["code_font"], DEFAULT_CODE_FONT)
+            raw["ui_font"] = ""
+            raw["code_font"] = "x" * 100
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            loaded, error = load_config(path)
+            self.assertEqual(loaded["ui_font"], DEFAULT_UI_FONT)
+            self.assertEqual(loaded["code_font"], DEFAULT_CODE_FONT)
+            save_font("ui_font", "Tahoma", path)
+            save_font("code_font", "Lucida Console", path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["ui_font"], "Tahoma")
+            self.assertEqual(raw["code_font"], "Lucida Console")
+            self.assertEqual(raw["model"], "keep-me")
+            self.assertEqual(raw["api_key"], "unit-test-key-123456")
+            self.assertEqual(raw["extra"], "stay")
+            save_font("ui_font", "", path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["ui_font"], DEFAULT_UI_FONT)
+            self.assertEqual(raw["extra"], "stay")
 
     def test_theme_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,12 +25,15 @@ from project_agent.checkpoints import (
     restore_files,
 )
 from project_agent.config import (
+    DEFAULT_CODE_FONT,
+    DEFAULT_UI_FONT,
     ai_settings,
     config_dir,
     load_config,
     needs_api_key,
     save_agent_mode,
     save_config,
+    save_font,
     save_theme,
 )
 from project_agent.context_attach import (
@@ -481,7 +484,10 @@ def glyph(name: str, invert: bool = False) -> ctk.CTkImage:
     return icon
 
 
-def quiet_button(parent, text, command, width=96, primary=False, mark=None, round_mark=False, height=32):
+def quiet_button(
+    parent, text, command, width=96, primary=False, mark=None, round_mark=False, height=32, family: str | None = None
+):
+    face = family or DEFAULT_UI_FONT
     if round_mark:
         return ctk.CTkButton(
             parent,
@@ -507,7 +513,7 @@ def quiet_button(parent, text, command, width=96, primary=False, mark=None, roun
         fg_color=SEND if primary else BUTTON,
         hover_color=SEND_HOVER if primary else BUTTON_HOVER,
         text_color=ON_SEND if primary else TEXT,
-        font=("Segoe UI", 12 if height >= 28 else 11),
+        font=(face, 12 if height >= 28 else 11),
         command=command,
     )
 
@@ -527,7 +533,8 @@ def icon_button(parent, mark, command, size=32, fg=None):
     )
 
 
-def quiet_menu(parent, variable, values, command=None):
+def quiet_menu(parent, variable, values, command=None, family: str | None = None):
+    face = family or DEFAULT_UI_FONT
     return ctk.CTkOptionMenu(
         parent,
         variable=variable,
@@ -539,12 +546,37 @@ def quiet_menu(parent, variable, values, command=None):
         button_color=BUTTON_HOVER,
         button_hover_color=BORDER,
         text_color=TEXT,
-        font=("Segoe UI", 12),
+        font=(face, 12),
         dropdown_fg_color=PANEL,
         dropdown_text_color=TEXT,
         dropdown_hover_color=SELECT,
-        dropdown_font=("Segoe UI", 12),
+        dropdown_font=(face, 12),
     )
+
+
+_FONT_CATALOG: tuple[list[str], list[str], set[str]] | None = None
+
+
+def _font_catalog(root) -> tuple[list[str], list[str], set[str]]:
+    global _FONT_CATALOG
+    if _FONT_CATALOG is not None:
+        return _FONT_CATALOG
+    names = sorted({str(name) for name in tkfont.families(root)}, key=str.casefold)
+    with_cyr: list[str] = []
+    without: list[str] = []
+    cyr_set: set[str] = set()
+    for name in names:
+        try:
+            has = tkfont.Font(root=root, family=name, size=12).measure("Я") != 0
+        except tk.TclError:
+            has = False
+        if has:
+            with_cyr.append(name)
+            cyr_set.add(name)
+        else:
+            without.append(name)
+    _FONT_CATALOG = (with_cyr, without, cyr_set)
+    return _FONT_CATALOG
 
 
 class ConfirmDialog(ctk.CTkToplevel):
@@ -556,6 +588,8 @@ class ConfirmDialog(ctk.CTkToplevel):
         self._expanded = False
         self._box = None
         self._expand_btn = None
+        ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
+        code = getattr(master, "code_font", None) or DEFAULT_CODE_FONT
         self.title("Подтверждение")
         tall = bool(self._detail)
         self.geometry("560x420" if tall else "520x220")
@@ -566,12 +600,12 @@ class ConfirmDialog(ctk.CTkToplevel):
         self.grab_set()
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2 if tall else 1, weight=1)
-        ctk.CTkLabel(self, text=path, wraplength=520, justify="left", anchor="w", text_color=TEXT).grid(
-            row=0, column=0, sticky="ew", padx=16, pady=(16, 8)
-        )
-        ctk.CTkLabel(self, text=summary, wraplength=520, justify="left", anchor="w", text_color=MUTED).grid(
-            row=1, column=0, sticky="ew", padx=16, pady=4
-        )
+        ctk.CTkLabel(
+            self, text=path, wraplength=520, justify="left", anchor="w", text_color=TEXT, font=(ui, 13)
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        ctk.CTkLabel(
+            self, text=summary, wraplength=520, justify="left", anchor="w", text_color=MUTED, font=(ui, 12)
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=4)
         if tall:
             self._box = ctk.CTkTextbox(
                 self,
@@ -580,7 +614,7 @@ class ConfirmDialog(ctk.CTkToplevel):
                 border_width=1,
                 border_color=BORDER,
                 corner_radius=10,
-                font=("Consolas", 11),
+                font=(code, 11),
                 wrap="none",
             )
             self._box.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
@@ -671,13 +705,16 @@ class NameDialog(ctk.CTkToplevel):
         super().__init__(master)
         self.result = ""
         self._closed = False
+        ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
         self.title(title)
         self.geometry("420x168")
         self.resizable(False, False)
         self.configure(fg_color=INK)
         self.transient(master)
         self.grab_set()
-        ctk.CTkLabel(self, text="Имя профиля", anchor="w", text_color=MUTED).pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(self, text="Имя профиля", anchor="w", text_color=MUTED, font=(ui, 12)).pack(
+            fill="x", padx=16, pady=(16, 4)
+        )
         self.entry = ctk.CTkEntry(
             self,
             fg_color=FIELD,
@@ -685,6 +722,7 @@ class NameDialog(ctk.CTkToplevel):
             text_color=TEXT,
             height=36,
             corner_radius=12,
+            font=(ui, 12),
         )
         self.entry.pack(fill="x", padx=16, pady=4)
         if initial:
@@ -692,8 +730,10 @@ class NameDialog(ctk.CTkToplevel):
             self.entry.select_range(0, "end")
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(pady=12)
-        quiet_button(row, "Отмена", self._cancel, width=120, mark="close").pack(side="left", padx=8)
-        quiet_button(row, "Сохранить", self._ok, width=140, primary=True, mark="save").pack(side="left", padx=8)
+        quiet_button(row, "Отмена", self._cancel, width=120, mark="close", family=ui).pack(side="left", padx=8)
+        quiet_button(row, "Сохранить", self._ok, width=140, primary=True, mark="save", family=ui).pack(
+            side="left", padx=8
+        )
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.bind("<Escape>", lambda _event: self._cancel())
         self.entry.bind("<Return>", lambda _event: self._ok())
@@ -716,14 +756,113 @@ class NameDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class FontPickDialog(ctk.CTkToplevel):
+    _HEAD_CYR = "— С кириллицей —"
+    _HEAD_LAT = "— Без кириллицы —"
+
+    def __init__(self, master, current: str = "") -> None:
+        super().__init__(master)
+        self.result = ""
+        self._closed = False
+        ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
+        self.title("Шрифт")
+        self.geometry("420x480")
+        self.minsize(360, 360)
+        self.configure(fg_color=INK)
+        self.transient(master)
+        self.grab_set()
+        ctk.CTkLabel(self, text="Выберите семейство", anchor="w", text_color=MUTED, font=(ui, 12)).pack(
+            fill="x", padx=16, pady=(16, 4)
+        )
+        frame = ctk.CTkFrame(self, fg_color=FIELD, corner_radius=12, border_width=1, border_color=BORDER)
+        frame.pack(fill="both", expand=True, padx=16, pady=4)
+        self.listbox = tk.Listbox(
+            frame,
+            activestyle="dotbox",
+            borderwidth=0,
+            highlightthickness=0,
+            bg=_tone(FIELD),
+            fg=_tone(TEXT),
+            selectbackground=_tone(SELECT),
+            selectforeground=_tone(TEXT),
+            font=(ui, 12),
+        )
+        scroll = tk.Scrollbar(frame, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scroll.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        with_cyr, without, _cyr = _font_catalog(master)
+        self._items: list[str] = []
+        self._append_section(self._HEAD_CYR, with_cyr)
+        self._append_section(self._HEAD_LAT, without)
+        current = str(current or "").strip()
+        if current:
+            try:
+                index = self._items.index(current)
+                self.listbox.selection_set(index)
+                self.listbox.see(index)
+            except ValueError:
+                pass
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=12)
+        quiet_button(row, "Отмена", self._cancel, width=120, mark="close", family=ui).pack(side="left", padx=8)
+        quiet_button(row, "Выбрать", self._ok, width=140, primary=True, mark="check", family=ui).pack(
+            side="left", padx=8
+        )
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.listbox.bind("<Return>", lambda _event: self._ok())
+        self.listbox.bind("<Double-Button-1>", lambda _event: self._ok())
+        self.after(50, self.listbox.focus_set)
+
+    def _append_section(self, title: str, names: list[str]) -> None:
+        if not names:
+            return
+        self.listbox.insert("end", title)
+        self._items.append(title)
+        for name in names:
+            self.listbox.insert("end", name)
+            self._items.append(name)
+
+    def _selected(self) -> str:
+        selection = self.listbox.curselection()
+        if not selection:
+            return ""
+        value = self._items[int(selection[0])]
+        if value in (self._HEAD_CYR, self._HEAD_LAT):
+            return ""
+        return value
+
+    def _ok(self) -> None:
+        if self._closed:
+            return
+        name = self._selected()
+        if not name:
+            return
+        self._closed = True
+        self.result = name
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.result = ""
+        self.grab_release()
+        self.destroy()
+
+
 class SettingsWindow(ctk.CTkToplevel):
     _SECTIONS = ("Внешний вид", "Модель", "Проект", "MCP", "Безопасность")
 
-    def __init__(self, app: "App") -> None:
+    def __init__(self, app: "App", section: str = "Модель") -> None:
         super().__init__(app)
         self.app = app
         self._pages: dict[str, ctk.CTkScrollableFrame] = {}
         self._nav_buttons: dict[str, ctk.CTkButton] = {}
+        start = section if section in self._SECTIONS else "Модель"
+        face = app.ui_font
         self.title("Настройки")
         self.geometry("640x720")
         self.minsize(560, 520)
@@ -736,7 +875,7 @@ class SettingsWindow(ctk.CTkToplevel):
         nav.grid(row=0, column=0, sticky="nsw", padx=(12, 6), pady=12)
         nav.grid_propagate(False)
         nav.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(nav, text="Разделы", anchor="w", text_color=MUTED, font=("Segoe UI", 11)).grid(
+        ctk.CTkLabel(nav, text="Разделы", anchor="w", text_color=MUTED, font=(face, 11)).grid(
             row=0, column=0, sticky="ew", padx=12, pady=(12, 8)
         )
         for index, name in enumerate(self._SECTIONS, start=1):
@@ -750,8 +889,8 @@ class SettingsWindow(ctk.CTkToplevel):
                 fg_color="transparent",
                 hover_color=BUTTON_HOVER,
                 text_color=TEXT,
-                font=("Segoe UI", 12),
-                command=lambda section=name: self._show(section),
+                font=(face, 12),
+                command=lambda section_name=name: self._show(section_name),
             )
             button.grid(row=index, column=0, sticky="ew", padx=8, pady=2)
             self._nav_buttons[name] = button
@@ -780,24 +919,76 @@ class SettingsWindow(ctk.CTkToplevel):
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
-        quiet_button(footer, "Сохранить", app.save_settings, width=160, primary=True, mark="check").pack(side="right")
+        quiet_button(footer, "Сохранить", app.save_settings, width=160, primary=True, mark="check", family=face).pack(
+            side="right"
+        )
 
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
-        self._show("Модель")
+        self._show(start)
         self.after(50, self.focus)
 
     def _fill_appearance(self, page) -> None:
         app = self.app
-        ctk.CTkLabel(page, text="Внешний вид", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+        face = app.ui_font
+        ctk.CTkLabel(page, text="Внешний вид", anchor="w", text_color=TEXT, font=(face, 14)).pack(
             fill="x", padx=8, pady=(8, 4)
         )
         app._field(page, "Тема")
-        quiet_menu(page, app.theme_var, list(THEME_LABELS), app._on_theme_pick).pack(fill="x", padx=8, pady=4)
+        quiet_menu(page, app.theme_var, list(THEME_LABELS), app._on_theme_pick, family=face).pack(
+            fill="x", padx=8, pady=4
+        )
+        app._field(page, "Основной интерфейс", top=10)
+        ui_box = ctk.CTkLabel(
+            page,
+            textvariable=app.ui_font_var,
+            anchor="w",
+            height=34,
+            corner_radius=12,
+            fg_color=FIELD,
+            text_color=TEXT,
+            font=(face, 12),
+            cursor="hand2",
+        )
+        ui_box.pack(fill="x", padx=8, pady=4)
+        ui_box.bind("<Button-3>", lambda _e: app._pick_font("ui_font"))
+        ctk.CTkLabel(
+            page,
+            text="ПКМ по названию — выбрать шрифт. Применяется сразу.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=(face, 11),
+        ).pack(fill="x", padx=8, pady=(0, 2))
+        app._field(page, "Вывод кода и логов", top=10)
+        code_box = ctk.CTkLabel(
+            page,
+            textvariable=app.code_font_var,
+            anchor="w",
+            height=34,
+            corner_radius=12,
+            fg_color=FIELD,
+            text_color=TEXT,
+            font=(face, 12),
+            cursor="hand2",
+        )
+        code_box.pack(fill="x", padx=8, pady=4)
+        code_box.bind("<Button-3>", lambda _e: app._pick_font("code_font"))
+        ctk.CTkLabel(
+            page,
+            text="Редактор, консоль тестов, лог MCP, allowlist, диффы. Для кода удобнее моноширинный.",
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=(face, 11),
+        ).pack(fill="x", padx=8, pady=(0, 2))
+        quiet_button(page, "По умолчанию", app.reset_fonts, width=140, family=face).pack(
+            anchor="w", padx=8, pady=(10, 4)
+        )
 
     def _fill_model(self, page) -> None:
         app = self.app
-        ctk.CTkLabel(page, text="Модель и профили", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+        ctk.CTkLabel(page, text="Модель и профили", anchor="w", text_color=TEXT, font=(app.ui_font, 14)).pack(
             fill="x", padx=8, pady=(6, 2)
         )
         app._field(page, "Профиль", top=4)
@@ -819,7 +1010,7 @@ class SettingsWindow(ctk.CTkToplevel):
             progress_color=CTX_OK,
             button_color=BUTTON,
             button_hover_color=BUTTON_HOVER,
-            font=("Segoe UI", 12),
+            font=(app.ui_font, 12),
         ).pack(fill="x", padx=8, pady=(10, 2))
         ctk.CTkLabel(
             page,
@@ -828,9 +1019,9 @@ class SettingsWindow(ctk.CTkToplevel):
             wraplength=400,
             justify="left",
             text_color=MUTED,
-            font=("Segoe UI", 11),
+            font=(app.ui_font, 11),
         ).pack(fill="x", padx=8, pady=(0, 2))
-        ctk.CTkLabel(page, text="Генерация изображений", anchor="w", text_color=TEXT, font=("Segoe UI", 13)).pack(
+        ctk.CTkLabel(page, text="Генерация изображений", anchor="w", text_color=TEXT, font=(app.ui_font, 13)).pack(
             fill="x", padx=8, pady=(10, 2)
         )
         ctk.CTkLabel(
@@ -839,12 +1030,12 @@ class SettingsWindow(ctk.CTkToplevel):
             wraplength=400,
             justify="left",
             text_color=MUTED,
-            font=("Segoe UI", 11),
+            font=(app.ui_font, 11),
         ).pack(fill="x", padx=8, pady=(0, 2))
         app._entry(page, "Модель изображений", app.image_model_var, "пусто — генерация выключена", top=4, gap=2)
         app._entry(page, "URL изображений", app.image_url_var, "пусто — URL API", top=4, gap=2)
         app._entry(page, "Ключ изображений", app.image_key_var, "пусто — основной ключ", secret=True, top=4, gap=2)
-        ctk.CTkLabel(page, text="Действия с профилем", anchor="w", text_color=TEXT, font=("Segoe UI", 13)).pack(
+        ctk.CTkLabel(page, text="Действия с профилем", anchor="w", text_color=TEXT, font=(app.ui_font, 13)).pack(
             fill="x", padx=8, pady=(12, 2)
         )
         ctk.CTkLabel(
@@ -854,7 +1045,7 @@ class SettingsWindow(ctk.CTkToplevel):
             wraplength=400,
             justify="left",
             text_color=MUTED,
-            font=("Segoe UI", 11),
+            font=(app.ui_font, 11),
         ).pack(fill="x", padx=8, pady=(0, 4))
         profile_row = ctk.CTkFrame(page, fg_color="transparent")
         profile_row.pack(fill="x", padx=8, pady=(2, 8))
@@ -865,7 +1056,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _fill_project(self, page) -> None:
         app = self.app
-        ctk.CTkLabel(page, text="Проект и тесты", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+        ctk.CTkLabel(page, text="Проект и тесты", anchor="w", text_color=TEXT, font=(app.ui_font, 14)).pack(
             fill="x", padx=8, pady=(8, 4)
         )
         ctk.CTkLabel(
@@ -888,7 +1079,7 @@ class SettingsWindow(ctk.CTkToplevel):
             wraplength=400,
             justify="left",
             text_color=MUTED,
-            font=("Segoe UI", 11),
+            font=(app.ui_font, 11),
         ).pack(fill="x", padx=8, pady=(0, 4))
         from project_agent.allowed import format_allowed_text
 
@@ -899,7 +1090,7 @@ class SettingsWindow(ctk.CTkToplevel):
             text_color=TEXT,
             border_color=BORDER,
             border_width=1,
-            font=("Consolas", 11),
+            font=(app.code_font, 11),
         )
         app.allowed_box.pack(fill="x", padx=8, pady=4)
         app.allowed_box.insert("1.0", format_allowed_text(getattr(app, "allowed_commands", [])))
@@ -924,7 +1115,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _fill_mcp(self, page) -> None:
         app = self.app
-        ctk.CTkLabel(page, text="MCP-серверы", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+        ctk.CTkLabel(page, text="MCP-серверы", anchor="w", text_color=TEXT, font=(app.ui_font, 14)).pack(
             fill="x", padx=8, pady=(8, 4)
         )
         app.mcp_list = ctk.CTkTextbox(
@@ -934,6 +1125,7 @@ class SettingsWindow(ctk.CTkToplevel):
             text_color=TEXT,
             border_color=BORDER,
             border_width=1,
+            font=(app.ui_font, 12),
         )
         app.mcp_list.pack(fill="x", padx=8, pady=4)
         app.mcp_list.configure(state="disabled")
@@ -959,7 +1151,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _fill_security(self, page) -> None:
         app = self.app
-        ctk.CTkLabel(page, text="Безопасность", anchor="w", text_color=TEXT, font=("Segoe UI", 14)).pack(
+        ctk.CTkLabel(page, text="Безопасность", anchor="w", text_color=TEXT, font=(app.ui_font, 14)).pack(
             fill="x", padx=8, pady=(8, 4)
         )
         ctk.CTkSwitch(
@@ -970,7 +1162,7 @@ class SettingsWindow(ctk.CTkToplevel):
             progress_color=CTX_OK,
             button_color=BUTTON,
             button_hover_color=BUTTON_HOVER,
-            font=("Segoe UI", 12),
+            font=(app.ui_font, 12),
         ).pack(fill="x", padx=8, pady=(8, 4))
         notes = (
             "Ключ и настройки хранятся только в %APPDATA%\\ProjectAgent\\config.json — в программу они не зашиты.\n\n"
@@ -1089,6 +1281,10 @@ class App(ctk.CTk):
         self.agent.checkpoints = self.checkpoints
         self.theme = "dark"
         self.theme_var = ctk.StringVar(value="Тёмная")
+        self.ui_font = DEFAULT_UI_FONT
+        self.code_font = DEFAULT_CODE_FONT
+        self.ui_font_var = ctk.StringVar(value=DEFAULT_UI_FONT)
+        self.code_font_var = ctk.StringVar(value=DEFAULT_CODE_FONT)
         self.editor_open = False
         self.editor_path = ""
         self.editor_saved = ""
@@ -1319,7 +1515,7 @@ class App(ctk.CTk):
             text_color=TEXT,
             border_width=0,
             corner_radius=0,
-            font=("Segoe UI", 13),
+            font=self._font(13),
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
@@ -1394,7 +1590,7 @@ class App(ctk.CTk):
             text_color=TEXT,
             border_width=0,
             corner_radius=8,
-            font=("Consolas", 12),
+            font=self._code_font(12),
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
@@ -1420,7 +1616,7 @@ class App(ctk.CTk):
             text_color=TEXT,
             border_width=0,
             corner_radius=0,
-            font=("Consolas", 13),
+            font=self._code_font(13),
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
@@ -1449,7 +1645,7 @@ class App(ctk.CTk):
             text_color=TEXT,
             border_width=0,
             corner_radius=0,
-            font=("Segoe UI", 13),
+            font=self._font(13),
             scrollbar_button_color=BUTTON,
             scrollbar_button_hover_color=BUTTON_HOVER,
         )
@@ -1562,15 +1758,18 @@ class App(ctk.CTk):
         self.bind("<Configure>", self._on_window_configure, add="+")
         self.after(80, self._fit_composer)
 
-    def _font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
-        return (family, size, weight)
+    def _font(self, size: int, family: str | None = None, weight: str = "normal") -> tuple:
+        return (family or self.ui_font, size, weight)
 
-    def _px_font(self, size: int, family: str = "Segoe UI", weight: str = "normal") -> tuple:
+    def _code_font(self, size: int, weight: str = "normal") -> tuple:
+        return self._font(size, self.code_font, weight)
+
+    def _px_font(self, size: int, family: str | None = None, weight: str = "normal") -> tuple:
         scale = ctk.ScalingTracker.get_widget_scaling(self)
-        return (family, -round(size * scale), weight)
+        return (family or self.ui_font, -round(size * scale), weight)
 
     def _measure(self, size: int, weight: str = "normal"):
-        key = (size, weight)
+        key = (size, weight, self.ui_font)
         cache = self.__dict__.setdefault("_measure_fonts", {})
         font = cache.get(key)
         if font is None:
@@ -1927,7 +2126,7 @@ class App(ctk.CTk):
             foreground=_tone(TEXT),
             borderwidth=0,
             rowheight=24,
-            font=("Segoe UI", 10),
+            font=(self.ui_font, 10),
         )
         style.map(
             "Project.Treeview",
@@ -1942,7 +2141,7 @@ class App(ctk.CTk):
             borderwidth=0,
             rowheight=32,
             indent=0,
-            font=("Segoe UI", 10),
+            font=(self.ui_font, 10),
         )
         style.layout("Chats.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.layout("Project.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
@@ -2430,12 +2629,14 @@ class App(ctk.CTk):
         except tk.TclError:
             return
 
-    def open_settings(self) -> None:
+    def open_settings(self, section: str | None = None) -> None:
         window = self._settings_window
         if self._window_alive(window):
             try:
                 if str(window.state()) == "withdrawn":
                     window.deiconify()
+                if section:
+                    window._show(section)
                 window.lift()
                 window.focus()
                 return
@@ -2444,7 +2645,7 @@ class App(ctk.CTk):
         else:
             self._settings_window = None
         try:
-            self._settings_window = SettingsWindow(self)
+            self._settings_window = SettingsWindow(self, section=section or "Модель")
         except Exception as exc:
             self._settings_window = None
             self.write_chat(f"Не удалось открыть настройки: {exc}")
@@ -2538,6 +2739,7 @@ class App(ctk.CTk):
         self.auto_write_var.set(self.auto_write_project)
         self.prefer_cheap_provider = bool(data.get("prefer_cheap_provider"))
         self.prefer_cheap_var.set(self.prefer_cheap_provider)
+        self._apply_font(data.get("ui_font"), data.get("code_font"), rebuild_chat=False, reopen_settings=False)
         self._set_agent_mode(data.get("agent_mode") or "agent", persist=False)
         from project_agent.context_usage import normalize_context_limit
 
@@ -2576,7 +2778,7 @@ class App(ctk.CTk):
             self.output_frame.configure(fg_color=PANEL)
             self.output_title.configure(text_color=MUTED)
             self.run_indicator.configure(text_color=MUTED)
-            self.output_box.configure(fg_color=FIELD, text_color=TEXT)
+            self.output_box.configure(fg_color=FIELD, text_color=TEXT, font=self._code_font(12))
             self.output_slot_menu.configure(
                 fg_color=FIELD,
                 button_color=FIELD,
@@ -2586,6 +2788,97 @@ class App(ctk.CTk):
                 dropdown_text_color=TEXT,
                 dropdown_hover_color=SELECT,
             )
+        self._apply_font(rebuild_chat=False, reopen_settings=False)
+
+    def _pick_font(self, which: str) -> None:
+        current = self.ui_font if which == "ui_font" else self.code_font
+        dialog = FontPickDialog(self, current=current)
+        self.wait_window(dialog)
+        name = str(dialog.result or "").strip()
+        if not name:
+            return
+        _with_cyr, _without, cyr_set = _font_catalog(self)
+        if name not in cyr_set:
+            self.write_chat(f"Шрифт «{name}» без кириллицы — русский текст может отображаться некорректно.")
+        if which == "ui_font":
+            self._apply_font(ui=name, persist=True)
+        else:
+            self._apply_font(code=name, persist=True)
+
+    def reset_fonts(self) -> None:
+        if self.ui_font == DEFAULT_UI_FONT and self.code_font == DEFAULT_CODE_FONT:
+            return
+        self._apply_font(ui=DEFAULT_UI_FONT, code=DEFAULT_CODE_FONT, persist=True)
+
+    def _apply_font(
+        self,
+        ui: str | None = None,
+        code: str | None = None,
+        *,
+        persist: bool = False,
+        rebuild_chat: bool = True,
+        reopen_settings: bool = True,
+    ) -> None:
+        from project_agent.config import _font_family
+
+        if ui is not None:
+            self.ui_font = _font_family(ui, DEFAULT_UI_FONT)
+        if code is not None:
+            self.code_font = _font_family(code, DEFAULT_CODE_FONT)
+        if self.ui_font_var.get() != self.ui_font:
+            self.ui_font_var.set(self.ui_font)
+        if self.code_font_var.get() != self.code_font:
+            self.code_font_var.set(self.code_font)
+        self.__dict__["_measure_fonts"] = {}
+        self._copy_photo_cache = None
+        if hasattr(self, "chat"):
+            self.chat.configure(font=self._font(13))
+            self._tag_chat()
+        if hasattr(self, "task"):
+            self.task.configure(font=self._font(13))
+        if hasattr(self, "placeholder"):
+            self.placeholder.configure(font=self._font(11))
+        if hasattr(self, "editor_box"):
+            self.editor_box.configure(font=self._code_font(13))
+        if hasattr(self, "output_box"):
+            self.output_box.configure(font=self._code_font(12))
+        if hasattr(self, "search_count"):
+            self.search_count.configure(font=self._font(11))
+        if hasattr(self, "status_label"):
+            self.status_label.configure(font=self._font(11))
+        if hasattr(self, "context_label"):
+            self.context_label.configure(font=self._font(11))
+        if self.allowed_box is not None:
+            try:
+                if self.allowed_box.winfo_exists():
+                    self.allowed_box.configure(font=self._code_font(11))
+            except tk.TclError:
+                pass
+        if self.mcp_list is not None:
+            try:
+                if self.mcp_list.winfo_exists():
+                    self.mcp_list.configure(font=self._font(12))
+            except tk.TclError:
+                pass
+        if hasattr(self, "tree"):
+            self._style_tree()
+        if persist:
+            try:
+                if ui is not None:
+                    save_font("ui_font", self.ui_font)
+                if code is not None:
+                    save_font("code_font", self.code_font)
+            except Exception as exc:
+                self.write_chat(f"Не удалось сохранить шрифт: {exc}")
+        settings_open = self._window_alive(self._settings_window)
+        if reopen_settings and settings_open:
+            try:
+                self._settings_window._close()
+            except Exception:
+                self._settings_window = None
+            self.open_settings("Внешний вид")
+        if rebuild_chat and hasattr(self, "transcript"):
+            self._show_transcript()
 
     def _on_theme_pick(self, label: str) -> None:
         theme = THEME_LABELS.get(label, "dark")
@@ -2771,6 +3064,8 @@ class App(ctk.CTk):
         self.auto_write_project = settings["auto_write_project"]
         settings["prefer_cheap_provider"] = bool(self.prefer_cheap_var.get())
         self.prefer_cheap_provider = settings["prefer_cheap_provider"]
+        settings["ui_font"] = self.ui_font
+        settings["code_font"] = self.code_font
         return settings
 
     def _read_allowed_commands(self) -> list[dict]:
@@ -4172,6 +4467,7 @@ class App(ctk.CTk):
         inner = self.chat._textbox
         inner.tag_configure(
             "user",
+            font=self._px_font(13),
             lmargin1=12,
             lmargin2=12,
             rmargin=12,
@@ -4180,6 +4476,7 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "agent",
+            font=self._px_font(13),
             lmargin1=12,
             lmargin2=12,
             rmargin=56,
@@ -4189,6 +4486,7 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "tool",
+            font=self._px_font(12),
             lmargin1=40,
             lmargin2=48,
             rmargin=28,
@@ -4198,6 +4496,7 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "toolhead",
+            font=self._px_font(12),
             lmargin1=24,
             lmargin2=24,
             rmargin=28,
@@ -4207,6 +4506,7 @@ class App(ctk.CTk):
         inner.tag_configure("toolgap", font=self._px_font(5), spacing1=0, spacing3=0)
         inner.tag_configure(
             "error",
+            font=self._px_font(13),
             lmargin1=12,
             lmargin2=12,
             rmargin=56,
@@ -4216,6 +4516,7 @@ class App(ctk.CTk):
         )
         inner.tag_configure(
             "checkpoint",
+            font=self._px_font(13),
             lmargin1=12,
             lmargin2=12,
             rmargin=56,
@@ -4231,10 +4532,12 @@ class App(ctk.CTk):
             spacing3=2,
         )
         inner.tag_configure("bold", font=self._px_font(13, weight="bold"))
-        inner.tag_configure("code", font=self._px_font(12, "Consolas"), foreground=_tone(CODE_TEXT))
+        inner.tag_configure(
+            "code", font=self._px_font(12, self.code_font), foreground=_tone(CODE_TEXT)
+        )
         inner.tag_configure(
             "codeblock",
-            font=self._px_font(12, "Consolas"),
+            font=self._px_font(12, self.code_font),
             background=_tone(CODE_BG),
             foreground=_tone(TEXT),
             lmargin1=24,
