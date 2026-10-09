@@ -997,6 +997,23 @@ class FindAndDiagTests(unittest.TestCase):
 
 
 class GitOpsTests(unittest.TestCase):
+    def test_strip_git_noise_keeps_diff(self):
+        from project_agent.gitops import _strip_git_noise
+
+        raw = (
+            "warning: in the working copy of 'a.py', LF will be replaced by CRLF the next time Git touches it\n"
+            "diff --git a/a.py b/a.py\n"
+            "+hello\n"
+        )
+        cleaned = _strip_git_noise(raw)
+        self.assertNotIn("LF will be replaced", cleaned)
+        self.assertIn("diff --git", cleaned)
+        self.assertIn("+hello", cleaned)
+        only_warn = _strip_git_noise(
+            "warning: in the working copy of 'a.py', LF will be replaced by CRLF the next time Git touches it\n"
+        )
+        self.assertEqual(only_warn.strip(), "")
+
     def test_parse_status_paths_and_dirty_dirs(self):
         from project_agent.gitops import dirty_ancestor_dirs, parse_status_paths
 
@@ -1111,6 +1128,36 @@ class GitOpsTests(unittest.TestCase):
             self.assertIn("git commit: ok", ok.journal)
             clean = box.execute("git", {"action": "status"})
             self.assertNotIn("a.txt", clean.model_text)
+
+    def test_working_tree_diff_modified_and_untracked(self):
+        import shutil
+        import subprocess
+
+        from project_agent.gitops import working_tree_diff
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            git = shutil.which("git")
+            if not git:
+                self.skipTest("git not installed")
+            flags = {"cwd": str(root), "check": True, "capture_output": True, "text": True}
+            subprocess.run([git, "init"], **flags)
+            subprocess.run([git, "config", "user.email", "t@example.com"], **flags)
+            subprocess.run([git, "config", "user.name", "Test"], **flags)
+            (root / "a.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run([git, "add", "a.txt"], **flags)
+            subprocess.run([git, "commit", "-m", "init"], **flags)
+            (root / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+            changed = working_tree_diff(root, "a.txt")
+            self.assertIn("+two", changed)
+            (root / "new.txt").write_text("fresh\n", encoding="utf-8")
+            newbie = working_tree_diff(root, "new.txt")
+            self.assertIn("+++ b/new.txt", newbie)
+            self.assertIn("+fresh", newbie)
+            (root / "a.txt").write_text("one\n", encoding="utf-8")
+            clean = working_tree_diff(root, "a.txt")
+            self.assertIn("нет изменений", clean)
 
 
 class IndexStoreTests(unittest.TestCase):

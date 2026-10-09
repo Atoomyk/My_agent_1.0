@@ -1037,6 +1037,100 @@ class ConfirmDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class GitFileDiffDialog(ctk.CTkToplevel):
+    """Просмотр git diff одного файла (ПКМ в дереве)."""
+
+    def __init__(self, master, relative: str) -> None:
+        super().__init__(master)
+        self._master = master
+        self._relative = relative
+        self._closed = False
+        ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
+        code = getattr(master, "code_font", None) or DEFAULT_CODE_FONT
+        self.title(f"Diff · {relative}")
+        self.geometry("720x520")
+        self.minsize(480, 320)
+        self.resizable(True, True)
+        self.configure(fg_color=INK)
+        self.transient(master)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            self,
+            text=relative,
+            anchor="w",
+            text_color=TEXT,
+            font=(ui, 13),
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        self._box = ctk.CTkTextbox(
+            self,
+            fg_color=FIELD,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            corner_radius=10,
+            font=(code, 11),
+            wrap="none",
+        )
+        self._box.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        inner = self._box._textbox
+        inner.tag_configure("diff_add", foreground=_tone(DIFF_ADD))
+        inner.tag_configure("diff_del", foreground=_tone(DIFF_DEL))
+        inner.tag_configure("diff_hunk", foreground=_tone(DIFF_HUNK))
+        inner.tag_configure("diff_meta", foreground=_tone(MUTED))
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.grid(row=2, column=0, pady=(4, 14))
+        quiet_button(bar, "Обновить", self._reload, width=100).pack(side="left", padx=6)
+        quiet_button(bar, "Закрыть", self._close, width=100, mark="close").pack(side="left", padx=6)
+        bind_wheel_scroll(self._box._textbox, self)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _event: self._close())
+        self._reload()
+        self.after(50, self.focus)
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.destroy()
+
+    def _fill_diff(self, text: str) -> None:
+        inner = self._box._textbox
+        self._box.configure(state="normal")
+        inner.delete("1.0", "end")
+        for raw in (text or "").splitlines():
+            line = raw + "\n"
+            start = inner.index("end-1c")
+            inner.insert("end", line)
+            end = inner.index("end-1c")
+            if raw.startswith("+++") or raw.startswith("---"):
+                inner.tag_add("diff_meta", start, end)
+            elif raw.startswith("@@"):
+                inner.tag_add("diff_hunk", start, end)
+            elif raw.startswith("+"):
+                inner.tag_add("diff_add", start, end)
+            elif raw.startswith("-"):
+                inner.tag_add("diff_del", start, end)
+        self._box.configure(state="disabled")
+
+    def _reload(self) -> None:
+        from project_agent.gitops import GitError, working_tree_diff
+
+        app = self._master
+        if app.project is None:
+            self._fill_diff("(нет проекта)")
+            return
+        try:
+            text = working_tree_diff(app.project, self._relative)
+        except GitError as exc:
+            self._fill_diff(str(exc))
+            return
+        except Exception as exc:
+            self._fill_diff(f"Diff недоступен: {exc}")
+            return
+        self._fill_diff(text or "(пусто)")
+
+
 class TurnDiffDialog(ctk.CTkToplevel):
     """Сводный diff хода (P1.7) + отклонение хунка/файла."""
 
@@ -5348,11 +5442,17 @@ class App(ctk.CTk):
             menu.add_command(label="Вложить папку в запрос", command=lambda: self._add_context_path(target + "/"))
         else:
             menu.add_command(label="Вложить в запрос", command=lambda path=relative: self._add_context_path(path))
+            menu.add_command(label="Показать diff", command=lambda path=relative: self._show_file_git_diff(path))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
         return "break"
+
+    def _show_file_git_diff(self, relative: str) -> None:
+        if self.project is None or not relative:
+            return
+        GitFileDiffDialog(self, relative)
 
     def _on_task_key(self, _event=None) -> None:
         if self.project is None:

@@ -48,6 +48,17 @@ def ensure_repo(root: Path) -> Path:
     return root
 
 
+def _strip_git_noise(text: str) -> str:
+    """Убрать шум stderr (LF/CRLF warning на Windows), не трогая реальный diff."""
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        lower = line.lower()
+        if "lf will be replaced by crlf" in lower or "crlf will be replaced by lf" in lower:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def run_git(root: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> GitResult:
     root = ensure_repo(root)
     git = find_git()
@@ -71,7 +82,8 @@ def run_git(root: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> GitR
         raise GitError(f"таймаут git ({timeout}с)") from exc
     except OSError as exc:
         raise GitError(f"git не запущен: {exc}") from exc
-    output = clip_git((completed.stdout or "") + (completed.stderr or ""))
+    merged = _strip_git_noise((completed.stdout or "") + (completed.stderr or ""))
+    output = clip_git(merged)
     return GitResult(command=command, code=int(completed.returncode), output=output.strip())
 
 
@@ -206,6 +218,46 @@ def git_diff(root: Path, path: str | None = None, staged: bool = False) -> GitRe
         rel = relative_posix(root, full)
         args.extend(["--", rel])
     return run_git(root, args)
+
+
+def working_tree_diff(root: Path, path: str, *, limit: int = MAX_GIT_OUTPUT) -> str:
+    """Unified diff файла относительно HEAD (+ untracked как new file)."""
+    root = ensure_repo(root)
+    full = resolve_inside(root, path)
+    rel = relative_posix(root, full)
+    result = run_git(root, ["diff", "HEAD", "--no-color", "--", rel])
+    body = (result.output or "").strip()
+    if body:
+        return clip_git(body, limit)
+    tracked = run_git(root, ["ls-files", "--", rel])
+    if tracked.code == 0 and not (tracked.output or "").strip():
+        if not full.exists() or not full.is_file():
+            return f"(untracked, файл недоступен: {rel})"
+        try:
+            size = full.stat().st_size
+        except OSError as exc:
+            return f"(не прочитан: {exc})"
+        if size > 400_000:
+            return f"(новый файл слишком большой для diff: {rel})"
+        try:
+            data = full.read_bytes()
+        except OSError as exc:
+            return f"(не прочитан: {exc})"
+        if b"\x00" in data[:8192]:
+            return f"(новый бинарный файл: {rel})"
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return f"(новый файл не UTF-8: {rel})"
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.splitlines()
+        count = len(lines)
+        header = f"--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{count} @@\n" if count else f"--- /dev/null\n+++ b/{rel}\n"
+        body = header + ("\n".join(f"+{line}" for line in lines))
+        if text.endswith("\n") and lines:
+            body += "\n"
+        return clip_git(body.strip() or f"(пустой новый файл: {rel})", limit)
+    return f"(нет изменений относительно HEAD: {rel})"
 
 
 def preview_commit_diff(root: Path, paths: list[str] | None, add_all: bool) -> str:
