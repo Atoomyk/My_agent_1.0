@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+_FAIL_DURATION = re.compile(r"\b\d+(?:\.\d+)?\s*s\b", re.IGNORECASE)
+_FAIL_RAN = re.compile(r"^Ran\s+\d+\s+tests?\s+in\s+.+$", re.IGNORECASE)
+_FAIL_PASSED = re.compile(r"\d+\s+passed(?:\s+in\s+\S+)?", re.IGNORECASE)
 
 PRESETS = {
     "unittest": "unittest",
@@ -22,7 +27,7 @@ PRESET_LABELS = {
     "npm test": "npm",
 }
 LABEL_BY_PRESET = {value: key for key, value in PRESET_LABELS.items()}
-MAX_OUTPUT_CHARS = 32_000
+MAX_OUTPUT_CHARS = 24_000
 DEFAULT_TIMEOUT = 120
 MIN_TIMEOUT = 15
 MAX_TIMEOUT = 600
@@ -75,29 +80,62 @@ def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return text[:half] + "\n…\n" + text[-half:]
 
 
+def _stabilize_fail_line(raw: str) -> str:
+    line = " ".join((raw or "").strip().split()).replace("\\", "/")
+    if not line or line.startswith("====") or line.startswith("----"):
+        return ""
+    if _FAIL_RAN.match(line):
+        return ""
+    line = _FAIL_DURATION.sub("Xs", line)
+    line = _FAIL_PASSED.sub("N passed", line)
+    return line[:240]
+
+
 def fail_fingerprint(output: str, code: int | None = None) -> str:
-    """Стабильный ключ падения: FAIL/ERROR/AssertionError, без шума разделителей."""
+    """Стабильный ключ падения: FAIL/ERROR/AssertionError, без шума длительностей/путей."""
     lines = (output or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
     hits: list[str] = []
     for raw in lines:
-        line = " ".join(raw.strip().split())
-        if not line or line.startswith("====") or line.startswith("----"):
+        line = _stabilize_fail_line(raw)
+        if not line:
             continue
         upper = line.upper()
         if (
             upper.startswith("FAIL")
             or upper.startswith("ERROR")
+            or upper.startswith("FILE ")
             or "FAILED" in upper
             or "ASSERTIONERROR" in upper
             or "ERROR:" in upper
             or line.startswith("E ")
         ):
-            hits.append(line[:240])
+            hits.append(line)
             if len(hits) >= 12:
                 break
     if not hits:
-        hits = [" ".join(item.strip().split())[:200] for item in lines[-12:] if item.strip()]
+        for raw in lines[-16:]:
+            line = _stabilize_fail_line(raw)
+            if line:
+                hits.append(line[:200])
+            if len(hits) >= 12:
+                break
     return f"{0 if code is None else int(code)}:" + "\n".join(hits)
+
+
+def fail_brief(output: str, code: int | None = None, limit: int = 3) -> str:
+    """Короткая суть падения для модели (1–3 строки из fingerprint)."""
+    key = fail_fingerprint(output, code)
+    lines = key.splitlines()
+    if not lines:
+        return ""
+    first = lines[0]
+    if ":" in first:
+        first = first.split(":", 1)[1].strip()
+    body: list[str] = []
+    if first:
+        body.append(first)
+    body.extend(lines[1:])
+    return "\n".join(body[: max(1, int(limit))])
 
 
 def python_command() -> list[str]:

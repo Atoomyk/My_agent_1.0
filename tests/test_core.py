@@ -19,8 +19,11 @@ from project_agent.checkpoints import (
     checkpoint_mark,
     delete_checkpoints,
     parse_checkpoint_mark,
+    restorable_paths,
     restore_files,
+    restore_one_file,
 )
+from project_agent.plan import plan_mark
 from project_agent.config import (
     DEFAULT_CODE_FONT,
     DEFAULT_UI_FONT,
@@ -594,7 +597,7 @@ class TestRunnerTests(unittest.TestCase):
             self.assertIn("лимит", limited.journal)
 
     def test_fail_fingerprint_stable_and_repeat_locks(self):
-        from project_agent.testing import fail_fingerprint
+        from project_agent.testing import fail_brief, fail_fingerprint
 
         out_a = (
             "test_x (tests.test_mod.T) ... FAIL\n"
@@ -602,13 +605,21 @@ class TestRunnerTests(unittest.TestCase):
             "FAIL: test_x (tests.test_mod.T)\n"
             "----------------------------------------------------------------------\n"
             "Traceback (most recent call last):\n"
-            '  File "tests/test_mod.py", line 4, in test_x\n'
+            '  File "tests\\test_mod.py", line 4, in test_x\n'
             "AssertionError: 1 != 2\n"
             "Ran 1 test in 0.012s\n"
         )
-        out_b = out_a.replace("0.012s", "0.991s")
+        out_b = (
+            out_a.replace("0.012s", "0.991s")
+            .replace("tests\\test_mod.py", "tests/test_mod.py")
+        )
         self.assertEqual(fail_fingerprint(out_a, 1), fail_fingerprint(out_b, 1))
         self.assertIn("FAIL", fail_fingerprint(out_a, 1))
+        self.assertIn("tests/test_mod.py", fail_fingerprint(out_a, 1))
+        self.assertNotIn("0.012", fail_fingerprint(out_a, 1))
+        brief = fail_brief(out_a, 1)
+        self.assertIn("FAIL", brief)
+        self.assertLessEqual(len(brief.splitlines()), 3)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -629,15 +640,50 @@ class TestRunnerTests(unittest.TestCase):
             box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: settings)
             box.set_root(root)
             box.begin_turn()
+            box.execute("write_file", {"path": "a.py", "content": "x=1\n", "summary": "touch"})
             first = box.execute("run_tests", {})
             self.assertIn("FAIL", first.model_text)
+            self.assertIn("Этот ход тронул: a.py", first.model_text)
+            self.assertIn("Суть падения:", first.model_text)
             self.assertFalse(box.fail_locked)
             second = box.execute("run_tests", {})
             self.assertIn("СТОП", second.model_text)
+            self.assertIn("Этот ход тронул: a.py", second.model_text)
             self.assertTrue(box.fail_locked)
             third = box.execute("run_tests", {})
             self.assertIn("СТОП", third.model_text)
             self.assertIn("стоп повтор", third.journal)
+            allowed_blocked = box.execute("run_allowed", {"id": "unittest"})
+            self.assertIn("СТОП", allowed_blocked.model_text)
+            self.assertIn("стоп повтор", allowed_blocked.journal)
+
+    def test_run_allowed_fail_fingerprint_locks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "tests").mkdir()
+            (root / "tests" / "test_bad.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(1, 2)\n",
+                encoding="utf-8",
+            )
+            settings = {
+                "test_preset": "",
+                "test_timeout": 60,
+                "test_fix_rounds": 5,
+                "api_key": "",
+                "mcp_servers": [],
+                "allowed_commands": [],
+            }
+            box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: settings)
+            box.set_root(root)
+            box.begin_turn()
+            first = box.execute("run_allowed", {"id": "unittest", "summary": "check"})
+            self.assertIn("FAIL", first.model_text)
+            self.assertIn("Суть падения:", first.model_text)
+            self.assertFalse(box.fail_locked)
+            second = box.execute("run_allowed", {"id": "unittest", "summary": "again"})
+            self.assertIn("СТОП", second.model_text)
+            self.assertTrue(box.fail_locked)
 
     def test_write_tracks_touched_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -799,25 +845,43 @@ class IndexStoreTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 (root / "b.py").write_text("from a import Foo\n", encoding="utf-8")
+                (root / "ui.tsx").write_text(
+                    "import { Foo } from './a';\n"
+                    "export const Widget = () => null;\n"
+                    "export class Panel {\n"
+                    "  render() { return null; }\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
                 build_index(root)
                 symbols = load_symbols(root)
                 self.assertIn("a.py", symbols["files"])
+                self.assertIn("ui.tsx", symbols["files"])
                 box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {"api_key": "", "mcp_servers": []})
                 box.set_root(root)
                 summary = box.execute("project_index", {"action": "summary"})
                 self.assertIn("файлов", summary.model_text)
                 self.assertIn("символов", summary.model_text)
+                self.assertIn("JS/TS", summary.model_text)
                 found = box.execute("project_index", {"action": "find", "query": "a.py"})
                 self.assertIn("a.py", found.model_text)
                 sym = box.execute("project_index", {"action": "find_symbol", "query": "Foo"})
                 self.assertIn("Foo", sym.model_text)
                 self.assertIn("Foo.bar", sym.model_text)
                 self.assertNotIn("nested", sym.model_text)
+                js_sym = box.execute("project_index", {"action": "find_symbol", "query": "Widget"})
+                self.assertIn("Widget", js_sym.model_text)
+                self.assertIn("ui.tsx", js_sym.model_text)
+                panel = box.execute("project_index", {"action": "find_symbol", "query": "Panel.render"})
+                self.assertIn("Panel.render", panel.model_text)
                 imports = box.execute("project_index", {"action": "imports", "path": "a.py"})
                 self.assertIn("import os", imports.model_text)
                 self.assertIn("pathlib", imports.model_text)
+                js_imports = box.execute("project_index", {"action": "imports", "path": "ui.tsx"})
+                self.assertIn("./a", js_imports.model_text)
                 importers = box.execute("project_index", {"action": "importers", "query": "a"})
                 self.assertIn("b.py", importers.model_text)
+                self.assertIn("ui.tsx", importers.model_text)
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)
@@ -842,27 +906,87 @@ class IndexStoreTests(unittest.TestCase):
         self.assertIn(("C.m", "method"), kinds)
         self.assertIn(("f", "def"), kinds)
         self.assertFalse(any(item["name"] == "inner" for item in symbols))
+        self.assertTrue(all(item.get("lang") == "py" for item in symbols))
         modules = {item["module"] for item in imports}
         self.assertIn("x", modules)
         self.assertIn("a.b", modules)
+
+    def test_parse_js_symbols(self):
+        from project_agent.symbols import parse_js_file, resolve_js_relative
+
+        symbols, imports = parse_js_file(
+            "import React, { useState } from 'react';\n"
+            "import './side';\n"
+            "const local = 1;\n"
+            "export const Widget = () => null;\n"
+            "export type Id = string;\n"
+            "export interface Props { id: Id }\n"
+            "export class Foo {\n"
+            "  bar() { return 1; }\n"
+            "  async baz() { return 2; }\n"
+            "}\n"
+            "export default function App() { return null; }\n"
+            "export { Foo as Bar } from './foo';\n"
+            "const x = require('./legacy');\n"
+        )
+        kinds = {(item["qualname"], item["kind"]) for item in symbols}
+        self.assertIn(("Widget", "export"), kinds)
+        self.assertIn(("Id", "type"), kinds)
+        self.assertIn(("Props", "interface"), kinds)
+        self.assertIn(("Foo", "class"), kinds)
+        self.assertIn(("Foo.bar", "method"), kinds)
+        self.assertIn(("Foo.baz", "method"), kinds)
+        self.assertIn(("App", "function"), kinds)
+        self.assertFalse(any(item["name"] == "local" for item in symbols))
+        self.assertTrue(all(item.get("lang") == "js" for item in symbols))
+        modules = {item["module"] for item in imports}
+        self.assertIn("react", modules)
+        self.assertIn("./side", modules)
+        self.assertIn("./foo", modules)
+        self.assertIn("./legacy", modules)
+        react = next(item for item in imports if item["module"] == "react")
+        self.assertIn("React", react["names"])
+        self.assertIn("useState", react["names"])
+        self.assertEqual(resolve_js_relative("src/app.tsx", "./foo"), "src/foo")
+        self.assertEqual(resolve_js_relative("src/app.tsx", "../lib/util"), "lib/util")
+        self.assertIsNone(resolve_js_relative("src/app.tsx", "react"))
 
 
 class ContextAttachTests(unittest.TestCase):
     def test_parse_and_load_context(self):
         from project_agent.context_attach import (
+            ATTACH_HEAD_CHARS,
+            ATTACH_TAIL_CHARS,
+            MAX_ATTACH_CHARS,
+            MAX_TREE_DEPTH,
+            MAX_TREE_ENTRIES,
             at_token_at_end,
+            clip_attach_text,
             compose_user_text,
             find_at_targets,
             load_context_files,
             load_explicit_context,
             merge_paths,
             parse_at_paths,
+            resolve_at_path,
         )
 
         self.assertEqual(parse_at_paths("смотри @src/a.py и @\"docs/x y.md\""), ["src/a.py", "docs/x y.md"])
         self.assertEqual(at_token_at_end("привет @util"), ("util", 7))
         self.assertIsNone(at_token_at_end("без упоминания"))
         self.assertEqual(merge_paths(["a.py", "b.py"], ["a.py", "c.py"], limit=2), ["a.py", "b.py"])
+        self.assertEqual(MAX_TREE_DEPTH, 2)
+        self.assertEqual(MAX_TREE_ENTRIES, 80)
+        short, clipped = clip_attach_text("ok")
+        self.assertEqual(short, "ok")
+        self.assertFalse(clipped)
+        big = ("H" * ATTACH_HEAD_CHARS) + ("M" * 5000) + ("T" * ATTACH_TAIL_CHARS)
+        self.assertGreater(len(big), MAX_ATTACH_CHARS)
+        clipped_text, was_clipped = clip_attach_text(big)
+        self.assertTrue(was_clipped)
+        self.assertIn("… обрезано …", clipped_text)
+        self.assertTrue(clipped_text.startswith("H"))
+        self.assertTrue(clipped_text.endswith("T"))
         with tempfile.TemporaryDirectory() as tmp:
             previous = os.environ.get("APPDATA")
             os.environ["APPDATA"] = tmp
@@ -887,13 +1011,28 @@ class ContextAttachTests(unittest.TestCase):
                 from project_agent.index_store import build_index
 
                 build_index(root)
+                rel, err = resolve_at_path(root, "a.py")
+                self.assertEqual(rel, "a.py")
+                self.assertIsNone(err)
+                missing, miss_err = resolve_at_path(root, "nope.py")
+                self.assertIsNone(missing)
+                self.assertIn("не найден", miss_err or "")
+                huge = root / "huge.py"
+                huge.write_text(("line\n" * 8000), encoding="utf-8")
+                big_block, big_loaded, big_errors = load_context_files(root, ["huge.py"], vault)
+                self.assertIn("huge.py", big_loaded)
+                self.assertIn("обрезано", big_block)
+                self.assertEqual(big_errors, [])
                 mixed, files, dirs, mixed_errors = load_explicit_context(root, ["a.py", "src"], vault)
                 self.assertIn("a.py", files)
                 self.assertTrue(any(item.rstrip("/") == "src" for item in dirs))
                 self.assertIn("Приложенные папки", mixed)
+                self.assertIn("только дерево путей", mixed)
                 self.assertIn("main.py", mixed)
                 targets = find_at_targets(root, "src", limit=8)
                 self.assertTrue(any(item.rstrip("/") == "src" or item.startswith("src/") for item in targets))
+                ranked = find_at_targets(root, "main.py", limit=8)
+                self.assertTrue(any(item.endswith("main.py") for item in ranked))
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)
@@ -942,10 +1081,21 @@ class ProjectRulesTests(unittest.TestCase):
             plan_system = agent._system()
             self.assertIn("Режим: Plan", plan_system)
             self.assertIn("- [ ]", plan_system)
+            self.assertIn("`path/to/file`", plan_system)
+            agent.get_plan = lambda: {
+                "steps": [{"text": "fix Foo", "path": "a.py", "done": False}]
+            }
+            agent._agent_mode = "agent"
+            with_plan = agent._system()
+            self.assertIn("Актуальный план", with_plan)
+            self.assertIn("`a.py`", with_plan)
+            agent._agent_mode = "plan"
+            self.assertNotIn("Актуальный план", agent._system())
             agent._agent_mode = "debug"
             debug_system = agent._system()
             self.assertIn("Режим: Debug", debug_system)
             self.assertIn("гипотезу", debug_system)
+            self.assertIn("Актуальный план", debug_system)
 
 
 class ToolRunningLabelTests(unittest.TestCase):
@@ -2160,6 +2310,61 @@ while True:
 """
 
 
+class PlanStoreTests(unittest.TestCase):
+    def test_parse_and_format_plan(self):
+        from project_agent.plan import (
+            format_plan_context,
+            parse_plan_checklist,
+            parse_plan_mark,
+            plan_mark,
+            toggle_step,
+        )
+
+        steps = parse_plan_checklist(
+            "Вот план:\n"
+            "- [ ] `src/app.py`: починить Foo\n"
+            "- [x] helper.ts: типы\n"
+            "- [ ] просто шаг\n"
+            "готово\n"
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["path"], "src/app.py")
+        self.assertEqual(steps[0]["text"], "починить Foo")
+        self.assertTrue(steps[1]["done"])
+        self.assertEqual(steps[1]["path"], "helper.ts")
+        self.assertEqual(steps[2]["path"], "")
+        block = format_plan_context({"steps": steps})
+        self.assertIn("`src/app.py`", block)
+        self.assertIn("[x]", block)
+        toggled = toggle_step({"steps": steps}, 0)
+        self.assertTrue(toggled["steps"][0]["done"])
+        self.assertTrue(parse_plan_mark(plan_mark()))
+
+    def test_chat_persists_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                chat_id = new_chat_id()
+                plan = {
+                    "steps": [
+                        {"text": "шаг", "path": "a.py", "done": False},
+                        {"text": "два", "path": "", "done": True},
+                    ]
+                }
+                save_chat(chat_id, "План", str(root), ["Вы: сделай", plan_mark()], plan=plan)
+                loaded = load_chat(chat_id)
+                self.assertEqual(loaded["plan"]["steps"][0]["path"], "a.py")
+                self.assertTrue(loaded["plan"]["steps"][1]["done"])
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
+
 class CheckpointTests(unittest.TestCase):
     def test_mark_roundtrip(self):
         checkpoint_id = "a" * 32
@@ -2185,11 +2390,28 @@ class CheckpointTests(unittest.TestCase):
         self.assertIsNotNone(checkpoint)
         self.assertEqual(dropped, [])
         self.assertEqual(checkpoint.file_count(), 2)
-        restored, failed = restore_files(root, checkpoint)
-        self.assertEqual(sorted(restored), ["fresh.py", "note.py"])
-        self.assertEqual(failed, [])
+        self.assertEqual(restorable_paths(checkpoint), ["fresh.py", "note.py"])
+        ok, info = restore_one_file(root, checkpoint, "note.py")
+        self.assertTrue(ok)
+        self.assertEqual(info, "note.py")
         self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+        self.assertTrue((root / "fresh.py").exists())
+        still = stack.drop_file(checkpoint.id, "note.py")
+        self.assertTrue(still)
+        self.assertEqual(restorable_paths(stack.get(checkpoint.id)), ["fresh.py"])
+        restored, failed = restore_files(root, stack.get(checkpoint.id))
+        self.assertEqual(restored, ["fresh.py"])
+        self.assertEqual(failed, [])
         self.assertFalse((root / "fresh.py").exists())
+        still = stack.drop_file(checkpoint.id, "fresh.py")
+        self.assertFalse(still)
+        self.assertIsNone(stack.get(checkpoint.id))
+        stack.begin(transcript_len=2, message_count=1)
+        stack.capture("note.py", target)
+        target.write_text("mid\n", encoding="utf-8")
+        checkpoint, dropped = stack.finalize()
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual(dropped, [])
         stack.begin(3, 2)
         stack.capture("note.py", target)
         target.write_text("again\n", encoding="utf-8")

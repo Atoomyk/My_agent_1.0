@@ -24,6 +24,7 @@ from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is
 from project_agent.allowed import list_allowed_ids, normalize_allowed_commands, resolve_allowed
 from project_agent.testing import (
     LABEL_BY_PRESET,
+    fail_brief,
     fail_fingerprint,
     format_command,
     normalize_fix_rounds,
@@ -62,10 +63,12 @@ from project_agent.browser_mcp import (
 from project_agent.mcp_client import McpError
 
 MAX_READ_LINES = 400
-DEFAULT_READ_LINES = 200
-MAX_MATCHES = 40
+DEFAULT_READ_LINES = 160
+MAX_MATCHES = 30
 MAX_SCAN_FILES = 2000
+MAX_LIST_DIR = 120
 MAX_WRITE_CHARS = 1_000_000
+MAX_TOOL_RESULT_CHARS = 24_000
 
 
 def _schema(properties: dict, required: list[str]) -> dict:
@@ -154,16 +157,16 @@ TOOL_SPECS = [
     {
         "name": "project_index",
         "description": (
-            "Индекс проекта: пути и лёгкие символы/импорты Python (не LSP). "
+            "Индекс проекта: пути и лёгкие символы/импорты Python и JS/TS (не LSP). "
             "action=summary|refresh|find|find_symbol|imports|importers. "
-            "find/find_symbol/importers — query; imports — path к .py. "
+            "find/find_symbol/importers — query; imports — path к .py/.js/.ts/…. "
             "В ответ только совпадения, не весь индекс."
         ),
         "parameters": _schema(
             {
                 "action": _string("summary, refresh, find, find_symbol, imports или importers."),
                 "query": _string("Подстрока пути/символа/модуля."),
-                "path": _string("Для imports: путь к .py относительно корня."),
+                "path": _string("Для imports: путь к исходному файлу относительно корня."),
             },
             ["action"],
         ),
@@ -359,6 +362,17 @@ class Toolbox:
             return ""
         return "\nТронутые за ход: " + ", ".join(self._touched)
 
+    def _fail_context(self, output: str, code: int | None) -> str:
+        parts: list[str] = []
+        if self._touched:
+            parts.append("Этот ход тронул: " + ", ".join(self._touched))
+        brief = fail_brief(output, code)
+        if brief:
+            parts.append("Суть падения:\n" + brief)
+        if not parts:
+            return ""
+        return "\n" + "\n".join(parts)
+
     def cancel(self) -> None:
         process = self._test_holder.get("process")
         if process is not None:
@@ -392,9 +406,17 @@ class Toolbox:
         except Exception as exc:
             message = self._scrub(str(exc))[:300]
             outcome = ToolOutcome(f"Ошибка {name}: {message}", f"{name}: ошибка")
-        outcome.model_text = self._scrub(outcome.model_text)
+        outcome.model_text = self._clip_tool_text(self._scrub(outcome.model_text))
         outcome.journal = " ".join(self._scrub(outcome.journal).split())[:300]
         return outcome
+
+    def _clip_tool_text(self, text: str) -> str:
+        body = text or ""
+        if len(body) <= MAX_TOOL_RESULT_CHARS:
+            return body
+        head = MAX_TOOL_RESULT_CHARS // 2
+        tail = MAX_TOOL_RESULT_CHARS - head - 20
+        return body[:head].rstrip() + "\n… обрезано …\n" + body[-tail:].lstrip()
 
     def _scrub(self, text: str, path: Path | None = None) -> str:
         scrubber = Scrubber(self.vault, literals_from_settings(self.settings() or {}))
@@ -425,12 +447,12 @@ class Toolbox:
                 suffix = "/" if entry.is_dir(follow_symlinks=False) else ""
                 names.append(entry.name + suffix)
         names.sort(key=lambda item: (not item.endswith("/"), item.lower()))
-        truncated = len(names) > 500
-        shown = names[:500]
+        truncated = len(names) > MAX_LIST_DIR
+        shown = names[:MAX_LIST_DIR]
         rel = relative_posix(self.root, full)
         body = "\n".join(shown) if shown else "(пусто)"
         if truncated:
-            body += "\n(список обрезан)"
+            body += f"\n(список обрезан, показаны {MAX_LIST_DIR} из {len(names)})"
         return ToolOutcome(f"{rel}\n{body}", f"list_dir {rel}: {len(names)} элементов")
 
     def _tool_read_file(self, args: dict) -> ToolOutcome:
@@ -520,12 +542,12 @@ class Toolbox:
                     if query not in line:
                         continue
                     hidden = self._scrub(line, full)
-                    matches.append(f"{rel}:{number}: {hidden[:200]}")
+                    matches.append(f"{rel}:{number}: {hidden[:160]}")
                     if len(matches) >= MAX_MATCHES:
                         break
         body = "\n".join(matches) if matches else "Совпадений нет."
         if len(matches) >= MAX_MATCHES:
-            body += "\n(список обрезан)"
+            body += f"\n(список обрезан, максимум {MAX_MATCHES})"
         return ToolOutcome(body, f"search: {len(matches)} совпадений")
 
     def _tool_write_file(self, args: dict) -> ToolOutcome:
@@ -713,9 +735,9 @@ class Toolbox:
                 return ToolOutcome("Для find_symbol нужна подстрока query.", "project_index: find_symbol пусто")
             found, data = find_symbols(root, query)
             if not found:
-                py_count = len((data.get("files") or {}))
+                file_count = len(data.get("files") or {})
                 return ToolOutcome(
-                    f"По символу «{query}» ничего нет. Проиндексировано .py: {py_count}.",
+                    f"По символу «{query}» ничего нет. Проиндексировано исходников: {file_count}.",
                     "project_index: find_symbol 0",
                 )
             body = "\n".join(found)
@@ -725,11 +747,14 @@ class Toolbox:
         if action == "imports":
             path = str(args.get("path") or args.get("query") or "").strip()
             if not path:
-                return ToolOutcome("Для imports нужен path к .py.", "project_index: imports пусто")
+                return ToolOutcome(
+                    "Для imports нужен path к .py/.js/.ts/….",
+                    "project_index: imports пусто",
+                )
             found, data = list_imports(root, path)
             if path not in (data.get("files") or {}) and not found:
                 return ToolOutcome(
-                    f"Файл «{path}» не в символьном индексе (нужен .py ≤1 МБ). Обновите refresh.",
+                    f"Файл «{path}» не в символьном индексе (нужен .py/.js/.ts/… ≤1 МБ). Обновите refresh.",
                     "project_index: imports нет",
                 )
             if not found:
@@ -745,7 +770,7 @@ class Toolbox:
             found, data = find_importers(root, query)
             if not found:
                 return ToolOutcome(
-                    f"Импортеров «{query}» не найдено. .py в индексе: {len(data.get('files') or {})}.",
+                    f"Импортеров «{query}» не найдено. Исходников в индексе: {len(data.get('files') or {})}.",
                     "project_index: importers 0",
                 )
             body = "\n".join(found)
@@ -769,7 +794,7 @@ class Toolbox:
         rounds = normalize_fix_rounds(settings.get("test_fix_rounds"))
         if self._fail_locked:
             return ToolOutcome(
-                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests и другие инструменты; "
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed и другие инструменты; "
                 "кратко опиши проблему и перечисли тронутые файлы."
                 + self._touched_suffix(),
                 "run_tests: стоп повтор",
@@ -826,7 +851,7 @@ class Toolbox:
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
         if code != 0:
-            fail_key = fail_fingerprint(result.output, code)
+            fail_key = f"tests:{fail_fingerprint(result.output, code)}"
             if fail_key and fail_key == self._last_fail_key:
                 self._fail_locked = True
                 body = (
@@ -837,12 +862,20 @@ class Toolbox:
                 ).strip()
                 self._emit_run("end", title=title, status=f"повтор {status} {self._test_runs}/{rounds}")
                 return ToolOutcome(
-                    body + self._touched_suffix(),
+                    body + self._fail_context(result.output, code),
                     f"run_tests {label}: повтор {self._test_runs}/{rounds}",
                 )
             self._last_fail_key = fail_key
-        else:
-            self._last_fail_key = ""
+            body = (
+                f"{status}. Запуск {self._test_runs}/{rounds}.\n"
+                f"Команда: {format_command(result.command)}\n\n{result.output}"
+            ).strip()
+            self._emit_run("end", title=title, status=f"{status} {self._test_runs}/{rounds}")
+            return ToolOutcome(
+                body + self._fail_context(result.output, code),
+                f"run_tests {label}: {status} {self._test_runs}/{rounds}",
+            )
+        self._last_fail_key = ""
         body = (
             f"{status}. Запуск {self._test_runs}/{rounds}.\n"
             f"Команда: {format_command(result.command)}\n\n{result.output}"
@@ -859,6 +892,13 @@ class Toolbox:
         custom = normalize_allowed_commands(settings.get("allowed_commands"))
         command_id = str(args.get("id") or "").strip()
         timeout = normalize_timeout(settings.get("test_timeout"))
+        if self._fail_locked:
+            return ToolOutcome(
+                "СТОП: повторный тот же FAIL уже зафиксирован. Не вызывай run_tests/run_allowed и другие инструменты; "
+                "кратко опиши проблему и перечисли тронутые файлы."
+                + self._touched_suffix(),
+                "run_allowed: стоп повтор",
+            )
         try:
             resolved_id, command = resolve_allowed(root, command_id, custom)
         except ValueError as exc:
@@ -908,6 +948,30 @@ class Toolbox:
             return ToolOutcome(body + self._touched_suffix(), f"run_allowed {resolved_id}: таймаут")
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
+        if code != 0:
+            fail_key = f"allowed:{resolved_id}:{fail_fingerprint(result.output, code)}"
+            if fail_key and fail_key == self._last_fail_key:
+                self._fail_locked = True
+                body = (
+                    f"СТОП: {status} — то же падение allowlist «{resolved_id}», что в предыдущем запуске. "
+                    f"Больше не вызывай инструменты; опиши проблему человеку и перечисли тронутые файлы.\n"
+                    f"Команда: {format_command(result.command)}\n\n{result.output}"
+                ).strip()
+                self._emit_run("end", title=title, status=f"повтор {status}")
+                return ToolOutcome(
+                    body + self._fail_context(result.output, code),
+                    f"run_allowed {resolved_id}: повтор",
+                )
+            self._last_fail_key = fail_key
+            body = (
+                f"{status}.\nКоманда: {format_command(result.command)}\n\n{result.output}"
+            ).strip()
+            self._emit_run("end", title=title, status=status)
+            return ToolOutcome(
+                body + self._fail_context(result.output, code),
+                f"run_allowed {resolved_id}: {status}",
+            )
+        self._last_fail_key = ""
         body = (
             f"{status}.\nКоманда: {format_command(result.command)}\n\n{result.output}"
         ).strip()

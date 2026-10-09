@@ -213,11 +213,63 @@ class CheckpointStack:
         self.save()
         return removed
 
+    def drop_file(self, checkpoint_id: str, relative: str) -> bool:
+        """Убрать файл из снимка. False — снимок пуст/невосстановим и удалён из стека."""
+        item = self.get(checkpoint_id)
+        if item is None:
+            return False
+        path = str(relative or "").replace("\\", "/").strip().strip("/")
+        item.files.pop(path, None)
+        if not item.restorable():
+            self.items = [entry for entry in self.items if entry.id != checkpoint_id]
+            self.save()
+            return False
+        self.save()
+        return True
+
 
 def delete_checkpoints(chat_id: str) -> None:
     path = _stack_path(chat_id)
     if path.is_file():
         path.unlink()
+
+
+def restorable_paths(checkpoint: TurnCheckpoint) -> list[str]:
+    paths: list[str] = []
+    for relative, snap in sorted((checkpoint.files or {}).items()):
+        if not snap.get("existed"):
+            paths.append(relative)
+            continue
+        if not snap.get("skipped") and snap.get("content") is not None:
+            paths.append(relative)
+    return paths
+
+
+def _restore_one(root: Path, relative: str, snap: dict) -> None:
+    full = resolve_inside(root, relative)
+    if not snap.get("existed"):
+        if full.exists() and full.is_file():
+            full.unlink()
+        return
+    if snap.get("skipped") or snap.get("content") is None:
+        raise OSError("нет снимка содержимого")
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_text(str(snap["content"]), encoding="utf-8", newline="\n")
+
+
+def restore_one_file(root: Path, checkpoint: TurnCheckpoint, relative: str) -> tuple[bool, str]:
+    path = str(relative or "").replace("\\", "/").strip().strip("/")
+    snap = (checkpoint.files or {}).get(path)
+    if snap is None:
+        return False, f"«{path}» нет в снимке"
+    root = Path(root).resolve()
+    try:
+        _restore_one(root, path, snap)
+    except PathError:
+        return False, f"Путь вне проекта: {path}"
+    except OSError as exc:
+        return False, f"Не удалось откатить {path}: {exc}"
+    return True, path
 
 
 def restore_files(root: Path, checkpoint: TurnCheckpoint) -> tuple[list[str], list[str]]:
@@ -226,27 +278,9 @@ def restore_files(root: Path, checkpoint: TurnCheckpoint) -> tuple[list[str], li
     root = Path(root).resolve()
     for relative, snap in checkpoint.files.items():
         try:
-            full = resolve_inside(root, relative)
-        except PathError:
-            failed.append(relative)
-            continue
-        if not snap.get("existed"):
-            try:
-                if full.exists() and full.is_file():
-                    full.unlink()
-                restored.append(relative)
-            except OSError:
-                failed.append(relative)
-            continue
-        if snap.get("skipped") or snap.get("content") is None:
-            failed.append(relative)
-            continue
-        content = str(snap["content"])
-        try:
-            full.parent.mkdir(parents=True, exist_ok=True)
-            full.write_text(content, encoding="utf-8", newline="\n")
+            _restore_one(root, relative, snap)
             restored.append(relative)
-        except OSError:
+        except (PathError, OSError):
             failed.append(relative)
     return restored, failed
 

@@ -21,14 +21,71 @@ from project_agent.secrets import is_secret_blob
 
 MAX_CONTEXT_FILES = 8
 MAX_CONTEXT_DIRS = 4
-MAX_TREE_ENTRIES = 200
-MAX_TREE_DEPTH = 3
+MAX_TREE_ENTRIES = 80
+MAX_TREE_DEPTH = 2
+MAX_ATTACH_CHARS = 24_000
+ATTACH_HEAD_CHARS = 12_000
+ATTACH_TAIL_CHARS = 8_000
 AT_TOKEN_RE = re.compile(
     r'(?<!\S)@(?:"([^"\n]+)"|\'([^\'\n]+)\'|([^\s@]+))'
 )
 AT_TAIL_RE = re.compile(
     r'(?<!\S)@(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\s@]*))$'
 )
+
+
+def clip_attach_text(text: str) -> tuple[str, bool]:
+    """Обрезать большой @файл: голова + хвост. True — было обрезание."""
+    body = text or ""
+    if len(body) <= MAX_ATTACH_CHARS:
+        return body, False
+    head = body[:ATTACH_HEAD_CHARS].rstrip()
+    tail = body[-ATTACH_TAIL_CHARS:].lstrip()
+    return f"{head}\n\n… обрезано …\n\n{tail}", True
+
+
+def resolve_at_path(root: Path, raw: str) -> tuple[str | None, str | None]:
+    """Точный резолв @пути. Без fuzzy-подмены чужим файлом."""
+    path = str(raw or "").replace("\\", "/").strip().strip("/")
+    if not path:
+        return None, "пустой путь"
+    try:
+        full = resolve_inside(root, path)
+    except PathError as exc:
+        return None, f"{path}: {exc}"
+    if full.exists():
+        return relative_posix(root, full), None
+    # только case-insensitive точное совпадение из индекса (не substring)
+    needle = path.casefold()
+    try:
+        data = load_index(root)
+        if not data.get("built_at"):
+            from project_agent.index_store import build_index
+
+            data = build_index(root, with_symbols=False)
+        hits: list[str] = []
+        for item in data.get("files") or []:
+            rel = str(item.get("path") or "").replace("\\", "/")
+            if not rel:
+                continue
+            if rel.casefold() == needle:
+                hits.append(rel)
+        if len(hits) == 1:
+            return hits[0], None
+        # папки: точное имя сегмента из путей индекса
+        dir_hits: list[str] = []
+        for item in data.get("files") or []:
+            rel = str(item.get("path") or "").replace("\\", "/")
+            parts = rel.split("/")
+            for index in range(len(parts) - 1):
+                folder = "/".join(parts[: index + 1])
+                if folder.casefold() == needle and folder not in dir_hits:
+                    dir_hits.append(folder)
+        if len(dir_hits) == 1:
+            return dir_hits[0], None
+    except Exception:
+        pass
+    return None, f"{path}: не найден"
 
 
 def parse_at_paths(text: str) -> list[str]:
@@ -74,12 +131,15 @@ def split_files_and_dirs(root: Path, paths: list[str]) -> tuple[list[str], list[
     seen_f: set[str] = set()
     seen_d: set[str] = set()
     for raw in merge_paths(paths, limit=MAX_CONTEXT_FILES + MAX_CONTEXT_DIRS):
-        try:
-            full = resolve_inside(root, raw)
-        except PathError as exc:
-            errors.append(f"{raw}: {exc}")
+        rel, err = resolve_at_path(root, raw)
+        if err or not rel:
+            errors.append(err or f"{raw}: не найден")
             continue
-        rel = relative_posix(root, full)
+        try:
+            full = resolve_inside(root, rel)
+        except PathError as exc:
+            errors.append(f"{rel}: {exc}")
+            continue
         if full.is_dir():
             if rel in seen_d or len(dirs) >= MAX_CONTEXT_DIRS:
                 continue
@@ -145,12 +205,12 @@ def load_context_dirs(root: Path, paths: list[str]) -> tuple[str, list[str], lis
             errors.append(f"{rel}: папка не найдена")
             continue
         listing = build_dir_listing(root, rel)
-        blocks.append(f"### {rel}/\n{listing}")
+        blocks.append(f"### {rel}/ (только пути, глубина ≤{MAX_TREE_DEPTH})\n{listing}")
         loaded.append(rel + "/")
     if not blocks:
         return "", loaded, errors
     joined = "\n\n".join(blocks)
-    return f"Приложенные папки (только дерево путей):\n\n{joined}", loaded, errors
+    return f"Приложенные папки (только дерево путей, без содержимого файлов):\n\n{joined}", loaded, errors
 
 
 def load_context_files(root: Path, paths: list[str], vault) -> tuple[str, list[str], list[str]]:
@@ -197,9 +257,12 @@ def load_context_files(root: Path, paths: list[str], vault) -> tuple[str, list[s
         if is_secret_blob(full) or ("-----BEGIN" in text and "PRIVATE KEY-----" in text):
             token = vault.take(text)
             body = f"Содержимое скрыто ({token})."
+            clipped = False
         else:
             body = vault.redact(text, full)
-        blocks.append(f"### {rel}\n{body}")
+            body, clipped = clip_attach_text(body)
+        header = f"### {rel}" + (" (обрезано)" if clipped else "")
+        blocks.append(f"{header}\n{body}")
         loaded.append(rel)
     if not blocks:
         return "", loaded, errors
@@ -227,8 +290,24 @@ def compose_user_text(text: str, context_block: str) -> str:
     return f"{base}\n\n---\n{block}"
 
 
+def _at_rank(path: str, query: str) -> int:
+    """0 точное / 1 префикс / 2 содержит; меньше — лучше."""
+    item = path.replace("\\", "/").rstrip("/").lower()
+    name = item.split("/")[-1].lower()
+    q = (query or "").strip().lower().rstrip("/")
+    if not q:
+        return 1
+    if item == q or name == q:
+        return 0
+    if item.startswith(q) or name.startswith(q) or item.endswith("/" + q):
+        return 1
+    if q in item:
+        return 2
+    return 9
+
+
 def find_at_targets(root: Path, query: str, limit: int = 8) -> list[str]:
-    """Файлы и папки для подсказки @."""
+    """Файлы и папки для подсказки @: точное и префикс важнее substring."""
     query = (query or "").strip().lower().replace("\\", "/")
     dirs: set[str] = set()
     files: list[str] = []
@@ -237,7 +316,7 @@ def find_at_targets(root: Path, query: str, limit: int = 8) -> list[str]:
         if not data.get("built_at"):
             from project_agent.index_store import build_index
 
-            data = build_index(root)
+            data = build_index(root, with_symbols=False)
         for item in data.get("files") or []:
             path = str(item.get("path") or "").replace("\\", "/")
             if not path:
@@ -245,22 +324,31 @@ def find_at_targets(root: Path, query: str, limit: int = 8) -> list[str]:
             parts = path.split("/")
             for index in range(len(parts) - 1):
                 dirs.add("/".join(parts[: index + 1]))
-            if not query or query in path.lower():
+            if not query or _at_rank(path, query) < 9:
                 files.append(path)
     except Exception:
         try:
-            files, _meta = find_paths(root, query, limit=limit)
+            files, _meta = find_paths(root, query, limit=max(limit * 3, 24))
         except Exception:
             files = []
-    dir_hits: list[str] = []
-    for folder in sorted(dirs, key=str.casefold):
-        last = folder.split("/")[-1].lower()
-        if query and query not in folder.lower() and not last.startswith(query):
+    candidates: list[tuple[int, str]] = []
+    for folder in dirs:
+        rank = _at_rank(folder, query)
+        if rank >= 9:
             continue
-        dir_hits.append(folder + "/")
+        candidates.append((rank, folder + "/"))
+    for path in files:
+        rank = _at_rank(path, query)
+        if rank >= 9:
+            continue
+        candidates.append((rank, path))
+    candidates.sort(key=lambda item: (item[0], item[1].casefold()))
     seen: set[str] = set()
     ordered: list[str] = []
-    for item in [*dir_hits, *files]:
+    for rank, item in candidates:
+        # substring (rank 2) — только если мало точных/префиксных
+        if rank >= 2 and len(ordered) >= max(2, limit // 2):
+            continue
         key = item.rstrip("/")
         if key in seen:
             continue

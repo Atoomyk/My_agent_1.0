@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from project_agent.config import config_dir
+from project_agent.plan import clean_plan
 
 _ID = re.compile(r"[0-9a-f]{32}")
 MAX_LINES = 400
@@ -206,6 +207,7 @@ def _record(data) -> dict | None:
     if not messages or not provider:
         messages = []
         provider = ""
+    plan = clean_plan(data.get("plan"))
     return {
         "id": chat_id,
         "title": title,
@@ -214,6 +216,7 @@ def _record(data) -> dict | None:
         "lines": lines,
         "messages": messages,
         "provider": provider,
+        "plan": plan,
     }
 
 
@@ -224,6 +227,7 @@ def save_chat(
     lines: list[str],
     messages: list | None = None,
     provider: str = "",
+    plan: dict | None = None,
 ) -> None:
     record = _record(
         {
@@ -234,6 +238,7 @@ def save_chat(
             "lines": lines,
             "messages": messages or [],
             "provider": provider,
+            "plan": plan or {},
         }
     )
     if record is None:

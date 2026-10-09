@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from project_agent.providers import ApiError, Stopped, build_provider
+from project_agent.plan import format_plan_context, parse_plan_checklist
 from project_agent.rules import load_project_rules
 from project_agent.secrets import Scrubber, literals_from_settings
 from project_agent.tools import mode_allows_writes, normalize_agent_mode, tools_for_mode
@@ -26,7 +27,7 @@ SYSTEM_AGENT = """Ты помощник по файлам проекта. Реж
 Тесты после правок — через run_tests и пресет в настройках → Проект. Сборка и разовые allowlist-команды — run_allowed с id (unittest, pytest, npm_test, build_ps1 или свои из настроек). Произвольный shell недоступен.
 Браузер не встроен: если в настройках MCP есть playwright — используй инструмент browser (navigate → snapshot → click/type по ref). Свой Chrome ProjectAgent не запускает.
 Push, reset --hard и произвольный shell недоступны.
-Чтобы быстро найти файл по имени или фрагменту пути — project_index action=find. Символы Python — find_symbol; импорты файла — imports+path; кто импортирует — importers. Не содержимое файлов и не LSP.
+Чтобы быстро найти файл по имени или фрагменту пути — project_index action=find. Символы Python/JS/TS — find_symbol; импорты файла — imports+path; кто импортирует — importers. Не содержимое файлов и не LSP.
 Перед правкой читай связанные файлы (импорты, соседние модули, тесты по имени) — не правь вслепую и не крути много мелких шагов наугад.
 После правок кода, если тесты включены в настройках, запускай run_tests и по выводу решай, нужна ли ещё правка.
 Лимит запусков тестов за один ход задан в настройках. При повторном том же FAIL или сообщении СТОП — больше не вызывай инструменты (в т.ч. run_tests), кратко опиши проблему.
@@ -53,7 +54,8 @@ SYSTEM_PLAN = """Ты помощник по файлам проекта. Реж�
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
 В Plan нельзя менять проект и запускать команды: нет write_file, apply_patch, run_tests, run_allowed, git commit, generate_image, browser, call_mcp_tool.
 Можно: list_dir, read_file, search, project_index (find/find_symbol/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
-Задача: разобрать задачу, при необходимости прочитать код, затем выдать короткий план чеклистом в чате в виде строк «- [ ] шаг».
+Задача: разобрать задачу, при необходимости прочитать код, затем выдать короткий план чеклистом в чате.
+Формат шагов (по одному в строке): «- [ ] шаг» или с якорем файла «- [ ] `path/to/file`: шаг».
 Не пиши файлы и не предлагай «уже внести правку» в этом режиме. В конце напомни: чтобы выполнить план, переключиться в Agent и написать «делай».
 Отвечай на языке пользователя. Когда план готов — текстом без инструментов.
 """
@@ -68,7 +70,7 @@ SYSTEM_DEBUG = """Ты помощник по файлам проекта. Реж
 Запись файла, генерация изображения, run_tests и run_allowed — только после подтверждения. Если отказал — не повторяй то же действие.
 Дисциплина Debug: 1) воспроизведи или собери факты (чтение кода, логи, run_tests / run_allowed); 2) кратко сформулируй гипотезу; 3) одна точечная правка; 4) снова проверь.
 Не размазывай правки по многим файлам наугад. Push, reset --hard и произвольный shell недоступны.
-Тесты после правок — run_tests; разовые allowlist-команды — run_allowed. При повторном том же FAIL или СТОП — остановись и опиши проблему.
+Тесты после правок — run_tests; разовые allowlist-команды — run_allowed. При FAIL смотри блок «Этот ход тронул» и «Суть падения». При повторном том же FAIL или СТОП — остановись и опиши проблему.
 Когда задача сделана или ход остановлен: ответь текстом без инструментов и перечисли изменённые файлы. Если правок не было — скажи об этом.
 Отвечай на языке пользователя.
 """
@@ -126,7 +128,9 @@ class Agent:
         on_error=None,
         on_stopped=None,
         on_checkpoint=None,
+        on_plan=None,
         transcript_len=None,
+        get_plan=None,
     ) -> None:
         self.vault = vault
         self.toolbox = toolbox
@@ -139,6 +143,8 @@ class Agent:
         self.on_error = on_error
         self.on_stopped = on_stopped or on_chat
         self.on_checkpoint = on_checkpoint
+        self.on_plan = on_plan
+        self.get_plan = get_plan
         self.transcript_len = transcript_len or (lambda: 0)
         self.provider = None
         self.provider_kind = None
@@ -201,9 +207,14 @@ class Agent:
         template = _SYSTEM_BY_MODE.get(self._agent_mode, SYSTEM_AGENT)
         base = template.replace("{root}", root)
         block, _sources = load_project_rules(self.root)
+        parts = [base]
         if block:
-            return f"{base}\n{block}"
-        return base
+            parts.append(block)
+        if self._agent_mode in ("agent", "debug") and self.get_plan is not None:
+            plan_block = format_plan_context(self.get_plan())
+            if plan_block:
+                parts.append(plan_block)
+        return "\n".join(parts)
 
     def run_turn(self, text: str, images: list, settings: dict, stop: threading.Event, resend: bool = False) -> None:
         self.stop = stop
@@ -269,6 +280,8 @@ class Agent:
                     self._emit_context(turn.prompt_tokens, settings, from_api=True)
                 if turn.text.strip():
                     self._emit_assistant(scrubber(turn.text))
+                    if self._agent_mode == "plan" and not turn.tool_calls:
+                        self._capture_plan(turn.text)
                 if not turn.tool_calls:
                     if not turn.text.strip():
                         self.on_chat("(пустой ответ модели)")
@@ -369,6 +382,17 @@ class Agent:
         if not paths:
             return
         self.on_journal("изменены: " + ", ".join(paths))
+
+    def _capture_plan(self, text: str) -> None:
+        if self.on_plan is None:
+            return
+        steps = parse_plan_checklist(text)
+        if not steps:
+            return
+        try:
+            self.on_plan(steps)
+        except Exception:
+            pass
 
     def _open_checkpoint(self) -> None:
         stack = self.checkpoints

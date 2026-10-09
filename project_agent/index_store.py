@@ -8,12 +8,17 @@ from pathlib import Path
 
 from project_agent.config import config_dir
 from project_agent.paths import IGNORE_DIRS, is_binary_name
-from project_agent.symbols import scan_python_file
+from project_agent.symbols import (
+    is_js_path,
+    is_symbol_path,
+    resolve_js_relative,
+    scan_source_file,
+)
 
 MAX_INDEX_FILES = 8_000
 MAX_FIND = 80
 INDEX_VERSION = 1
-SYMBOLS_VERSION = 1
+SYMBOLS_VERSION = 2
 
 
 def index_root() -> Path:
@@ -119,7 +124,7 @@ def save_symbols(root: Path, data: dict) -> Path:
 
 def _scan_entry(root: Path, rel: str) -> dict | None:
     full = root / rel
-    scanned = scan_python_file(full)
+    scanned = scan_source_file(full)
     if scanned is None:
         return None
     symbols, imports = scanned
@@ -142,7 +147,7 @@ def build_symbols(root: Path, file_index: dict | None = None) -> dict:
     truncated = False
     for item in data.get("files") or []:
         rel = str(item.get("path") or "").replace("\\", "/")
-        if not rel.endswith(".py") or item.get("binary"):
+        if not is_symbol_path(rel) or item.get("binary"):
             continue
         if len(files) >= MAX_INDEX_FILES:
             truncated = True
@@ -173,7 +178,7 @@ def touch_symbols(root: Path, relative: str) -> None:
     if not data.get("built_at"):
         return
     rel = relative.replace("\\", "/").lstrip("./")
-    if not rel.endswith(".py"):
+    if not is_symbol_path(rel):
         if rel in data.get("files", {}):
             data["files"].pop(rel, None)
             save_symbols(root, data)
@@ -314,6 +319,11 @@ def find_importers(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[
     data = ensure_symbols(root)
     if not query:
         return [], data
+    query_stem = query
+    for ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py"):
+        if query_stem.endswith(ext):
+            query_stem = query_stem[: -len(ext)]
+            break
     found: list[str] = []
     for path, entry in sorted((data.get("files") or {}).items()):
         for item in entry.get("imports") or []:
@@ -321,7 +331,10 @@ def find_importers(root: Path, query: str, limit: int = MAX_FIND) -> tuple[list[
             names = [str(n) for n in (item.get("names") or [])]
             line = int(item.get("line") or 0)
             hay = " ".join([module, *names]).lower()
-            if query not in hay and query not in module.lower():
+            resolved = resolve_js_relative(path, module) if is_js_path(path) else None
+            if resolved:
+                hay = f"{hay} {resolved.lower()}"
+            if query not in hay and query_stem not in hay:
                 continue
             if names:
                 found.append(f"{path}:{line} from {module} import {', '.join(names)}")
@@ -359,7 +372,12 @@ def index_summary(root: Path) -> str:
     note = ", список обрезан" if data.get("truncated") else ""
     symbols = load_symbols(root)
     if symbols.get("built_at"):
-        py_count = len(symbols.get("files") or {})
-        sym_count = sum(len(item.get("symbols") or []) for item in (symbols.get("files") or {}).values())
-        return f"Индекс: {count} файлов, {py_count} .py / {sym_count} символов, обновлён {built}{note}."
+        sym_files = symbols.get("files") or {}
+        py_count = sum(1 for path in sym_files if str(path).lower().endswith(".py"))
+        js_count = sum(1 for path in sym_files if is_js_path(str(path)))
+        sym_count = sum(len(item.get("symbols") or []) for item in sym_files.values())
+        langs = f"{py_count} .py"
+        if js_count:
+            langs += f", {js_count} JS/TS"
+        return f"Индекс: {count} файлов, {langs} / {sym_count} символов, обновлён {built}{note}."
     return f"Индекс: {count} файлов, обновлён {built}{note}."
