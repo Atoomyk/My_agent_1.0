@@ -5726,6 +5726,8 @@ class App(ctk.CTk):
             self.checkpoints.clear()
         self.checkpoints.chat_id = self.chat_id or ""
         self.checkpoints.project_dir = str(self.project)
+        # Своё сообщение всегда показываем: иначе после скролла вверх лента остаётся на старом месте.
+        self._chat_stick = True
         self.write_chat(f"Вы: {note}")
         if created:
             self._refresh_chat_list()
@@ -5755,6 +5757,8 @@ class App(ctk.CTk):
             return
         self._can_retry = False
         self._set_retry_enabled(False)
+        # Продолжение хода тоже ведём к низу ленты.
+        self._chat_stick = True
         self.running = True
         self.stop_event = threading.Event()
         self._show_running(True)
