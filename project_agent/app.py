@@ -2383,8 +2383,8 @@ class App(ctk.CTk):
             border_width=0,
             corner_radius=0,
             font=self._editor_text_font(),
-            scrollbar_button_color=BUTTON,
-            scrollbar_button_hover_color=BUTTON_HOVER,
+            scrollbar_button_color=("#b5ada3", "#2c2824"),
+            scrollbar_button_hover_color=("#8d847a", "#3a342e"),
         )
         self.editor_box.grid(row=0, column=1, sticky="nsew")
         inner = self.editor_box._textbox
