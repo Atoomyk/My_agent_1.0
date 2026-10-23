@@ -23,5 +23,6 @@
   "auto_write_project": false,
   "prefer_cheap_provider": false,
   "ui_font": "Segoe UI",
-  "code_font": "Consolas"
+  "code_font": "Consolas",
+  "last_chats": {}
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def default_config() -> dict:
         "prefer_cheap_provider": False,
         "ui_font": DEFAULT_UI_FONT,
         "code_font": DEFAULT_CODE_FONT,
+        "last_chats": {},
     }
 
 
@@ -203,6 +205,29 @@ def _flag(raw) -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+_CHAT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def folder_key(path) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    return os.path.normcase(str(Path(text).expanduser().resolve(strict=False)))
+
+
+def _last_chats(raw) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, str] = {}
+    for folder, chat_id in raw.items():
+        key = str(folder or "").strip()[:1000]
+        value = str(chat_id or "").strip()
+        if not key or (value and not _CHAT_ID.fullmatch(value)):
+            continue
+        result[key] = value
+    return result
+
+
 def _write_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -284,6 +309,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
     merged["ui_font"] = _font_family(data.get("ui_font"), DEFAULT_UI_FONT)
     merged["code_font"] = _font_family(data.get("code_font"), DEFAULT_CODE_FONT)
+    merged["last_chats"] = _last_chats(data.get("last_chats"))
     return merged, None
 
 
@@ -310,6 +336,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["prefer_cheap_provider"] = _prefer_cheap_provider(data.get("prefer_cheap_provider"))
     payload["ui_font"] = _font_family(data.get("ui_font"), DEFAULT_UI_FONT)
     payload["code_font"] = _font_family(data.get("code_font"), DEFAULT_CODE_FONT)
+    payload["last_chats"] = _last_chats(data.get("last_chats"))
     _write_config(path, payload)
 
 
@@ -377,4 +404,20 @@ def save_font(which: str, family: str, path: Path | None = None) -> None:
     else:
         data = default_config()
     data[which] = family
+    _write_config(path, data)
+
+
+def save_last_chats(mapping: dict, path: Path | None = None) -> None:
+    path = path or config_path()
+    mapping = _last_chats(mapping)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(data, dict):
+            raise ValueError("config.json должен быть объектом")
+    else:
+        data = default_config()
+    data["last_chats"] = mapping
     _write_config(path, data)

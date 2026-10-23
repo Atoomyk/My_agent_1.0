@@ -17,7 +17,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from project_agent.agent import Agent
-from project_agent.chats import delete_chat, list_chats, load_chat, new_chat_id, save_chat
+from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, new_chat_id, save_chat
 from project_agent.plan import (
     clean_plan,
     empty_plan,
@@ -39,11 +39,13 @@ from project_agent.config import (
     DEFAULT_UI_FONT,
     ai_settings,
     config_dir,
+    folder_key,
     load_config,
     needs_api_key,
     save_agent_mode,
     save_config,
     save_font,
+    save_last_chats,
     save_theme,
 )
 from project_agent.context_attach import (
@@ -58,6 +60,8 @@ from project_agent.context_attach import (
     save_clipboard_image,
 )
 from project_agent.images import prepare_image
+_GROUP_PREFIX = "__group__:"
+_GROUP_INDENT = "   "
 from project_agent.mcp_client import McpHub
 from project_agent.editor_tabs import EditorTabs
 from project_agent.paths import (
@@ -2040,6 +2044,7 @@ class App(ctk.CTk):
         self.auto_write_var = ctk.BooleanVar(value=False)
         self.prefer_cheap_provider = False
         self.prefer_cheap_var = ctk.BooleanVar(value=False)
+        self.last_chats: dict[str, str] = {}
         self._git_file_status: dict[str, str] = {}
         self._git_dirty_dirs: set[str] = set()
         self._build()
@@ -3551,7 +3556,7 @@ class App(ctk.CTk):
 
     def _chat_menu(self, event) -> str | None:
         row = self.chat_tree.identify_row(event.y)
-        if not row or self.running:
+        if not row or self.running or str(row).startswith(_GROUP_PREFIX):
             return None
         menu = tk.Menu(
             self,
@@ -4650,6 +4655,8 @@ class App(ctk.CTk):
         self.mcp_servers = list(data["mcp_servers"])
         self.saved_servers = list(data["mcp_servers"])
         self._render_mcp()
+        self.last_chats = {folder_key(key): value for key, value in (data.get("last_chats") or {}).items()}
+        self._prune_last_chats()
         self._restore_project(data.get("project_dir") or "")
         if error:
             self.write_chat(f"Файл настроек не прочитан ({error}). Поля пустые, сохраните их заново.")
@@ -4671,6 +4678,8 @@ class App(ctk.CTk):
             self.mid_split.configure(bg=_tone(INK))
         if hasattr(self, "tree"):
             self._style_tree()
+        if hasattr(self, "chat_tree"):
+            self._style_chat_groups()
         if hasattr(self, "chat"):
             self._tag_chat()
             self._copy_photo_cache = None
@@ -4959,6 +4968,48 @@ class App(ctk.CTk):
         self.project = path.resolve()
         self.agent.set_root(self.project)
         self._show_folder()
+        self.after_idle(self._restore_last_chat)
+
+    def _restore_last_chat(self) -> None:
+        if self.project is None:
+            return
+        chat_id = self.last_chats.get(folder_key(self.project), "")
+        record = load_chat(chat_id) if chat_id else None
+        if record is None or folder_key(record["project_dir"]) != folder_key(self.project):
+            self._refresh_chat_list()
+            return
+        self._open_chat(record["id"])
+
+    def _remember_last_chat(self) -> None:
+        if self.project is None:
+            return
+        key = folder_key(self.project)
+        value = self.chat_id or ""
+        if key in self.last_chats and self.last_chats[key] == value:
+            return
+        self.last_chats[key] = value
+        try:
+            save_last_chats(self.last_chats)
+        except Exception as exc:
+            self.set_status(f"Последний чат не запомнен: {exc}")
+
+    def _prune_last_chats(self) -> None:
+        kept: dict[str, str] = {}
+        for key, chat_id in self.last_chats.items():
+            if not key or not Path(key).is_dir():
+                continue
+            if chat_id:
+                record = load_chat(chat_id)
+                if record is None or folder_key(record["project_dir"]) != key:
+                    continue
+            kept[key] = chat_id
+        if kept == self.last_chats:
+            return
+        self.last_chats = kept
+        try:
+            save_last_chats(kept)
+        except Exception:
+            pass
 
     def collect_settings(self) -> dict:
         settings = self._ai_snapshot()
@@ -4982,6 +5033,7 @@ class App(ctk.CTk):
         self.prefer_cheap_provider = settings["prefer_cheap_provider"]
         settings["ui_font"] = self.ui_font
         settings["code_font"] = self.code_font
+        settings["last_chats"] = dict(self.last_chats)
         return settings
 
     def _read_allowed_commands(self) -> list[dict]:
@@ -5109,6 +5161,7 @@ class App(ctk.CTk):
         if not self._release_editor(ask=True):
             return
         self._store_chat()
+        self._remember_last_chat()
         self.chat_id = None
         self.chat_title = ""
         self.transcript.clear()
@@ -5140,6 +5193,7 @@ class App(ctk.CTk):
         self._clear_box(self.chat)
         self.agent.reset_session(announce=False)
         self._apply_context(0, self.context_limit, False)
+        self._remember_last_chat()
         self._refresh_chat_list()
         self._fit_labels()
         self.set_status("Новый чат")
@@ -5724,6 +5778,7 @@ class App(ctk.CTk):
             self.transcript.clear()
             self.chat_plan = empty_plan()
             self.checkpoints.clear()
+            self._remember_last_chat()
         self.checkpoints.chat_id = self.chat_id or ""
         self.checkpoints.project_dir = str(self.project)
         # Своё сообщение всегда показываем: иначе после скролла вверх лента остаётся на старом месте.
@@ -6287,15 +6342,32 @@ class App(ctk.CTk):
         self._chat_list_lock = True
         try:
             self.chat_tree.delete(*self.chat_tree.get_children())
+            self._style_chat_groups()
             if self.project is None:
                 return
-            for item in list_chats(str(self.project)):
-                self.chat_tree.insert("", "end", iid=item["id"], text=item["title"])
+            for key, label, items in group_chats(list_chats(str(self.project))):
+                group_iid = f"{_GROUP_PREFIX}{key}"
+                # Пробелы в начале дают отступ заголовка; беседы идут без отступа
+                self.chat_tree.insert(
+                    "", "end", iid=group_iid, text=f"{_GROUP_INDENT}{label}", open=True, tags=("group",)
+                )
+                for item in items:
+                    self.chat_tree.insert(group_iid, "end", iid=item["id"], text=item["title"])
             if self.chat_id and self.chat_tree.exists(self.chat_id):
                 self.chat_tree.selection_set(self.chat_id)
                 self.chat_tree.focus(self.chat_id)
+                self.chat_tree.see(self.chat_id)
         finally:
             self._chat_list_lock = False
+
+    def _style_chat_groups(self) -> None:
+        if not hasattr(self, "chat_tree"):
+            return
+        self.chat_tree.tag_configure(
+            "group",
+            font=(self.ui_font, 8, "italic"),
+            foreground=_tone(HINT),
+        )
 
     def _on_chat_select(self, _event=None) -> None:
         if self._chat_list_lock:
@@ -6304,6 +6376,16 @@ class App(ctk.CTk):
         if not selected:
             return
         chat_id = str(selected[0])
+        if chat_id.startswith(_GROUP_PREFIX):
+            # Заголовок группы: только раскрыть/свернуть, чат не открываем
+            self._chat_list_lock = True
+            try:
+                self.chat_tree.selection_remove(chat_id)
+                if self.chat_id and self.chat_tree.exists(self.chat_id):
+                    self.chat_tree.selection_set(self.chat_id)
+            finally:
+                self._chat_list_lock = False
+            return
         if chat_id == self.chat_id:
             return
         if self.running:
@@ -6318,6 +6400,7 @@ class App(ctk.CTk):
             self._refresh_chat_list()
             return
         self.chat_id = record["id"]
+        self._remember_last_chat()
         self.chat_title = record["title"]
         self.transcript = list(record["lines"])
         self.chat_plan = clean_plan(record.get("plan"))
@@ -6399,6 +6482,7 @@ class App(ctk.CTk):
             self.checkpoints.clear()
             self._clear_box(self.chat)
             self.agent.reset_session(announce=False)
+        self._remember_last_chat()
         self._refresh_chat_list()
         self._fit_labels()
         self.set_status("Чат удалён")
@@ -7147,6 +7231,7 @@ class App(ctk.CTk):
         self._stop_project_watch()
         self.stop_event.set()
         try:
+            self._remember_last_chat()
             self._store_chat()
             self.agent.close()
         finally:

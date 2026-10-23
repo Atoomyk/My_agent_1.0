@@ -5,7 +5,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from project_agent.config import config_dir
@@ -19,6 +19,8 @@ MAX_MESSAGE_CHARS = 200_000
 MAX_CHAT_JSON_CHARS = 4_000_000
 IMAGE_NOTE = "[изображение опущено при сохранении чата]"
 PROVIDERS = frozenset({"openai", "anthropic"})
+CHAT_GROUP_LABELS = {"today": "Сегодня", "yesterday": "Вчера", "earlier": "Ранее"}
+CONTENT_KEYS = ("title", "project_dir", "lines", "messages", "provider", "plan")
 
 
 def chats_dir() -> Path:
@@ -220,6 +222,15 @@ def _record(data) -> dict | None:
     }
 
 
+def _read_record(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        return _record(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def save_chat(
     chat_id: str,
     title: str,
@@ -246,6 +257,11 @@ def save_chat(
     folder = chats_dir()
     folder.mkdir(parents=True, exist_ok=True)
     path = chat_path(record["id"])
+    # Открытие чата без новых сообщений не должно сдвигать его дату изменения.
+    previous = _read_record(path)
+    if previous is not None and all(previous[key] == record[key] for key in CONTENT_KEYS):
+        if previous["updated"]:
+            record["updated"] = previous["updated"]
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
@@ -284,6 +300,28 @@ def list_chats(project_dir: str) -> list[dict]:
         found.append({"id": record["id"], "title": record["title"], "updated": record["updated"]})
     found.sort(key=lambda item: item["updated"], reverse=True)
     return found
+
+
+def chat_group(updated: str, today: date) -> str:
+    try:
+        day = datetime.fromisoformat(updated).date()
+    except (TypeError, ValueError):
+        return "earlier"
+    delta = (today - day).days
+    if delta <= 0:
+        return "today"
+    if delta == 1:
+        return "yesterday"
+    return "earlier"
+
+
+def group_chats(items: list[dict], today: date | None = None) -> list[tuple[str, str, list[dict]]]:
+    """Группы по дате изменения: (ключ, подпись, чаты). Пустые группы пропускаются."""
+    today = today or date.today()
+    buckets: dict[str, list[dict]] = {key: [] for key in CHAT_GROUP_LABELS}
+    for item in items:
+        buckets[chat_group(item.get("updated", ""), today)].append(item)
+    return [(key, CHAT_GROUP_LABELS[key], buckets[key]) for key in CHAT_GROUP_LABELS if buckets[key]]
 
 
 def delete_chat(chat_id: str) -> None:
