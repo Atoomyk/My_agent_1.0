@@ -20,7 +20,7 @@ BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9\-._~+/]{12,}={0,2})")
 QUOTED_RE = re.compile(
     r"""(?ix)
     (["']?)
-    (?P<key>password|passwd|pwd|secret|api_key|apikey|api-key|access_key|private_key|client_secret|token)
+    (?P<key>api_key|apikey|api-key|access_key|private_key|client_secret|token)
     (["']?)
     \s*[:=]\s*
     (?P<quote>['"])
@@ -31,6 +31,26 @@ QUOTED_RE = re.compile(
 ENV_LINE_RE = re.compile(r"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(.*)$")
 ENV_COMMENT_RE = re.compile(r"^(\s*#+\s*)(.*)$")
 JSON_VALUE_RE = re.compile(r'(:\s*")((?:\\.|[^"\\])*)(")')
+# Начало ключа без END: заголовок, затем base64. Упоминание строки в коде/шаблоне не совпадает.
+PRIVATE_KEY_START_RE = re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----\s*[A-Za-z0-9+/=]{16,}[\s\S]*")
+
+# Персональные данные. Маскируется группа val, остальной текст остаётся.
+_FIO_SUFFIX = r"(?:ович|евич|ьич|овна|евна|ична|инична|оглы|кызы)"
+_FIO_WORD = r"[А-ЯЁ][а-яё]+"
+PII_PATTERNS = (
+    # СНИЛС: 123-456-789 01 или 123-456-789-01
+    re.compile(r"(?<![\d-])(?P<val>\d{3}-\d{3}-\d{3}[ -]\d{2})(?![\d-])"),
+    # СНИЛС: 11 цифр после слова «СНИЛС»
+    re.compile(r"(?i)снилс\D{0,10}(?P<val>\d{11})(?!\d)"),
+    # Полис ОМС: 16 цифр после слова «полис» или «ОМС»
+    re.compile(r"(?i)(?:полис|омс)\D{0,25}(?P<val>\d{16})(?!\d)"),
+    # Телефон: +7 / 8 и 10 цифр, допустимы пробелы, дефисы, скобки
+    re.compile(r"(?<!\w)(?P<val>(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2})(?!\d)"),
+    # ФИО целиком: Фамилия Имя Отчество
+    re.compile(rf"\b(?P<val>{_FIO_WORD}(?:-{_FIO_WORD})?\s+{_FIO_WORD}\s+[А-ЯЁ][а-яё]*{_FIO_SUFFIX})\b"),
+    # Фамилия И.О.
+    re.compile(rf"\b(?P<val>{_FIO_WORD}\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)"),
+)
 
 JSON_SECRET_NAMES = {
     "secrets.json",
@@ -54,6 +74,10 @@ def is_json_secret_file(path: Path | None) -> bool:
         return False
     name = path.name.lower()
     return name in JSON_SECRET_NAMES or name.endswith(".secrets.json")
+
+
+def has_private_key(text: str) -> bool:
+    return bool(PRIVATE_KEY_START_RE.search(text or ""))
 
 
 def is_secret_blob(path: Path | None) -> bool:
@@ -146,15 +170,28 @@ class SecretVault:
         text = self._replay_known(text)
         text = PEM_RE.sub(lambda match: self.take(match.group(0)), text)
         text = PREFIX_RE.sub(lambda match: self.take(match.group(0)), text)
-        text = URL_RE.sub(lambda match: match.group(1) + self.take(match.group(2)) + "@", text)
         text = BEARER_RE.sub(lambda match: match.group(1) + self.take(match.group(2)), text)
         text = QUOTED_RE.sub(self._replace_quoted, text)
-        if "-----BEGIN" in text and "PRIVATE KEY" in text:
-            text = re.sub(r"-----BEGIN[\s\S]*", self.take("incomplete-private-key"), text, count=1)
+        text = PRIVATE_KEY_START_RE.sub(lambda match: self.take(match.group(0)), text)
+        text = self._redact_pii(text)
         if is_env_file(path):
             text = self._redact_env(text)
         if is_json_secret_file(path):
             text = self._redact_json(text)
+        return text
+
+    def _redact_pii(self, text: str) -> str:
+        for pattern in PII_PATTERNS:
+            def replace(match: re.Match) -> str:
+                value = match.group("val")
+                if TOKEN_RE.search(value):
+                    return match.group(0)
+                start = match.start("val") - match.start(0)
+                end = match.end("val") - match.start(0)
+                whole = match.group(0)
+                return whole[:start] + self.take(value) + whole[end:]
+
+            text = pattern.sub(replace, text)
         return text
 
     def _replay_known(self, text: str) -> str:

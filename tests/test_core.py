@@ -114,6 +114,42 @@ class SecretTests(unittest.TestCase):
         self.assertIn(marker, blob)
 
 
+class PiiTests(unittest.TestCase):
+    def test_pii_is_hidden_and_restored(self):
+        vault = SecretVault()
+        samples = {
+            "snils": ("СНИЛС 123-456-789 01", "123-456-789 01"),
+            "snils_digits": ("снилс: 12345678901", "12345678901"),
+            "oms": ("Полис ОМС 1234567890123456", "1234567890123456"),
+            "phone_plus": ("тел. +7 (900) 123-45-67", "+7 (900) 123-45-67"),
+            "phone_eight": ("звонить 89001234567", "89001234567"),
+            "fio": ("Пациент Иванов Иван Иванович", "Иванов Иван Иванович"),
+            "fio_short": ("Врач Петров А.Б.", "Петров А.Б."),
+        }
+        for name, (original, value) in samples.items():
+            with self.subTest(name):
+                hidden = vault.redact(original)
+                self.assertNotIn(value, hidden)
+                self.assertEqual(vault.restore(hidden), original)
+
+    def test_passwords_urls_and_plain_text_stay_visible(self):
+        vault = SecretVault()
+        for text in (
+            'password = "plainpassword"\n',
+            "postgres://user:plainpass@localhost/db\n",
+            "def run():\n    return 8080\n",
+            "Версия 1.2.3, порт 3000\n",
+        ):
+            with self.subTest(text):
+                self.assertEqual(vault.redact(text), text)
+
+    def test_tokens_are_still_hidden(self):
+        vault = SecretVault()
+        hidden = vault.redact('api_key = "abcdef123456"\nAuthorization: Bearer abcdefghijkl1234\n')
+        self.assertNotIn("abcdef123456", hidden)
+        self.assertNotIn("abcdefghijkl1234", hidden)
+
+
 class PathTests(unittest.TestCase):
     def test_normalize_relative_keeps_dotfiles(self):
         from project_agent.paths import normalize_relative
@@ -467,7 +503,7 @@ class ToolTests(unittest.TestCase):
         original = tools_mod.web_search
         tools_mod.web_search = fake_search
         try:
-            outcome = self.box.execute("web_search", {"query": f'password = "{SECRET}" docs'})
+            outcome = self.box.execute("web_search", {"query": f'token = "{SECRET}" docs'})
         finally:
             tools_mod.web_search = original
         self.assertNotIn(SECRET, queries[0])

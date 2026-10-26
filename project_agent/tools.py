@@ -20,7 +20,14 @@ from project_agent.paths import (
     resolve_inside,
 )
 from project_agent.providers import request_image
-from project_agent.secrets import Scrubber, is_env_file, is_json_secret_file, is_secret_blob, literals_from_settings
+from project_agent.secrets import (
+    Scrubber,
+    has_private_key,
+    is_env_file,
+    is_json_secret_file,
+    is_secret_blob,
+    literals_from_settings,
+)
 from project_agent.allowed import (
     list_allowed_ids,
     normalize_allowed_commands,
@@ -528,7 +535,7 @@ class Toolbox:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             return ToolOutcome("Файл пропущен: не текст.", f"read_file {rel}: пропущен")
-        if is_secret_blob(full) or ("-----BEGIN" in text and "PRIVATE KEY-----" in text):
+        if is_secret_blob(full) or has_private_key(text):
             token = self.vault.take(text)
             return ToolOutcome(
                 f"Содержимое скрыто ({token}). Скопируй метку без изменений, чтобы сохранить файл.",
