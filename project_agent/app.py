@@ -3,12 +3,10 @@ from __future__ import annotations
 import math
 import multiprocessing
 import os
-import re
 import shlex
 import threading
 import traceback
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter import font as tkfont
@@ -17,6 +15,26 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from project_agent.agent import Agent
+from project_agent.chat_markup import (
+    actions_word,
+    chat_body,
+    chat_role,
+    chat_segments,
+    is_running_journal,
+    split_chat_stamp,
+    tool_group_title,
+    tool_short_name,
+    user_copy_text,
+    with_chat_stamp,
+)
+from project_agent.clipboard import (
+    apply_layout_clipboard,
+    clipboard_action,
+    mark_readonly,
+    set_clipboard,
+    _on_layout_clipboard,
+    _selection,
+)
 from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, new_chat_id, save_chat
 from project_agent.checkpoints import (
     CheckpointStack,
@@ -151,232 +169,17 @@ from project_agent.ui_widgets import (
     _tone,
 )
 
-_FENCE = re.compile(r"^\s*```")
-_INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
-_USER_ATTACH_LINE = re.compile(r"^\((?:папки|файлы): .+\)$|^\(изображений: \d+\)$")
-_CHAT_STAMP = re.compile(r"\n(\d{2}:\d{2})\s*$")
-_RUNNING_TAIL = "выполняется…"
-_GROUP_NAMES = 4
 # Группы с одним действием не сворачиваем: единственная строка и так информативна.
 _GROUP_FOLD = 2
 _CHIP_ROWS = 2
 _TASK_MIN_H = 56
 _COMPOSER_MAX_RATIO = 1 / 3
 
-
-def split_chat_stamp(text: str) -> tuple[str, str | None]:
-    body = (text or "").rstrip()
-    match = _CHAT_STAMP.search(body)
-    if not match:
-        return body, None
-    return body[: match.start()].rstrip(), match.group(1)
-
-
-def with_chat_stamp(text: str) -> str:
-    body, stamp = split_chat_stamp(text)
-    if not body:
-        return body
-    if stamp:
-        return f"{body}\n{stamp}"
-    return f"{body}\n{datetime.now().strftime('%H:%M')}"
-
-
-def chat_role(text: str) -> str:
-    body, _ = split_chat_stamp(text)
-    body = body.lstrip()
-    if parse_checkpoint_mark(body):
-        return "checkpoint"
-    if body.startswith("Вы:"):
-        return "user"
-    if body.startswith("·"):
-        return "tool"
-    if body.startswith("Ошибка API:") or body.startswith("Ошибка:"):
-        return "error"
-    return "agent"
-
-
-def chat_body(text: str, role: str | None = None) -> str:
-    body, _ = split_chat_stamp(text)
-    role = role or chat_role(body)
-    if role != "user":
-        return body
-    stripped = body.lstrip()
-    if stripped.startswith("Вы:"):
-        return stripped[3:].lstrip()
-    return body
-
-
-def user_copy_text(body: str) -> str:
-    """Набранный запрос без хвостовых пометок вложений."""
-    body, _ = split_chat_stamp(body)
-    lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    while lines and _USER_ATTACH_LINE.match(lines[-1].strip()):
-        lines.pop()
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(lines).strip()
-
-
-def chat_segments(text: str) -> list[tuple[str, str]]:
-    parts: list[tuple[str, str]] = []
-    fenced = False
-    lines = text.split("\n")
-    for index, line in enumerate(lines):
-        tail = "\n" if index < len(lines) - 1 else ""
-        if _FENCE.match(line):
-            fenced = not fenced
-            continue
-        if fenced:
-            parts.append((line + "\n", "codeblock"))
-            continue
-        position = 0
-        for match in _INLINE.finditer(line):
-            if match.start() > position:
-                parts.append((line[position:match.start()], ""))
-            if match.group(1) is not None:
-                parts.append((match.group(1), "code"))
-            else:
-                parts.append((match.group(2), "bold"))
-            position = match.end()
-        parts.append((line[position:] + tail, ""))
-    merged: list[tuple[str, str]] = []
-    for chunk, tag in parts:
-        if not chunk:
-            continue
-        if merged and merged[-1][1] == tag:
-            merged[-1] = (merged[-1][0] + chunk, tag)
-        else:
-            merged.append((chunk, tag))
-    return merged
-
-
-def is_running_journal(text: str) -> bool:
-    body, _ = split_chat_stamp(text)
-    return body.rstrip().endswith(_RUNNING_TAIL)
-
-
-def tool_short_name(body: str) -> str:
-    head = (body or "").strip().lstrip("·").strip()
-    head = head.split(":", 1)[0]
-    head = head.split(" ", 1)[0]
-    return head.strip()[:24]
-
-
-def actions_word(count: int) -> str:
-    if 11 <= count % 100 <= 14:
-        return "действий"
-    last = count % 10
-    if last == 1:
-        return "действие"
-    if 2 <= last <= 4:
-        return "действия"
-    return "действий"
-
-
-def tool_group_title(names, count: int, opened: bool) -> str:
-    total = max(int(count or 0), 0)
-    label = f"{total} {actions_word(total)}"
-    if opened:
-        return f"▾ {label}"
-    listed = list(names or [])
-    tail = ", ".join(listed[:_GROUP_NAMES])
-    if len(listed) > _GROUP_NAMES:
-        tail += ", …"
-    return f"▸ {label} · {tail}" if tail else f"▸ {label}"
-
-
-# ЙЦУКЕН: физические C V X A приходят как с м ч ф.
-_RU_CLIPBOARD = {
-    "Cyrillic_es": "copy",
-    "Cyrillic_ES": "copy",
-    "Cyrillic_em": "paste",
-    "Cyrillic_EM": "paste",
-    "Cyrillic_che": "cut",
-    "Cyrillic_CHE": "cut",
-    "Cyrillic_ef": "select",
-    "Cyrillic_EF": "select",
-}
-_KEY_CLIPBOARD = {67: "copy", 86: "paste", 88: "cut", 65: "select"}
-_LATIN_CLIPBOARD = {"c": "copy", "v": "paste", "x": "cut", "a": "select"}
 _CHAT_FREE = {
     "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
     "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
     "Caps_Lock", "Num_Lock", "Scroll_Lock",
 }
-_READONLY_TEXT: set[str] = set()
-
-
-def clipboard_action(keysym: str, keycode: int) -> str | None:
-    symbol = str(keysym or "")
-    if symbol in _RU_CLIPBOARD:
-        return _RU_CLIPBOARD[symbol]
-    lowered = symbol.lower()
-    if lowered in _LATIN_CLIPBOARD:
-        return _LATIN_CLIPBOARD[lowered]
-    # Физическая клавиша (C/V/X/A) при любой раскладке — по keycode Windows.
-    return _KEY_CLIPBOARD.get(int(keycode or 0))
-
-
-def _selection(widget) -> str | None:
-    try:
-        if widget.winfo_class() == "Text":
-            return widget.get("sel.first", "sel.last")
-        return widget.selection_get()
-    except tk.TclError:
-        return None
-
-
-def set_clipboard(widget, text: str) -> None:
-    """Надёжная запись в буфер Windows: clear+append без update часто теряется."""
-    if text is None:
-        return
-    try:
-        widget.clipboard_clear()
-        widget.clipboard_append(text)
-        widget.update_idletasks()
-    except tk.TclError:
-        return
-
-
-def apply_layout_clipboard(widget, action: str, text: str | None = None) -> None:
-    try:
-        if action in {"paste", "cut"} and str(widget) in _READONLY_TEXT:
-            return
-        if action == "select":
-            if widget.winfo_class() == "Text":
-                widget.tag_add("sel", "1.0", "end-1c")
-                widget.mark_set("insert", "end-1c")
-            else:
-                widget.select_range(0, "end")
-                widget.icursor("end")
-            return
-        if action in {"copy", "cut"}:
-            selected = text if text is not None else _selection(widget)
-            if selected is None:
-                return
-            set_clipboard(widget, selected)
-            if action == "cut":
-                widget.delete("sel.first", "sel.last")
-            return
-        if action == "paste":
-            pasted = widget.clipboard_get()
-            try:
-                widget.delete("sel.first", "sel.last")
-            except tk.TclError:
-                pass
-            widget.insert("insert", pasted)
-    except tk.TclError:
-        return
-
-
-def _on_layout_clipboard(event):
-    if not (int(getattr(event, "state", 0) or 0) & 0x4):
-        return
-    action = clipboard_action(str(event.keysym), int(getattr(event, "keycode", 0) or 0))
-    if not action:
-        return
-    apply_layout_clipboard(event.widget, action)
-    return "break"
 
 
 def _tree_kind_for_name(name: str, is_dir: bool) -> str:
@@ -910,7 +713,7 @@ class App(ctk.CTk):
         )
         self.jump_down.place_forget()
         self.bind_all("<Control-KeyPress>", self._on_find_key, add="+")
-        _READONLY_TEXT.add(str(self.chat._textbox))
+        mark_readonly(self.chat._textbox)
 
         self.output_frame = ctk.CTkFrame(
             self.mid_split, fg_color=PANEL, corner_radius=0, border_width=0
@@ -962,7 +765,7 @@ class App(ctk.CTk):
         self.output_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         self.output_box.configure(state="disabled")
         self.output_box._textbox.bind("<Control-KeyPress>", _on_layout_clipboard, add="+")
-        _READONLY_TEXT.add(str(self.output_box._textbox))
+        mark_readonly(self.output_box._textbox)
 
         self.editor_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         self.editor_frame.grid_columnconfigure(0, weight=1)
