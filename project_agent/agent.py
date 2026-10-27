@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 
 from project_agent.providers import ApiError, Stopped, build_provider
-from project_agent.plan import format_plan_context, parse_plan_checklist
 from project_agent.rules import load_project_rules
 from project_agent.secrets import Scrubber, literals_from_settings
 from project_agent.tools import mode_allows_writes, normalize_agent_mode, tools_for_mode
@@ -47,20 +46,6 @@ SYSTEM_ASK = """Ты помощник по файлам проекта. Режи
 Отвечай на языке пользователя. Когда ответ готов — текстом без инструментов.
 """
 
-SYSTEM_PLAN = """Ты помощник по файлам проекта. Режим: Plan (план без записи). Корень: {root}
-Весь проект в контекст не входит: нужные файлы читай инструментами.
-Человек может явно приложить файлы и папки (@путь / @папка или вложение): файлы — содержимое, папки — только дерево путей. Изображение можно вставить из буфера (Ctrl+V).
-Если ниже есть блок «Правила проекта» из AGENTS.md или .projectagent/rules — следуй им.
-Метки вида [[SEC:...:N]] заменяют пароли и ключи. Не пытайся их раскрыть.
-Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
-В Plan нельзя менять проект и запускать команды: нет write_file, apply_patch, run_tests, run_allowed, run_shell, git commit, generate_image, browser, call_mcp_tool.
-Можно: list_dir, read_file, search, project_index (find/find_symbol/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
-Задача: разобрать задачу, при необходимости прочитать код, затем выдать короткий план чеклистом в чате.
-Формат шагов (по одному в строке): «- [ ] шаг» или с якорем файла «- [ ] `path/to/file`: шаг».
-Не пиши файлы и не предлагай «уже внести правку» в этом режиме. В конце напомни: чтобы выполнить план, переключиться в Agent и написать «делай».
-Отвечай на языке пользователя. Когда план готов — текстом без инструментов.
-"""
-
 SYSTEM_DEBUG = """Ты помощник по файлам проекта. Режим: Debug. Корень: {root}
 Весь проект в контекст не входит: нужные файлы читай инструментами.
 Человек может явно приложить файлы и папки (@путь / @папка или вложение): файлы — содержимое, папки — только дерево путей. Изображение можно вставить из буфера (Ctrl+V).
@@ -80,12 +65,10 @@ SYSTEM_DEBUG = """Ты помощник по файлам проекта. Реж
 _SYSTEM_BY_MODE = {
     "agent": SYSTEM_AGENT,
     "ask": SYSTEM_ASK,
-    "plan": SYSTEM_PLAN,
     "debug": SYSTEM_DEBUG,
 }
 _STATUS_BY_MODE = {
     "ask": " · Ask",
-    "plan": " · Plan",
     "debug": " · Debug",
 }
 
@@ -132,9 +115,7 @@ class Agent:
         on_error=None,
         on_stopped=None,
         on_checkpoint=None,
-        on_plan=None,
         transcript_len=None,
-        get_plan=None,
     ) -> None:
         self.vault = vault
         self.toolbox = toolbox
@@ -147,8 +128,6 @@ class Agent:
         self.on_error = on_error
         self.on_stopped = on_stopped or on_chat
         self.on_checkpoint = on_checkpoint
-        self.on_plan = on_plan
-        self.get_plan = get_plan
         self.transcript_len = transcript_len or (lambda: 0)
         self.provider = None
         self.provider_kind = None
@@ -239,10 +218,6 @@ class Agent:
         parts = [base]
         if block:
             parts.append(block)
-        if self._agent_mode in ("agent", "debug") and self.get_plan is not None:
-            plan_block = format_plan_context(self.get_plan())
-            if plan_block:
-                parts.append(plan_block)
         return "\n".join(parts)
 
     def run_turn(self, text: str, images: list, settings: dict, stop: threading.Event, resend: bool = False) -> None:
@@ -278,7 +253,7 @@ class Agent:
         specs = tools_for_mode(self._agent_mode, settings)
         self._last_tools = specs
         max_steps = int(settings.get("max_steps") or 25)
-        if self._agent_mode in ("ask", "plan"):
+        if self._agent_mode == "ask":
             max_steps = min(max_steps, 15)
         try:
             for step in range(1, max_steps + 1):
@@ -310,8 +285,6 @@ class Agent:
                     self._emit_context(turn.prompt_tokens, settings, from_api=True)
                 if turn.text.strip():
                     self._emit_assistant(scrubber(turn.text))
-                    if self._agent_mode == "plan" and not turn.tool_calls:
-                        self._capture_plan(turn.text)
                 if not turn.tool_calls:
                     if not turn.text.strip():
                         self.on_chat("(пустой ответ модели)")
@@ -418,17 +391,6 @@ class Agent:
         if not paths:
             return
         self.on_journal("изменены: " + ", ".join(paths))
-
-    def _capture_plan(self, text: str) -> None:
-        if self.on_plan is None:
-            return
-        steps = parse_plan_checklist(text)
-        if not steps:
-            return
-        try:
-            self.on_plan(steps)
-        except Exception:
-            pass
 
     def _open_checkpoint(self) -> None:
         stack = self.checkpoints

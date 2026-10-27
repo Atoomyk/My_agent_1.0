@@ -14,7 +14,6 @@ PROVIDER_LABELS = {
 LABEL_BY_PROVIDER = {value: key for key, value in PROVIDER_LABELS.items()}
 MODE_LABELS = {
     "Agent": "agent",
-    "Plan": "plan",
     "Debug": "debug",
     "Ask": "ask",
 }

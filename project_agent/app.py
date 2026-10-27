@@ -18,13 +18,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from project_agent.agent import Agent
 from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, new_chat_id, save_chat
-from project_agent.plan import (
-    clean_plan,
-    empty_plan,
-    parse_plan_mark,
-    plan_mark,
-    toggle_step,
-)
 from project_agent.checkpoints import (
     CheckpointStack,
     checkpoint_mark,
@@ -193,8 +186,6 @@ def chat_role(text: str) -> str:
     body = body.lstrip()
     if parse_checkpoint_mark(body):
         return "checkpoint"
-    if parse_plan_mark(body):
-        return "plan"
     if body.startswith("Вы:"):
         return "user"
     if body.startswith("·"):
@@ -581,8 +572,6 @@ class App(ctk.CTk):
         self._can_retry = False
         self._retry_buttons: list[tk.Button] = []
         self._checkpoint_buttons: list[tk.Button] = []
-        self._plan_buttons: list[tk.Button] = []
-        self.chat_plan: dict = empty_plan()
         self._tool_groups: list[dict] = []
         self._tool_group: dict | None = None
         self._group_seq = 0
@@ -623,9 +612,7 @@ class App(ctk.CTk):
             self.write_retryable_error,
             on_stopped=self.write_stopped,
             on_checkpoint=self._on_checkpoint,
-            on_plan=self._on_plan,
             transcript_len=lambda: len(self.transcript),
-            get_plan=lambda: self.chat_plan,
         )
         self.agent.checkpoints = self.checkpoints
         self.theme = "dark"
@@ -3797,7 +3784,6 @@ class App(ctk.CTk):
         self.chat_id = None
         self.chat_title = ""
         self.transcript.clear()
-        self.chat_plan = empty_plan()
         self._forget_retry()
         self.project = Path(selected).resolve()
         self._show_folder()
@@ -3819,7 +3805,6 @@ class App(ctk.CTk):
         self.chat_id = None
         self.chat_title = ""
         self.transcript.clear()
-        self.chat_plan = empty_plan()
         self._forget_retry()
         self.checkpoints.clear()
         self._clear_box(self.chat)
@@ -4408,7 +4393,6 @@ class App(ctk.CTk):
             self.chat_id = new_chat_id()
             self.chat_title = " ".join(note.split())[:80] or "Чат"
             self.transcript.clear()
-            self.chat_plan = empty_plan()
             self.checkpoints.clear()
             self._remember_last_chat()
         self.checkpoints.chat_id = self.chat_id or ""
@@ -4629,37 +4613,6 @@ class App(ctk.CTk):
         if error:
             inner.tag_add("error", mark, inner.index("end-1c"))
 
-    def _on_plan(self, steps: list[dict]) -> None:
-        cleaned = clean_plan({"steps": steps})
-        if not (cleaned.get("steps") or []):
-            return
-        self.chat_plan = cleaned
-        mark = plan_mark()
-        self.transcript = [line for line in self.transcript if not parse_plan_mark(line)]
-        self.transcript.append(mark)
-        self._store_chat()
-        self.after(0, self._show_transcript)
-
-    def _sync_plan_mark(self) -> None:
-        has_steps = bool((self.chat_plan.get("steps") or []))
-        kept: list[str] = []
-        seen = False
-        changed = False
-        for line in self.transcript:
-            if parse_plan_mark(line):
-                if not has_steps or seen:
-                    changed = True
-                    continue
-                seen = True
-                kept.append(plan_mark())
-                continue
-            kept.append(line)
-        if has_steps and not seen:
-            kept.append(plan_mark())
-            changed = True
-        if changed or kept != self.transcript:
-            self.transcript = kept
-
     def _on_checkpoint(self, checkpoint_id: str | None, file_count: int, dropped: list[str]) -> None:
         if dropped:
             self.after(0, lambda ids=list(dropped): self._drop_checkpoint_marks(ids))
@@ -4692,89 +4645,6 @@ class App(ctk.CTk):
         self._close_tool_group()
         self._embed_checkpoint_control(inner, checkpoint_id)
         self._chat_see_end()
-
-    def _embed_plan_control(self, inner) -> None:
-        steps = list((self.chat_plan.get("steps") or []))
-        if not steps:
-            return
-        start = inner.index("end-1c")
-        head = tk.Frame(inner, bg=_tone(INK), highlightthickness=0)
-        tk.Label(
-            head,
-            text="План",
-            bd=0,
-            padx=4,
-            pady=2,
-            font=self._px_font(12),
-            fg=_tone(TEXT),
-            bg=_tone(INK),
-        ).pack(side="left")
-        done = sum(1 for step in steps if step.get("done"))
-        tk.Label(
-            head,
-            text=f"  {done}/{len(steps)}",
-            bd=0,
-            padx=0,
-            pady=2,
-            font=self._px_font(10),
-            fg=_tone(MUTED),
-            bg=_tone(INK),
-        ).pack(side="left")
-        inner.window_create("end", window=head, padx=0, pady=2)
-        inner.insert("end", "\n")
-        for index, step in enumerate(steps):
-            row = tk.Frame(inner, bg=_tone(INK), highlightthickness=0)
-            mark = "✓" if step.get("done") else "○"
-            toggle = tk.Button(
-                row,
-                text=mark,
-                command=lambda i=index: self.toggle_plan_step(i),
-                relief="flat",
-                bd=0,
-                padx=4,
-                pady=1,
-                cursor="hand2",
-                bg=_tone(BUTTON),
-                fg=_tone(TEXT),
-                activebackground=_tone(BUTTON_HOVER),
-                activeforeground=_tone(TEXT),
-                disabledforeground=_tone(MUTED),
-                font=self._px_font(11),
-                width=2,
-            )
-            self._plan_buttons.append(toggle)
-            toggle.pack(side="left")
-            path = str(step.get("path") or "").strip()
-            text = str(step.get("text") or "").strip()
-            label = f"{path}: {text}" if path else text
-            if step.get("done"):
-                label = f"~~ {label}"
-            tk.Label(
-                row,
-                text=label,
-                bd=0,
-                padx=6,
-                pady=1,
-                font=self._px_font(11),
-                fg=_tone(MUTED) if step.get("done") else _tone(TEXT),
-                bg=_tone(INK),
-                anchor="w",
-                justify="left",
-            ).pack(side="left", fill="x", expand=True)
-            inner.window_create("end", window=row, padx=4, pady=1)
-            inner.insert("end", "\n")
-        inner.tag_add("plan", start, inner.index("end-1c"))
-
-    def toggle_plan_step(self, index: int) -> None:
-        if self.running:
-            return
-        self.chat_plan = toggle_step(self.chat_plan, index)
-        if not (self.chat_plan.get("steps") or []):
-            self.transcript = [line for line in self.transcript if not parse_plan_mark(line)]
-        else:
-            self._sync_plan_mark()
-        self._store_chat()
-        self._show_transcript()
 
     def _embed_checkpoint_control(self, inner, checkpoint_id: str) -> None:
         item = self.checkpoints.get(checkpoint_id)
@@ -4963,7 +4833,6 @@ class App(ctk.CTk):
                 lines,
                 messages=messages,
                 provider=provider,
-                plan=self.chat_plan,
             )
         except Exception as exc:
             self.set_status(f"Чат не сохранён: {exc}")
@@ -5035,11 +4904,9 @@ class App(ctk.CTk):
         self._remember_last_chat()
         self.chat_title = record["title"]
         self.transcript = list(record["lines"])
-        self.chat_plan = clean_plan(record.get("plan"))
         self._forget_retry()
         self.checkpoints.load(self.chat_id, str(self.project))
         self._sync_checkpoint_marks()
-        self._sync_plan_mark()
         self._show_transcript()
         from project_agent.tools import normalize_agent_mode
 
@@ -5697,11 +5564,6 @@ class App(ctk.CTk):
                 return
             self._embed_checkpoint_control(inner, checkpoint_id)
             return
-        if role == "plan":
-            if not (self.chat_plan.get("steps") or []):
-                return
-            self._embed_plan_control(inner)
-            return
         if role == "user":
             copy_text = user_copy_text(body)
             bubble = self._make_user_bubble(body, copy_text)
@@ -5740,7 +5602,6 @@ class App(ctk.CTk):
         self._user_bubbles = []
         self._retry_buttons = []
         self._checkpoint_buttons = []
-        self._plan_buttons = []
         self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")
@@ -5832,7 +5693,6 @@ class App(ctk.CTk):
             self._user_bubbles = []
             self._retry_buttons = []
             self._checkpoint_buttons = []
-            self._plan_buttons = []
             self._reset_tool_groups()
         box.configure(state="normal")
         box.delete("1.0", "end")

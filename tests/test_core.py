@@ -23,7 +23,6 @@ from project_agent.checkpoints import (
     restore_files,
     restore_one_file,
 )
-from project_agent.plan import plan_mark
 from project_agent.config import (
     DEFAULT_CODE_FONT,
     DEFAULT_UI_FONT,
@@ -1580,25 +1579,10 @@ class ProjectRulesTests(unittest.TestCase):
             ask_system = agent._system()
             self.assertIn("Режим: Ask", ask_system)
             self.assertIn("Пиши кратко.", ask_system)
-            agent._agent_mode = "plan"
-            plan_system = agent._system()
-            self.assertIn("Режим: Plan", plan_system)
-            self.assertIn("- [ ]", plan_system)
-            self.assertIn("`path/to/file`", plan_system)
-            agent.get_plan = lambda: {
-                "steps": [{"text": "fix Foo", "path": "a.py", "done": False}]
-            }
-            agent._agent_mode = "agent"
-            with_plan = agent._system()
-            self.assertIn("Актуальный план", with_plan)
-            self.assertIn("`a.py`", with_plan)
-            agent._agent_mode = "plan"
-            self.assertNotIn("Актуальный план", agent._system())
             agent._agent_mode = "debug"
             debug_system = agent._system()
             self.assertIn("Режим: Debug", debug_system)
             self.assertIn("гипотезу", debug_system)
-            self.assertIn("Актуальный план", debug_system)
 
 
 class ToolRunningLabelTests(unittest.TestCase):
@@ -1673,9 +1657,9 @@ class AllowedCommandTests(unittest.TestCase):
             ok = box.execute("run_allowed", {"id": "py_help", "summary": "probe"})
             self.assertIn("42", ok.model_text)
             self.assertTrue(notes)
-            settings["agent_mode"] = "plan"
+            settings["agent_mode"] = "ask"
             blocked = box.execute("run_allowed", {"id": "py_help", "summary": "probe"})
-            self.assertIn("Plan", blocked.model_text)
+            self.assertIn("Ask", blocked.model_text)
 
 
 class RunShellTests(unittest.TestCase):
@@ -1759,12 +1743,6 @@ class RunShellTests(unittest.TestCase):
             self.assertTrue(any(item[0] == "start" for item in events))
             self.assertTrue(any(item[0] == "end" for item in events))
 
-            settings["agent_mode"] = "plan"
-            plan_blocked = box.execute(
-                "run_shell",
-                {"summary": "nope", "argv": [sys.executable, "-c", "print(1)"]},
-            )
-            self.assertIn("Plan", plan_blocked.model_text)
             settings["agent_mode"] = "ask"
             ask_blocked = box.execute(
                 "run_shell",
@@ -1893,8 +1871,10 @@ class RunShellTests(unittest.TestCase):
         self.assertIn("run_shell", on)
         debug_on = {s["name"] for s in tools_for_mode("debug", {"agent_shell_enabled": True})}
         self.assertIn("run_shell", debug_on)
-        plan_on = {s["name"] for s in tools_for_mode("plan", {"agent_shell_enabled": True})}
-        self.assertNotIn("run_shell", plan_on)
+        # Устаревший "plan" из старого конфига = Ask: только чтение, без run_shell.
+        legacy = {s["name"] for s in tools_for_mode("plan", {"agent_shell_enabled": True})}
+        self.assertEqual(legacy, {s["name"] for s in tools_for_mode("ask")})
+        self.assertNotIn("run_shell", legacy)
 
     def test_run_shell_and_allowed_detach(self):
         import subprocess
@@ -1989,30 +1969,26 @@ class AgentModeTests(unittest.TestCase):
     def test_tools_filter_and_ask_blocks_writes(self):
         from project_agent.tools import (
             ASK_TOOL_NAMES,
-            PLAN_TOOL_NAMES,
             mode_allows_writes,
             normalize_agent_mode,
             tools_for_mode,
         )
 
         self.assertEqual(normalize_agent_mode("ASK"), "ask")
-        self.assertEqual(normalize_agent_mode("Plan"), "plan")
+        self.assertEqual(normalize_agent_mode("Plan"), "ask")
         self.assertEqual(normalize_agent_mode("DEBUG"), "debug")
         self.assertEqual(normalize_agent_mode("nope"), "agent")
         self.assertTrue(mode_allows_writes("agent"))
         self.assertTrue(mode_allows_writes("debug"))
         self.assertFalse(mode_allows_writes("ask"))
+        # Режима Plan больше нет: старый "plan" понижается до Ask, а не до Agent.
         self.assertFalse(mode_allows_writes("plan"))
         ask_names = {spec["name"] for spec in tools_for_mode("ask")}
         self.assertEqual(ask_names, set(ASK_TOOL_NAMES))
         self.assertNotIn("write_file", ask_names)
         self.assertNotIn("browser", ask_names)
         self.assertNotIn("run_shell", ask_names)
-        plan_names = {spec["name"] for spec in tools_for_mode("plan")}
-        self.assertEqual(plan_names, set(PLAN_TOOL_NAMES))
-        self.assertNotIn("write_file", plan_names)
-        self.assertNotIn("run_tests", plan_names)
-        self.assertNotIn("run_shell", plan_names)
+        self.assertNotIn("run_tests", ask_names)
         agent_names = {spec["name"] for spec in tools_for_mode("agent")}
         self.assertIn("write_file", agent_names)
         self.assertIn("browser", agent_names)
@@ -2031,14 +2007,15 @@ class AgentModeTests(unittest.TestCase):
             self.assertFalse((root / "a.py").exists())
             commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
             self.assertIn("Ask", commit.model_text)
+            # Устаревший режим "plan" из старого конфига = Ask (только чтение), без права записи.
             settings["agent_mode"] = "plan"
-            plan_blocked = box.execute("write_file", {"path": "b.py", "content": "y=1\n", "summary": "y"})
-            self.assertIn("Plan", plan_blocked.model_text)
+            legacy_blocked = box.execute("write_file", {"path": "b.py", "content": "y=1\n", "summary": "y"})
+            self.assertIn("Ask", legacy_blocked.model_text)
             self.assertFalse((root / "b.py").exists())
-            plan_tests = box.execute("run_tests", {"summary": "check"})
-            self.assertIn("Plan", plan_tests.model_text)
-            plan_commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
-            self.assertIn("Plan", plan_commit.model_text)
+            legacy_tests = box.execute("run_tests", {"summary": "check"})
+            self.assertIn("Ask", legacy_tests.model_text)
+            legacy_commit = box.execute("git", {"action": "commit", "message": "x", "add_all": True})
+            self.assertIn("Ask", legacy_commit.model_text)
 
 
 class McpTests(unittest.TestCase):
@@ -3142,61 +3119,6 @@ while True:
     elif "id" in message:
         write_message({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "no"}})
 """
-
-
-class PlanStoreTests(unittest.TestCase):
-    def test_parse_and_format_plan(self):
-        from project_agent.plan import (
-            format_plan_context,
-            parse_plan_checklist,
-            parse_plan_mark,
-            plan_mark,
-            toggle_step,
-        )
-
-        steps = parse_plan_checklist(
-            "Вот план:\n"
-            "- [ ] `src/app.py`: починить Foo\n"
-            "- [x] helper.ts: типы\n"
-            "- [ ] просто шаг\n"
-            "готово\n"
-        )
-        self.assertEqual(len(steps), 3)
-        self.assertEqual(steps[0]["path"], "src/app.py")
-        self.assertEqual(steps[0]["text"], "починить Foo")
-        self.assertTrue(steps[1]["done"])
-        self.assertEqual(steps[1]["path"], "helper.ts")
-        self.assertEqual(steps[2]["path"], "")
-        block = format_plan_context({"steps": steps})
-        self.assertIn("`src/app.py`", block)
-        self.assertIn("[x]", block)
-        toggled = toggle_step({"steps": steps}, 0)
-        self.assertTrue(toggled["steps"][0]["done"])
-        self.assertTrue(parse_plan_mark(plan_mark()))
-
-    def test_chat_persists_plan(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            previous = os.environ.get("APPDATA")
-            os.environ["APPDATA"] = tmp
-            try:
-                root = Path(tmp) / "proj"
-                root.mkdir()
-                chat_id = new_chat_id()
-                plan = {
-                    "steps": [
-                        {"text": "шаг", "path": "a.py", "done": False},
-                        {"text": "два", "path": "", "done": True},
-                    ]
-                }
-                save_chat(chat_id, "План", str(root), ["Вы: сделай", plan_mark()], plan=plan)
-                loaded = load_chat(chat_id)
-                self.assertEqual(loaded["plan"]["steps"][0]["path"], "a.py")
-                self.assertTrue(loaded["plan"]["steps"][1]["done"])
-            finally:
-                if previous is None:
-                    os.environ.pop("APPDATA", None)
-                else:
-                    os.environ["APPDATA"] = previous
 
 
 class CheckpointTests(unittest.TestCase):
