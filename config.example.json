@@ -13,6 +13,7 @@
   "test_preset": "",
   "test_timeout": 120,
   "test_fix_rounds": 3,
+  "shell_max_per_turn": 3,
   "allowed_commands": [],
   "agent_shell_enabled": false,
   "active_profile": "",

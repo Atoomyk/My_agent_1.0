@@ -34,6 +34,8 @@ MAX_TIMEOUT = 600
 DEFAULT_FIX_ROUNDS = 3
 MIN_FIX_ROUNDS = 1
 MAX_FIX_ROUNDS = 10
+DEFAULT_SHELL_PER_TURN = 3
+MAX_SHELL_PER_TURN = 50
 
 
 @dataclass
@@ -55,7 +57,9 @@ class DetachRun:
 def format_command(command: list[str] | str) -> str:
     if isinstance(command, str):
         return command
-    return " ".join(command)
+    # Переводы строк в аргументе разрешены (см. allowed.validate_argv),
+    # но в журнале и диалоге подтверждения они рвут одну команду на строки.
+    return " ".join(str(part).replace("\r\n", " ").replace("\n", " ").replace("\r", " ") for part in command)
 
 
 def normalize_preset(raw) -> str:
@@ -77,6 +81,17 @@ def normalize_fix_rounds(raw) -> int:
     except (TypeError, ValueError):
         return DEFAULT_FIX_ROUNDS
     return min(MAX_FIX_ROUNDS, max(MIN_FIX_ROUNDS, value))
+
+
+def normalize_shell_limit(raw) -> int:
+    """0 — без лимита; иначе 1..MAX_SHELL_PER_TURN."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SHELL_PER_TURN
+    if value <= 0:
+        return 0
+    return min(MAX_SHELL_PER_TURN, value)
 
 
 def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:

@@ -215,9 +215,16 @@ class Agent:
         if self._agent_mode not in ("agent", "debug"):
             return "Произвольный shell недоступен."
         if bool(settings.get("agent_shell_enabled")):
+            from project_agent.testing import normalize_shell_limit
+
+            limit = normalize_shell_limit(settings.get("shell_max_per_turn"))
+            limit_text = f"лимит {limit} за ход" if limit else "без лимита за ход"
             return (
                 "Включён run_shell (почти свободный argv в корне проекта): только после подтверждения, "
-                "лимит 3 за ход, без shell-метасимволов и без cmd / powershell -Command. "
+                f"{limit_text}, без shell-метасимволов (кроме переводов строк) и без cmd / powershell -Command. "
+                "Переводы строк внутри argv допустимы. "
+                "Параметр summary обязателен: одной строкой объясни, зачем команда и что ожидаешь увидеть — "
+                "человек видит этот текст в диалоге подтверждения и решает по нему. "
                 "Для GUI/долгого процесса — detach=true (без ожидания); иначе ждём вывод до таймаута. "
                 "В allowlist detach — суффикс id! в настройках. "
                 "Предпочитай run_tests и run_allowed; run_shell — только если нет подходящего пресета или id."

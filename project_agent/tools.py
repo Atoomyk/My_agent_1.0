@@ -35,12 +35,14 @@ from project_agent.allowed import (
     resolve_shell_argv,
 )
 from project_agent.testing import (
+    DEFAULT_SHELL_PER_TURN,
     LABEL_BY_PRESET,
     fail_brief,
     fail_fingerprint,
     format_command,
     normalize_fix_rounds,
     normalize_preset,
+    normalize_shell_limit,
     normalize_timeout,
     preset_command,
     run_argv,
@@ -82,7 +84,8 @@ MAX_SCAN_FILES = 2000
 MAX_LIST_DIR = 120
 MAX_WRITE_CHARS = 1_000_000
 MAX_TOOL_RESULT_CHARS = 24_000
-SHELL_MAX_PER_TURN = 3
+# Дефолт для настроек, у которых нет ключа shell_max_per_turn (0 = без лимита).
+SHELL_MAX_PER_TURN = DEFAULT_SHELL_PER_TURN
 
 
 def _schema(properties: dict, required: list[str]) -> dict:
@@ -224,14 +227,22 @@ TOOL_SPECS = [
         "description": (
             "Почти свободный запуск argv в корне проекта (не интерактивный терминал). "
             "Только если включено в настройках → Проект. Всегда подтверждение. "
-            "Лимит 3 запуска за ход. Без shell-метасимволов (|;&`$<>) и без cmd / powershell -Command. "
+            "Лимит запусков за ход настраивается (0 = без лимита), по умолчанию 3. "
+            "Запрещены метасимволы shell (вертикальная черта, точка с запятой, амперсанд, "
+            "обратный апостроф, знаки доллара и угловые скобки), а также cmd и powershell -Command. "
+            "Переводы строк в argv допустимы (argv не идёт через shell). "
             "Предпочитай run_tests и run_allowed; run_shell — только если нет подходящего пресета или id. "
             "Передай argv (массив) или command (строка → shlex). "
-            "detach=true — запуск без ожидания (GUI), иначе ждём до таймаута."
+            "detach=true — запуск без ожидания (GUI), иначе ждём до таймаута. "
+            "ОБЯЗАТЕЛЬНО заполни summary: зачем команда, что проверяешь и что ожидаешь увидеть — "
+            "этот текст человек видит в диалоге подтверждения и решает по нему."
         ),
         "parameters": _schema(
             {
-                "summary": _string("Короткая причина запуска без секретов."),
+                "summary": _string(
+                    "Зачем эта команда и какой результат ожидаешь (без секретов). "
+                    "Показывается пользователю в диалоге подтверждения — обязателен."
+                ),
                 "argv": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1056,20 +1067,48 @@ class Toolbox:
                 + self._touched_suffix(),
                 "run_shell: стоп повтор",
             )
-        if self._shell_runs >= SHELL_MAX_PER_TURN:
+        limit = normalize_shell_limit(settings.get("shell_max_per_turn", SHELL_MAX_PER_TURN))
+        if limit and self._shell_runs >= limit:
             return ToolOutcome(
-                f"Лимит запусков run_shell за этот ход ({SHELL_MAX_PER_TURN}). "
-                "Кратко опиши, что осталось, и остановись."
+                f"Лимит запусков run_shell за этот ход исчерпан ({limit}/{limit}). "
+                "Кратко опиши, что осталось, и остановись. Если задача действительно требует "
+                "серии команд — предложи человеку поднять лимит в «Настройки → Проект» "
+                "(0 — без лимита)."
                 + self._touched_suffix(),
-                f"run_shell: лимит {SHELL_MAX_PER_TURN}",
+                f"run_shell: лимит исчерпан ({limit}/{limit})",
             )
         timeout = normalize_timeout(settings.get("test_timeout"))
+
+        def mark() -> str:
+            """Потрачено/лимит; при 0 (без лимита) — просто потрачено."""
+            return f"{self._shell_runs}/{limit}" if limit else str(self._shell_runs)
+
+        def quota() -> str:
+            """Журнал: квота отдельным сегментом, чтобы не слипалась со статусом."""
+            return f" ({mark()})" if limit else ""
+
+        def step_text() -> str:
+            """Для модели: сколько запусков потрачено и сколько осталось."""
+            if not limit:
+                return f"Запуск {self._shell_runs} (без лимита)"
+            left = limit - self._shell_runs
+            if left <= 0:
+                return f"Запуск {mark()} (лимит исчерпан)"
+            return f"Запуск {mark()} (осталось {left})"
+
         detach = _flag_bool(args.get("detach"))
         try:
             command = resolve_shell_argv(args)
         except ValueError as exc:
             return ToolOutcome(str(exc), "run_shell: ошибка")
         rendered = format_command(command)
+        if not str(args.get("summary") or "").strip():
+            return ToolOutcome(
+                "Нужен параметр summary: одной строкой объясни, зачем эта команда и что ожидаешь увидеть. "
+                "Пользователь читает его в диалоге подтверждения."
+                + self._touched_suffix(),
+                "run_shell: нет причины",
+            )
         if detach:
             summary = self._summary(args.get("summary"), "Shell detach (без ожидания)", 0)
             detail = f"[detach]\n{rendered}"
@@ -1089,9 +1128,8 @@ class Toolbox:
             if outcome.journal.endswith(": ошибка"):
                 return outcome
             self._shell_runs += 1
-            mark = f"{self._shell_runs}/{SHELL_MAX_PER_TURN}"
-            outcome.model_text = (outcome.model_text + f"\nЗапуск {mark}.").strip()
-            outcome.journal = f"run_shell: detach {mark}"
+            outcome.model_text = (outcome.model_text + f"\n{step_text()}.").strip()
+            outcome.journal = f"run_shell: detach{quota()}"
             return outcome
         self._emit_run("start", title=title, command=rendered)
         try:
@@ -1115,13 +1153,13 @@ class Toolbox:
         self._shell_runs += 1
         if result.timed_out:
             body = (
-                f"Таймаут {timeout} с. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+                f"Таймаут {timeout} с. {step_text()}.\n"
                 f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
-            self._emit_run("end", title=title, status=f"таймаут {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+            self._emit_run("end", title=title, status=f"таймаут{quota()}")
             return ToolOutcome(
                 body + self._touched_suffix(),
-                f"run_shell: таймаут {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                f"run_shell: таймаут{quota()}",
             )
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
@@ -1131,38 +1169,38 @@ class Toolbox:
                 self._fail_locked = True
                 body = (
                     f"СТОП: {status} — то же падение shell, что в предыдущем запуске. "
-                    f"Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}. Больше не вызывай инструменты; "
+                    f"{step_text()}. Больше не вызывай инструменты; "
                     f"опиши проблему человеку и перечисли тронутые файлы.\n"
                     f"Команда: {format_command(result.command)}\n\n{result.output}"
                 ).strip()
                 self._emit_run(
                     "end",
                     title=title,
-                    status=f"повтор {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                    status=f"повтор {status}{quota()}",
                 )
                 return ToolOutcome(
                     body + self._fail_context(result.output, code),
-                    f"run_shell: повтор {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                    f"run_shell: повтор {status}{quota()}",
                 )
             self._last_fail_key = fail_key
             body = (
-                f"{status}. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+                f"{status}. {step_text()}.\n"
                 f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
-            self._emit_run("end", title=title, status=f"{status} {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+            self._emit_run("end", title=title, status=f"{status}{quota()}")
             return ToolOutcome(
                 body + self._fail_context(result.output, code),
-                f"run_shell: {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+                f"run_shell: {status}{quota()}",
             )
         self._last_fail_key = ""
         body = (
-            f"{status}. Запуск {self._shell_runs}/{SHELL_MAX_PER_TURN}.\n"
+            f"{status}. {step_text()}.\n"
             f"Команда: {format_command(result.command)}\n\n{result.output}"
         ).strip()
-        self._emit_run("end", title=title, status=f"{status} {self._shell_runs}/{SHELL_MAX_PER_TURN}")
+        self._emit_run("end", title=title, status=f"{status}{quota()}")
         return ToolOutcome(
             body + self._touched_suffix(),
-            f"run_shell: {status} {self._shell_runs}/{SHELL_MAX_PER_TURN}",
+            f"run_shell: {status}{quota()}",
         )
 
     def _run_detached(self, title: str, root, command, journal_prefix: str) -> ToolOutcome:

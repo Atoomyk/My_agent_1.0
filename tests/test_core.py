@@ -1679,6 +1679,14 @@ class AllowedCommandTests(unittest.TestCase):
 
 
 class RunShellTests(unittest.TestCase):
+    def test_format_command_keeps_multiline_on_one_line(self):
+        from project_agent.testing import format_command
+
+        self.assertEqual(format_command([sys.executable, "-c", "a\nb"]),
+                         f"{sys.executable} -c a b")
+        self.assertEqual(format_command(["x", "a\r\nb\rc"]), "x a b c")
+        self.assertEqual(format_command("one line"), "one line")
+
     def test_resolve_shell_argv_and_rejects(self):
         from project_agent.allowed import resolve_shell_argv
 
@@ -1697,6 +1705,20 @@ class RunShellTests(unittest.TestCase):
             resolve_shell_argv({"argv": ["cmd", "/c", "dir"]})
         with self.assertRaises(ValueError):
             resolve_shell_argv({"argv": ["powershell", "-Command", "Get-Date"]})
+        # Переводы строк в argv разрешены (argv не идёт через shell)…
+        self.assertEqual(
+            resolve_shell_argv({"argv": [sys.executable, "-c", "import sys\nprint(1)"]}),
+            [sys.executable, "-c", "import sys\nprint(1)"],
+        )
+        # …а shell-метасимволы по-прежнему нет.
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"argv": ["echo", "a|b"]})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"argv": ["echo", "a; rm -rf /"]})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"command": "echo a && rm -rf /"})
+        with self.assertRaises(ValueError):
+            resolve_shell_argv({"command": "echo `whoami`"})
 
     def test_run_shell_disabled_modes_limit_fingerprint(self):
         notes = []
@@ -1763,6 +1785,88 @@ class RunShellTests(unittest.TestCase):
             )
             self.assertIn("Лимит", limited.model_text)
             self.assertIn("лимит", limited.journal)
+
+            # Лимит настраивается: 5 за ход.
+            settings["shell_max_per_turn"] = 5
+            box.begin_turn()
+            for _ in range(5):
+                box.execute(
+                    "run_shell",
+                    {"summary": "ok", "argv": [sys.executable, "-c", "print(1)"]},
+                )
+            more = box.execute(
+                "run_shell",
+                {"summary": "more", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("Лимит запусков run_shell за этот ход исчерпан (5/5)", more.model_text)
+            self.assertIn("лимит исчерпан (5/5)", more.journal)
+
+            # 0 — без лимита: 6 запусков подряд проходят.
+            settings["shell_max_per_turn"] = 0
+            box.begin_turn()
+            for _ in range(6):
+                free = box.execute(
+                    "run_shell",
+                    {"summary": "ok", "argv": [sys.executable, "-c", "print(1)"]},
+                )
+                self.assertNotIn("Лимит", free.model_text)
+            self.assertEqual(box._shell_runs, 6)
+            settings.pop("shell_max_per_turn")
+
+            # Формат счётчика: квота в скобках отдельно от статуса, модели — остаток.
+            settings["shell_max_per_turn"] = 3
+            box.begin_turn()
+            first = box.execute(
+                "run_shell",
+                {"summary": "счётчик", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("run_shell: OK (1/3)", first.journal)
+            self.assertIn("Запуск 1/3 (осталось 2)", first.model_text)
+            second = box.execute(
+                "run_shell",
+                {"summary": "счётчик", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("run_shell: OK (2/3)", second.journal)
+            self.assertIn("Запуск 2/3 (осталось 1)", second.model_text)
+            third = box.execute(
+                "run_shell",
+                {"summary": "счётчик", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("run_shell: OK (3/3)", third.journal)
+            self.assertIn("Запуск 3/3 (лимит исчерпан)", third.model_text)
+
+            # Без лимита знаменателя нет вовсе.
+            settings["shell_max_per_turn"] = 0
+            box.begin_turn()
+            free_one = box.execute(
+                "run_shell",
+                {"summary": "счётчик", "argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("run_shell: OK", free_one.journal)
+            self.assertNotIn("(", free_one.journal)
+            self.assertIn("Запуск 1 (без лимита)", free_one.model_text)
+            settings.pop("shell_max_per_turn")
+
+            # summary обязателен.
+            box.begin_turn()
+            no_reason = box.execute(
+                "run_shell",
+                {"argv": [sys.executable, "-c", "print(1)"]},
+            )
+            self.assertIn("summary", no_reason.model_text)
+            self.assertIn("нет причины", no_reason.journal)
+
+            # Переводы строк внутри argv допустимы.
+            box.begin_turn()
+            multiline = box.execute(
+                "run_shell",
+                {
+                    "summary": "многострочный скрипт",
+                    "argv": [sys.executable, "-c", "import sys\nprint(42)\nsys.exit(0)"],
+                },
+            )
+            self.assertIn("42", multiline.model_text)
+            self.assertIn("OK", multiline.model_text)
 
             box.begin_turn()
             fail_script = root / "fail_once.py"
@@ -2513,6 +2617,18 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual(loaded["test_preset"], "unittest")
             self.assertEqual(loaded["test_timeout"], 90)
+            self.assertEqual(loaded["shell_max_per_turn"], 3)
+            data["shell_max_per_turn"] = 0
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["shell_max_per_turn"], 0)
+            data["shell_max_per_turn"] = 7
+            save_config(data, path)
+            loaded, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertEqual(loaded["shell_max_per_turn"], 7)
+            data["shell_max_per_turn"] = 3
             data["test_preset"] = "npm"
             save_config(data, path)
             loaded, error = load_config(path)

@@ -37,6 +37,7 @@ def default_config() -> dict:
         "test_preset": "",
         "test_timeout": 120,
         "test_fix_rounds": 3,
+        "shell_max_per_turn": 3,
         "allowed_commands": [],
         "agent_shell_enabled": False,
         "active_profile": "",
@@ -164,6 +165,12 @@ def _test_fix_rounds(raw) -> int:
     from project_agent.testing import normalize_fix_rounds
 
     return normalize_fix_rounds(raw)
+
+
+def _shell_max_per_turn(raw) -> int:
+    from project_agent.testing import normalize_shell_limit
+
+    return normalize_shell_limit(raw)
 
 
 def _agent_mode(raw) -> str:
@@ -301,6 +308,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["test_preset"] = _test_preset(data.get("test_preset"))
     merged["test_timeout"] = _test_timeout(data.get("test_timeout"))
     merged["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    merged["shell_max_per_turn"] = _shell_max_per_turn(data.get("shell_max_per_turn"))
     merged["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     merged["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
@@ -328,6 +336,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["test_preset"] = _test_preset(data.get("test_preset"))
     payload["test_timeout"] = _test_timeout(data.get("test_timeout"))
     payload["test_fix_rounds"] = _test_fix_rounds(data.get("test_fix_rounds"))
+    payload["shell_max_per_turn"] = _shell_max_per_turn(data.get("shell_max_per_turn"))
     payload["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     payload["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))

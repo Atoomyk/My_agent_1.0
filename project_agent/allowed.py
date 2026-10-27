@@ -10,7 +10,10 @@ from project_agent.testing import npm_test_command, python_command
 
 BUILTIN_IDS = ("unittest", "pytest", "npm_test", "build_ps1")
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
-_BAD_CHARS = re.compile(r"[|;&`$<>\n\r]")
+# Метасимволы shell. Переводы строк сюда НЕ входят: команда всегда передаётся
+# subprocess'у списком (shell=False), поэтому "\n" внутри аргумента — это данные,
+# а не разделитель команд. Пример нужды: python -c "...\n...".
+_BAD_CHARS = re.compile(r"[|;&`$<>]")
 
 
 def project_python(root: Path) -> list[str]:
@@ -65,8 +68,8 @@ def validate_argv(argv: list[str]) -> list[str]:
     cleaned: list[str] = []
     for item in argv:
         text = str(item)
-        if not text or text.strip() != text:
-            raise ValueError("пустой или с пробелами по краям аргумент")
+        if not text.strip():
+            raise ValueError("пустой аргумент")
         if _BAD_CHARS.search(text):
             raise ValueError("запрещённые символы в аргументе")
         cleaned.append(text)
