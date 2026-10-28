@@ -81,7 +81,8 @@ class SidePanelMixin:
         self.folder_path.grid(row=1, column=0, sticky="ew")
         self.folder_name.bind("<Configure>", lambda _event: self._fit_labels())
         self.folder_path.bind("<Configure>", lambda _event: self._fit_labels())
-        icon_button(head, "dots", self.choose_folder, size=28).grid(row=0, column=1, rowspan=2, padx=(4, 0))
+        icon_button(head, "gear", self.open_settings, size=24).grid(row=0, column=1, padx=(4, 0))
+        icon_button(head, "dots", self.choose_folder, size=24).grid(row=1, column=1, padx=(4, 0))
         quiet_button(side, "Новый чат", self.new_chat, mark="plus").grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
         self.side_tabs = ctk.CTkSegmentedButton(
             side,

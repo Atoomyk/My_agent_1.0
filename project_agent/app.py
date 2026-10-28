@@ -261,31 +261,8 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
     def _build(self) -> None:
         self.bind_class("Text", "<Control-KeyPress>", _on_layout_clipboard, add="+")
         self.bind_class("Entry", "<Control-KeyPress>", _on_layout_clipboard, add="+")
-        self.grid_columnconfigure(0, weight=0, minsize=36)
-        self.grid_columnconfigure(1, weight=0, minsize=1)
-        self.grid_columnconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
-
-        rail = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, width=36)
-        rail.grid(row=0, column=0, sticky="nsew")
-        rail.grid_propagate(False)
-        self.project_badge = ctk.CTkButton(
-            rail,
-            text="·",
-            width=28,
-            height=28,
-            corner_radius=8,
-            border_width=1,
-            border_color=BORDER,
-            fg_color=BUTTON,
-            hover_color=BUTTON_HOVER,
-            text_color=TEXT,
-            font=self._font(11, weight="bold"),
-            command=self.choose_folder,
-        )
-        self.project_badge.place(relx=0.5, y=12, anchor="n")
-        icon_button(rail, "gear", self.open_settings, size=28).place(relx=0.5, rely=1.0, y=-12, anchor="s")
-        ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
 
         self.body = tk.PanedWindow(
             self,
@@ -296,7 +273,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
             bg=_tone(INK),
             sashcursor="sb_h_double_arrow",
         )
-        self.body.grid(row=0, column=2, sticky="nsew")
+        self.body.grid(row=0, column=0, sticky="nsew")
         self.body.bind("<ButtonRelease-1>", self._remember_side_width)
 
         self._build_side_panel()
@@ -407,8 +384,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
                 continue
 
     def _show_folder(self) -> None:
-        letter = (self.project.name[:1] if self.project is not None else "") or "·"
-        self.project_badge.configure(text=letter.upper())
         self._fit_labels()
         self._refresh_tree()
         self._refresh_chat_list()
