@@ -49,7 +49,6 @@ from project_agent.config import (
     folder_key,
     load_config,
     needs_api_key,
-    save_agent_mode,
     save_config,
     save_font,
     save_last_chats,
@@ -69,6 +68,7 @@ _GROUP_INDENT = "   "
 from project_agent.mcp_client import McpHub
 from project_agent.editor_panel import EditorPanelMixin
 from project_agent.editor_tabs import EditorTabs
+from project_agent.footer import FooterMixin
 from project_agent.output_panel import OutputPanelMixin
 from project_agent.secrets import Scrubber, SecretVault, literals_from_settings, scrub_outbound
 from project_agent.index_store import build_index, index_summary
@@ -88,16 +88,11 @@ from project_agent.ui_theme import (
     BUTTON,
     BUTTON_HOVER,
     CHAT_COLUMN,
-    CTX_FULL,
-    CTX_OK,
-    CTX_WARN,
     FIELD,
     HINT,
     INK,
-    LABEL_BY_MODE,
     LABEL_BY_PROVIDER,
     LABEL_BY_THEME,
-    MODE_LABELS,
     MUTED,
     PANEL,
     PROVIDER_LABELS,
@@ -130,7 +125,7 @@ from project_agent.ui_widgets import (
 )
 
 
-class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, ComposerMixin, ctk.CTk):
+class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, ComposerMixin, FooterMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ProjectAgent")
@@ -363,75 +358,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self._build_editor_panel()
 
         bottom = self._build_composer_panel()
-        footer = ctk.CTkFrame(bottom, fg_color="transparent")
-        self.footer = footer
-        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 8))
-        footer.grid_columnconfigure(3, weight=1)
-        self.footer_profile_menu = ctk.CTkOptionMenu(
-            footer,
-            variable=self.profile_var,
-            values=[_NO_PROFILE],
-            command=self._on_profile_pick,
-            height=26,
-            width=60,
-            corner_radius=8,
-            dynamic_resizing=True,
-            fg_color=INK,
-            button_color=INK,
-            button_hover_color=BUTTON_HOVER,
-            text_color=MUTED,
-            font=self._font(12),
-            dropdown_fg_color=PANEL,
-            dropdown_text_color=TEXT,
-            dropdown_hover_color=SELECT,
-            dropdown_font=self._font(12),
-        )
-        self.footer_profile_menu.grid(row=0, column=0, sticky="w")
-        self.mode_menu = ctk.CTkOptionMenu(
-            footer,
-            variable=self.agent_mode_var,
-            values=list(MODE_LABELS),
-            command=self._on_mode_pick,
-            height=26,
-            width=96,
-            corner_radius=8,
-            dynamic_resizing=False,
-            fg_color=INK,
-            button_color=INK,
-            button_hover_color=BUTTON_HOVER,
-            text_color=MUTED,
-            font=self._font(12),
-            dropdown_fg_color=PANEL,
-            dropdown_text_color=TEXT,
-            dropdown_hover_color=SELECT,
-            dropdown_font=self._font(12),
-        )
-        self.mode_menu.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        quiet_button(footer, "Сжать", self.compress_context, width=48, height=24).grid(
-            row=0, column=2, sticky="w", padx=(8, 0)
-        )
-        ctx = ctk.CTkFrame(footer, fg_color="transparent")
-        ctx.grid(row=0, column=3, sticky="e", padx=(8, 8))
-        self.context_label = ctk.CTkLabel(
-            ctx,
-            text="0%",
-            anchor="e",
-            text_color=MUTED,
-            font=self._font(11),
-        )
-        self.context_label.pack(side="left", padx=(0, 6))
-        self.context_bar = ctk.CTkProgressBar(
-            ctx,
-            width=96,
-            height=8,
-            corner_radius=4,
-            progress_color=CTX_OK,
-            fg_color=BORDER,
-        )
-        self.context_bar.pack(side="left")
-        self.context_bar.set(0)
-        self.status_label = ctk.CTkLabel(footer, text="Готово", anchor="e", text_color=MUTED, font=self._font(11))
-        self.status_label.grid(row=0, column=4, sticky="e")
+        self._build_footer_panel(bottom)
         self.bind("<Configure>", self._on_window_configure, add="+")
         self.after(80, self._fit_composer)
 
@@ -1126,77 +1053,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         parsed = parse_allowed_text(box.get("1.0", "end-1c"))
         self.allowed_commands = parsed
         return parsed
-
-    def _set_agent_mode(self, mode: str, persist: bool = True) -> None:
-        from project_agent.tools import normalize_agent_mode
-
-        mode = normalize_agent_mode(mode)
-        self.agent_mode = mode
-        label = LABEL_BY_MODE.get(mode, "Agent")
-        if self.agent_mode_var.get() != label:
-            self.agent_mode_var.set(label)
-        if persist:
-            try:
-                save_agent_mode(mode)
-            except Exception as exc:
-                self.write_chat(f"Не удалось сохранить режим: {exc}")
-
-    def _on_mode_pick(self, choice: str) -> None:
-        self._set_agent_mode(MODE_LABELS.get(choice, "agent"), persist=True)
-
-    def _on_context(self, used: int, limit: int, from_api: bool = False) -> None:
-        self.after(0, lambda: self._apply_context(used, limit, from_api))
-
-    def _apply_context(self, used: int, limit: int, from_api: bool) -> None:
-        from project_agent.context_usage import (
-            FULL_RATIO,
-            WARN_RATIO,
-            context_ratio,
-            format_context_detail,
-            normalize_context_limit,
-        )
-
-        self.context_limit = normalize_context_limit(limit)
-        self.context_used = max(0, int(used or 0))
-        self.context_from_api = bool(from_api)
-        ratio = context_ratio(self.context_used, self.context_limit)
-        if hasattr(self, "context_bar") and self.context_bar is not None:
-            self.context_bar.set(ratio)
-            color = CTX_OK
-            if ratio >= FULL_RATIO:
-                color = CTX_FULL
-            elif ratio >= WARN_RATIO:
-                color = CTX_WARN
-            self.context_bar.configure(progress_color=color)
-        if hasattr(self, "context_label") and self.context_label is not None:
-            self.context_label.configure(
-                text=format_context_detail(self.context_used, self.context_limit, self.context_from_api)
-            )
-
-    def compress_context(self) -> None:
-        if self.running:
-            return
-        if self.project is None:
-            self.write_chat("Сначала выберите папку проекта.")
-            return
-        settings = self.collect_settings()
-        if needs_api_key(settings["provider"], settings["base_url"], settings["api_key"]):
-            self.write_chat("Укажите API-ключ.")
-            return
-        self.running = True
-        self.stop_event = threading.Event()
-        self._show_running(True)
-        self.set_status("Сжатие контекста…")
-
-        def work() -> None:
-            try:
-                self.agent.compress_context(settings, self.stop_event)
-            except Exception as exc:
-                self.write_chat(f"Ошибка сжатия: {exc}")
-            finally:
-                self.after(0, self._finish)
-
-        threading.Thread(target=work, daemon=True).start()
 
     def save_settings(self) -> None:
         self._persist("Настройки сохранены")
