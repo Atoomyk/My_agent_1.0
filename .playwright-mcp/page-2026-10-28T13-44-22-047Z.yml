@@ -1,0 +1,824 @@
+- generic [ref=f1e2]:
+  - generic [ref=f1e3]:
+    - generic "Skip navigation links":
+      - generic:
+        - link "Skip to where you left off (post 8)" [ref=f1e4] [cursor=pointer]:
+          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/8
+        - link "Skip to last reply" [ref=f1e5] [cursor=pointer]:
+          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/12
+        - link "Skip to top" [ref=f1e6] [cursor=pointer]:
+          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/1
+      - link "Skip to main content" [ref=f1e7] [cursor=pointer]:
+        - /url: "#main-container"
+    - generic [ref=f1e12]:
+      - button "Sidebar" [expanded] [ref=f1e14] [cursor=pointer]
+      - link [ref=f1e18] [cursor=pointer]:
+        - /url: /
+        - img "OpenAI Developer Community" [ref=f1e20]
+      - generic [ref=f1e23]:
+        - heading [level=1] [ref=f1e24]:
+          - generic "This topic has a solution" [ref=f1e26]
+          - link "How to use reasoning.encrypted_content with store=False (stateless)" [ref=f1e28] [cursor=pointer]:
+            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934
+        - link "API" [ref=f1e30] [cursor=pointer]:
+          - /url: /c/api/7
+      - generic:
+        - list
+      - navigation "Header" [ref=f1e34]:
+        - button "Log In" [ref=f1e37] [cursor=pointer]
+        - list [ref=f1e40]:
+          - listitem [ref=f1e41]:
+            - button "Search" [ref=f1e42] [cursor=pointer]
+    - main [ref=f1e44]:
+      - navigation "Sidebar" [ref=f1e46]:
+        - generic [ref=f1e47]:
+          - generic [ref=f1e48]:
+            - list [ref=f1e50]:
+              - listitem [ref=f1e51]:
+                - link "Topics" [ref=f1e52] [cursor=pointer]:
+                  - /url: /latest?status=open
+              - listitem [ref=f1e56]:
+                - link "Leaderboard" [ref=f1e57] [cursor=pointer]:
+                  - /url: /leaderboard
+              - listitem [ref=f1e61]:
+                - button "More" [ref=f1e62] [cursor=pointer]
+            - generic [ref=f1e66]:
+              - button "Resources" [expanded] [ref=f1e68] [cursor=pointer]
+              - list [ref=f1e72]:
+                - listitem [ref=f1e73]:
+                  - link "Documentation" [ref=f1e74] [cursor=pointer]:
+                    - /url: https://platform.openai.com/overview
+                - listitem [ref=f1e78]:
+                  - link "API reference" [ref=f1e79] [cursor=pointer]:
+                    - /url: https://platform.openai.com/docs/api-reference
+                - listitem [ref=f1e83]:
+                  - link "Help center" [ref=f1e84] [cursor=pointer]:
+                    - /url: https://help.openai.com
+          - generic [ref=f1e88]:
+            - button "Categories" [expanded] [ref=f1e90] [cursor=pointer]
+            - list [ref=f1e94]:
+              - listitem [ref=f1e95]:
+                - link "Announcements" [ref=f1e96] [cursor=pointer]:
+                  - /url: /c/announcements/6
+              - listitem [ref=f1e100]:
+                - link "API" [ref=f1e101] [cursor=pointer]:
+                  - /url: /c/api/7
+              - listitem [ref=f1e105]:
+                - link "Prompting" [ref=f1e106] [cursor=pointer]:
+                  - /url: /c/prompting/8
+              - listitem [ref=f1e110]:
+                - link "Documentation" [ref=f1e111] [cursor=pointer]:
+                  - /url: /c/documentation/14
+              - listitem [ref=f1e115]:
+                - link "Plugins / Actions builders" [ref=f1e116] [cursor=pointer]:
+                  - /url: /c/gpts-builders/chat-plugins/20
+              - listitem [ref=f1e120]:
+                - link "All categories" [ref=f1e121] [cursor=pointer]:
+                  - /url: /categories
+          - generic [ref=f1e125]:
+            - button "Tags" [expanded] [ref=f1e127] [cursor=pointer]
+            - list [ref=f1e131]:
+              - listitem [ref=f1e132]:
+                - link "chatgpt" [ref=f1e133] [cursor=pointer]:
+                  - /url: /tag/chatgpt/16
+              - listitem [ref=f1e137]:
+                - link "gpt-4" [ref=f1e138] [cursor=pointer]:
+                  - /url: /tag/gpt-4/10
+              - listitem [ref=f1e142]:
+                - link "api" [ref=f1e143] [cursor=pointer]:
+                  - /url: /tag/api/33
+              - listitem [ref=f1e147]:
+                - link "assistants-api" [ref=f1e148] [cursor=pointer]:
+                  - /url: /tag/assistants-api/355
+              - listitem [ref=f1e152]:
+                - link "plugin-development" [ref=f1e153] [cursor=pointer]:
+                  - /url: /tag/plugin-development/20
+              - listitem [ref=f1e157]:
+                - link "All tags" [ref=f1e158] [cursor=pointer]:
+                  - /url: /tags
+        - generic [ref=f1e164]:
+          - group [ref=f1e166]:
+            - 'generic "Filter by: Light mode" [ref=f1e167] [cursor=pointer]'
+          - button "Keyboard Shortcuts" [ref=f1e169] [cursor=pointer]
+      - generic [ref=f1e171]:
+        - generic [ref=f1e172]:
+          - generic [ref=f1e174]:
+            - heading [level=1] [aria-hidden] [ref=f1e175]:
+              - link [ref=f1e179] [cursor=pointer]:
+                - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934
+                - text: How to use reasoning.encrypted_content with store=False (stateless)
+            - link "API" [ref=f1e181] [cursor=pointer]:
+              - /url: /c/api/7
+          - generic [ref=f1e184]:
+            - generic [ref=f1e185]:
+              - generic [ref=f1e187]:
+                - button "3.9k views" [ref=f1e188] [cursor=pointer]:
+                  - generic [ref=f1e189]: 3.9k
+                  - generic [ref=f1e190]: views
+                - button "6 likes" [ref=f1e191] [cursor=pointer]:
+                  - generic [ref=f1e192]: "6"
+                  - generic [ref=f1e193]: likes
+                - button "2 links" [ref=f1e194] [cursor=pointer]:
+                  - generic [ref=f1e195]: "2"
+                  - generic [ref=f1e196]: links
+                - generic [ref=f1e197]:
+                  - link "jopb's profile" [ref=f1e199] [cursor=pointer]:
+                    - /url: /u/jopb
+                    - img "jopb" [ref=f1e200]
+                  - link "_j's profile" [ref=f1e202] [cursor=pointer]:
+                    - /url: /u/_j
+                    - img "Jay" [ref=f1e203]
+                  - link "aprendendo.next's profile" [ref=f1e205] [cursor=pointer]:
+                    - /url: /u/aprendendo.next
+                    - img "aprendendo" [ref=f1e206]
+                  - link "sam.saffron's profile" [ref=f1e208] [cursor=pointer]:
+                    - /url: /u/sam.saffron
+                    - img "Sam Saffron" [ref=f1e209]
+                - generic [ref=f1e211]:
+                  - generic [ref=f1e212]: read
+                  - generic [ref=f1e213]: 4 min
+              - button "Summarize" [ref=f1e215] [cursor=pointer]
+            - generic [ref=f1e221]:
+              - link "Jun 2025" [ref=f1e223] [cursor=pointer]:
+                - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/1
+              - generic [ref=f1e225]:
+                - generic [ref=f1e226] [cursor=pointer]
+                - generic [ref=f1e229]:
+                  - generic [ref=f1e230]: 8 / 12
+                  - generic [ref=f1e231]: Jun 2025
+                - generic [ref=f1e232] [cursor=pointer]
+              - link "Nov 2025" [ref=f1e234] [cursor=pointer]:
+                - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/12
+            - generic [ref=f1e239]:
+              - generic [ref=f1e240]:
+                - heading "post by jopb on Jun 13, 2025" [level=2] [ref=f1e241]
+                - article "post by jopb on Jun 13, 2025" [ref=f1e242]:
+                  - generic [ref=f1e243]:
+                    - link [aria-hidden] [ref=f1e246] [cursor=pointer]:
+                      - /url: /u/jopb
+                    - generic [ref=f1e247]:
+                      - generic [ref=f1e248]:
+                        - link "jopb's profile" [ref=f1e251] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - text: jopb
+                        - generic [ref=f1e252]:
+                          - button "post edit history" [ref=f1e254] [cursor=pointer]:
+                            - generic [ref=f1e256]: "1"
+                          - link "Jun 13, 2025" [ref=f1e258] [cursor=pointer]:
+                            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934
+                            - generic [aria-hidden] [ref=f1e259]: Jun 2025
+                      - generic [ref=f1e260]:
+                        - generic [ref=f1e261]:
+                          - paragraph [ref=f1e262]: I would like to use the responses API so that it is stateless and to re-use the reasoning tokens.
+                          - paragraph [ref=f1e263]: "With this code:"
+                          - code [ref=f1e266]: rsp = openai_client.responses.create( model='o4-mini', input=messages, store=False, tool_choice='none', include=['reasoning.encrypted_content'] )
+                          - paragraph [ref=f1e267]: I can get the reasoning tokens from
+                          - code [ref=f1e270]: encrypted_content = rsp.output[0].encrypted_content
+                          - paragraph [ref=f1e271]:
+                            - text: But how do I pass these reasoning tokens to the next call to
+                            - code [ref=f1e272]: openai_client.responses.create()
+                            - text: "?"
+                          - paragraph [ref=f1e273]: "I tried this:"
+                          - code [ref=f1e276]: "rsp = openai_client.responses.create( model='o4-mini', input=messages, store=False, tool_choice='none', include=['reasoning.encrypted_content'], reasoning=dict{'encrypted_content': encrypted_content} )"
+                          - paragraph [ref=f1e277]: but that is not an allowed parameter.
+                          - paragraph [ref=f1e278]: Any help would be appreciated!
+                        - complementary [ref=f1e279]:
+                          - generic [ref=f1e280]:
+                            - heading "Solved" [level=3] [ref=f1e282]
+                            - generic [ref=f1e285]:
+                              - generic [ref=f1e286]:
+                                - generic [ref=f1e287]:
+                                  - link "aprendendo.next's profile" [ref=f1e288] [cursor=pointer]:
+                                    - /url: /u/aprendendo.next
+                                    - generic [ref=f1e289]: aprendendo.next
+                                  - link "Jun 2025" [ref=f1e291] [cursor=pointer]:
+                                    - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/8
+                                - button "collapse" [expanded] [ref=f1e293] [cursor=pointer]
+                              - generic [ref=f1e295]:
+                                - blockquote [ref=f1e296]:
+                                  - generic [ref=f1e297]:
+                                    - paragraph [ref=f1e298]: Basically, you take the reasoning element in the response.output and pass it as a json to the already existing conversation.
+                                    - paragraph [ref=f1e299]: In this example I just tossed the entire output as the python SDK can handle it, but if you need to do a REST request you must use an equivalent JSON.
+                                    - group [ref=f1e300]:
+                                      - generic "► Here is a short example." [ref=f1e301] [cursor=pointer]
+                                - link "read more" [ref=f1e303] [cursor=pointer]:
+                                  - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/8
+                        - group "Post actions" [ref=f1e304]:
+                          - generic [ref=f1e305]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e308] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e309] [cursor=pointer]
+                          - generic:
+                            - list
+                  - generic [ref=f1e311]:
+                    - generic [ref=f1e313]:
+                      - button "3.9k views" [ref=f1e314] [cursor=pointer]:
+                        - generic [ref=f1e315]: 3.9k
+                        - generic [ref=f1e316]: views
+                      - button "6 likes" [ref=f1e317] [cursor=pointer]:
+                        - generic [ref=f1e318]: "6"
+                        - generic [ref=f1e319]: likes
+                      - button "2 links" [ref=f1e320] [cursor=pointer]:
+                        - generic [ref=f1e321]: "2"
+                        - generic [ref=f1e322]: links
+                      - generic [ref=f1e323]:
+                        - link "jopb's profile" [ref=f1e325] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - img "jopb" [ref=f1e326]
+                        - link "_j's profile" [ref=f1e328] [cursor=pointer]:
+                          - /url: /u/_j
+                          - img "Jay" [ref=f1e329]
+                        - link "aprendendo.next's profile" [ref=f1e331] [cursor=pointer]:
+                          - /url: /u/aprendendo.next
+                          - img "aprendendo" [ref=f1e332]
+                        - link "sam.saffron's profile" [ref=f1e334] [cursor=pointer]:
+                          - /url: /u/sam.saffron
+                          - img "Sam Saffron" [ref=f1e335]
+                      - generic [ref=f1e337]:
+                        - generic [ref=f1e338]: read
+                        - generic [ref=f1e339]: 4 min
+                    - button "Summarize" [ref=f1e341] [cursor=pointer]
+              - generic [ref=f1e344]:
+                - heading "post by _j on Jun 13, 2025" [level=2] [ref=f1e345]
+                - article "post by _j on Jun 13, 2025" [ref=f1e346]:
+                  - generic [ref=f1e347]:
+                    - link [aria-hidden] [ref=f1e350] [cursor=pointer]:
+                      - /url: /u/_j
+                    - generic [ref=f1e351]:
+                      - generic [ref=f1e352]:
+                        - generic [ref=f1e353]:
+                          - link "_j's profile" [ref=f1e355] [cursor=pointer]:
+                            - /url: /u/_j
+                            - text: _j
+                          - button [ref=f1e357] [cursor=pointer]:
+                            - img "women_with_bunny_ears" [ref=f1e359]
+                        - link "Jun 13, 2025" [ref=f1e362] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/2
+                          - generic [aria-hidden] [ref=f1e363]: Jun 2025
+                      - generic [ref=f1e364]:
+                        - generic [ref=f1e365]:
+                          - paragraph [ref=f1e366]: Follow the API reference for Responses.
+                          - paragraph [ref=f1e367]: "Expand this tree:"
+                          - paragraph [ref=f1e368]: input → input item list (array) → item → reasoning → encrypted_content
+                        - group "Post actions" [ref=f1e369]:
+                          - button "This post has 1 reply" [ref=f1e370] [cursor=pointer]:
+                            - generic [ref=f1e371]: 1 Reply
+                          - generic [ref=f1e373]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e376] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e377] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e379]:
+                - heading "post by jopb on Jun 13, 2025" [level=2] [ref=f1e380]
+                - article "post by jopb on Jun 13, 2025" [ref=f1e381]:
+                  - generic [ref=f1e382]:
+                    - link [aria-hidden] [ref=f1e385] [cursor=pointer]:
+                      - /url: /u/jopb
+                    - generic [ref=f1e386]:
+                      - generic [ref=f1e387]:
+                        - link "jopb's profile" [ref=f1e390] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - text: jopb
+                        - link "Jun 13, 2025" [ref=f1e393] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/3
+                          - generic [aria-hidden] [ref=f1e394]: Jun 2025
+                      - generic [ref=f1e395]:
+                        - generic [ref=f1e396]:
+                          - paragraph [ref=f1e397]: "This seems closer:"
+                          - code [ref=f1e400]: prev_reasoning = rsp.reasoning
+                          - paragraph [ref=f1e401]: "and then:"
+                          - code [ref=f1e404]: rsp = openai_client.responses.create( model='o4-mini', input=messages, store=False, tool_choice='none', include=['reasoning.encrypted_content'], reasoning=prev_reasoning )
+                          - paragraph [ref=f1e405]: No errors, but the model seems to not have any context.
+                          - paragraph [ref=f1e406]:
+                            - text: It seems that I need to include previous messages in
+                            - code [ref=f1e407]: input
+                            - text: .
+                        - group "Post actions" [ref=f1e408]:
+                          - generic [ref=f1e409]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e412] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e413] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e415]:
+                - heading "post by jopb on Jun 13, 2025" [level=2] [ref=f1e416]
+                - article "post by jopb on Jun 13, 2025" [ref=f1e417]:
+                  - generic [ref=f1e418]:
+                    - link [aria-hidden] [ref=f1e421] [cursor=pointer]:
+                      - /url: /u/jopb
+                    - generic [ref=f1e422]:
+                      - generic [ref=f1e423]:
+                        - link "jopb's profile" [ref=f1e426] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - text: jopb
+                        - generic [ref=f1e427]:
+                          - button "post edit history" [ref=f1e429] [cursor=pointer]:
+                            - generic [ref=f1e431]: "1"
+                          - button "_j _j" [ref=f1e432] [cursor=pointer]:
+                            - img "_j" [ref=f1e434]
+                            - generic [ref=f1e435]: _j
+                          - link "Jun 13, 2025" [ref=f1e437] [cursor=pointer]:
+                            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/4
+                            - generic [aria-hidden] [ref=f1e438]: Jun 2025
+                      - generic [ref=f1e439]:
+                        - generic [ref=f1e440]:
+                          - paragraph [ref=f1e441]: "This is what messages looks like:"
+                          - code [ref=f1e444]: "messages = [ {'role': 'system', 'content': sys_prompt}, {'role': 'user', 'content': user_prompt} ]"
+                          - paragraph [ref=f1e445]: I also tried
+                          - code [ref=f1e448]: "prev_reasoning = rsp.reasoning messages.append({'role': 'reasoning', 'content': prev_reasoning})"
+                          - paragraph [ref=f1e449]: That role is not allowed (‘assistant’, ‘system’, ‘developer’, and ‘user’ are allowed) and none of the allowed roles seem applicable.
+                        - group "Post actions" [ref=f1e450]:
+                          - generic [ref=f1e451]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e454] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e455] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e457]:
+                - heading "post by _j on Jun 13, 2025" [level=2] [ref=f1e458]
+                - article "post by _j on Jun 13, 2025" [ref=f1e459]:
+                  - generic [ref=f1e460]:
+                    - link [aria-hidden] [ref=f1e463] [cursor=pointer]:
+                      - /url: /u/_j
+                    - generic [ref=f1e464]:
+                      - generic [ref=f1e465]:
+                        - generic [ref=f1e466]:
+                          - link "_j's profile" [ref=f1e468] [cursor=pointer]:
+                            - /url: /u/_j
+                            - text: _j
+                          - button [ref=f1e470] [cursor=pointer]:
+                            - img "women_with_bunny_ears" [ref=f1e472]
+                        - link "Jun 13, 2025" [ref=f1e475] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/5
+                          - generic [aria-hidden] [ref=f1e476]: Jun 2025
+                      - generic [ref=f1e477]:
+                        - generic [ref=f1e478]:
+                          - paragraph [ref=f1e479]: You will see that the tree of input items in the API reference for “input” splits between “input message” and merely “context item”.
+                          - paragraph [ref=f1e480]: Despite that the assistant produces something like reasoning or tool calls at the same time that it can produce a response to a user, it is being delivered in another list item, another event.
+                          - paragraph [ref=f1e481]: You have to pass these back in the same format they were delivered to you by the API.
+                          - paragraph [ref=f1e482]: Capture and observe closely the list of output items in a non-stream response. You will see an array (list) of items is delivered to you in parallel hierarchy sequentially. This is what you amend the input list with. Not strictly input message objects with “role”.
+                        - group "Post actions" [ref=f1e483]:
+                          - generic [ref=f1e484]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e487] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e488] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e490]:
+                - heading "post by jopb on Jun 13, 2025" [level=2] [ref=f1e491]
+                - article "post by jopb on Jun 13, 2025" [ref=f1e492]:
+                  - generic [ref=f1e493]:
+                    - link [aria-hidden] [ref=f1e496] [cursor=pointer]:
+                      - /url: /u/jopb
+                    - generic [ref=f1e497]:
+                      - generic [ref=f1e498]:
+                        - link "jopb's profile" [ref=f1e501] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - text: jopb
+                        - link "Jun 13, 2025" [ref=f1e504] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/6
+                          - generic [aria-hidden] [ref=f1e505]: Jun 2025
+                      - generic [ref=f1e506]:
+                        - generic [ref=f1e507]:
+                          - code [ref=f1e510]: prev_reasoning = rsp.reasoning messages.append(prev_reasoning)
+                          - paragraph [ref=f1e511]: This is my best understanding of your message, but that gives an error.
+                        - group "Post actions" [ref=f1e512]:
+                          - button "This post has 2 replies" [ref=f1e513] [cursor=pointer]:
+                            - generic [ref=f1e514]: 2 Replies
+                          - generic [ref=f1e516]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e519] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e520] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e522]:
+                - heading "post by _j on Jun 13, 2025" [level=2] [ref=f1e523]
+                - article "post by _j on Jun 13, 2025" [ref=f1e524]:
+                  - generic [ref=f1e525]:
+                    - link [aria-hidden] [ref=f1e528] [cursor=pointer]:
+                      - /url: /u/_j
+                    - generic [ref=f1e529]:
+                      - generic [ref=f1e530]:
+                        - generic [ref=f1e531]:
+                          - link "_j's profile" [ref=f1e533] [cursor=pointer]:
+                            - /url: /u/_j
+                            - text: _j
+                          - button [ref=f1e535] [cursor=pointer]:
+                            - img "women_with_bunny_ears" [ref=f1e537]
+                        - link "Jun 13, 2025" [ref=f1e540] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/7
+                          - generic [aria-hidden] [ref=f1e541]: Jun 2025
+                      - generic [ref=f1e542]:
+                        - generic [ref=f1e543]:
+                          - paragraph [ref=f1e544]: The API reference, again, shows you the type of reasoning object that must be passed back…
+                          - paragraph [ref=f1e545]: "This is INPUT:"
+                          - paragraph
+                          - link "The image shows documentation describing the properties of a 'Reasoning' object used in a function tool call output, detailing required and optional fields such as id, summary, type, encrypted_content, and status. (Captioned by AI) The image shows documentation describing the properties of a 'Reasoning' object used in a function tool call output, detailing required and optional fields such as id, summary, type, encrypted_content, and status. (Captioned by AI) 553×683 16 KB" [ref=f1e547] [cursor=pointer]:
+                            - /url: https://us1.discourse-cdn.com/openai1/original/4X/8/b/c/8bc0ed3dc7304bd5e81c4d483c04de7374de0405.png
+                            - img "The image shows documentation describing the properties of a 'Reasoning' object used in a function tool call output, detailing required and optional fields such as id, summary, type, encrypted_content, and status. (Captioned by AI)" [ref=f1e548]
+                            - generic [ref=f1e549]:
+                              - generic [ref=f1e551]: The image shows documentation describing the properties of a 'Reasoning' object used in a function tool call output, detailing required and optional fields such as id, summary, type, encrypted_content, and status. (Captioned by AI)
+                              - generic [ref=f1e552]: 553×683 16 KB
+                          - paragraph
+                          - paragraph [ref=f1e554]: You can follow the pattern of returning function calls for the encrypted reasoning objects at the same level.
+                        - group "Post actions" [ref=f1e555]:
+                          - generic [ref=f1e556]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e559] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e560] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e562]:
+                - heading "post by aprendendo.next on Jun 13, 2025" [level=2] [ref=f1e563]
+                - article "post by aprendendo.next on Jun 13, 2025" [ref=f1e564]:
+                  - generic [ref=f1e565]:
+                    - link [aria-hidden] [ref=f1e568] [cursor=pointer]:
+                      - /url: /u/aprendendo.next
+                    - generic [active] [ref=f1e569]:
+                      - generic [ref=f1e570]:
+                        - generic [ref=f1e571]:
+                          - link "aprendendo.next's profile" [ref=f1e573] [cursor=pointer]:
+                            - /url: /u/aprendendo.next
+                            - text: aprendendo.next
+                          - button [ref=f1e575] [cursor=pointer]:
+                            - img "yin_yang" [ref=f1e577]
+                        - generic [ref=f1e578]:
+                          - button "jopb jopb" [ref=f1e579] [cursor=pointer]:
+                            - img "jopb" [ref=f1e581]
+                            - generic [ref=f1e582]: jopb
+                          - link "Jun 13, 2025" [ref=f1e584] [cursor=pointer]:
+                            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/8
+                            - generic [aria-hidden] [ref=f1e585]: Jun 2025
+                      - generic [ref=f1e586]:
+                        - generic [ref=f1e587]:
+                          - paragraph [ref=f1e588]: Basically, you take the reasoning element in the response.output and pass it as a json to the already existing conversation.
+                          - paragraph [ref=f1e589]: In this example I just tossed the entire output as the python SDK can handle it, but if you need to do a REST request you must use an equivalent JSON.
+                          - group [ref=f1e590]:
+                            - generic "► Here is a short example." [ref=f1e591] [cursor=pointer]
+                        - group "Post actions" [ref=f1e592]:
+                          - button "3 reactions" [ref=f1e595] [cursor=pointer]:
+                            - img "heart" [ref=f1e599]
+                            - generic [aria-hidden]: "3"
+                          - generic [ref=f1e600]:
+                            - generic "This is the accepted solution to this topic" [ref=f1e602]: Solution
+                            - generic "Please sign up or log in to like this post" [ref=f1e608] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e609] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e611]:
+                - heading "post by jopb on Jun 13, 2025" [level=2] [ref=f1e612]
+                - article "post by jopb on Jun 13, 2025" [ref=f1e613]:
+                  - generic [ref=f1e614]:
+                    - link [aria-hidden] [ref=f1e617] [cursor=pointer]:
+                      - /url: /u/jopb
+                    - generic [ref=f1e618]:
+                      - generic [ref=f1e619]:
+                        - link "jopb's profile" [ref=f1e622] [cursor=pointer]:
+                          - /url: /u/jopb
+                          - text: jopb
+                        - link "Jun 13, 2025" [ref=f1e625] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/9
+                          - generic [aria-hidden] [ref=f1e626]: Jun 2025
+                      - generic [ref=f1e627]:
+                        - paragraph [ref=f1e629]: Thank you! This is really helpful! I was thinking that the encrypted reasoning would include some representation of the state so that you wouldn’t need to add the previous agent response, but it looks like you need to include both.
+                        - group "Post actions" [ref=f1e630]:
+                          - generic [ref=f1e631]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e634] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e635] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e637]:
+                - heading "post by aprendendo.next on Jun 13, 2025" [level=2] [ref=f1e638]
+                - article "post by aprendendo.next on Jun 13, 2025" [ref=f1e639]:
+                  - generic [ref=f1e640]:
+                    - link [aria-hidden] [ref=f1e643] [cursor=pointer]:
+                      - /url: /u/aprendendo.next
+                    - generic [ref=f1e644]:
+                      - generic [ref=f1e645]:
+                        - generic [ref=f1e646]:
+                          - link "aprendendo.next's profile" [ref=f1e648] [cursor=pointer]:
+                            - /url: /u/aprendendo.next
+                            - text: aprendendo.next
+                          - button [ref=f1e650] [cursor=pointer]:
+                            - img "yin_yang" [ref=f1e652]
+                        - generic [ref=f1e653]:
+                          - generic "this post arrived via email" [ref=f1e654]
+                          - link "Jun 13, 2025" [ref=f1e657] [cursor=pointer]:
+                            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/10
+                            - generic [aria-hidden] [ref=f1e658]: Jun 2025
+                      - generic [ref=f1e659]:
+                        - paragraph [ref=f1e661]: Yeah, since we are going stateless it seems to contain the full reasoning, but encrypted to prevent other companies to distill the model.
+                        - group "Post actions" [ref=f1e662]:
+                          - generic [ref=f1e663]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e666] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e667] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e669]: 5 months later
+              - generic [ref=f1e672]:
+                - heading "post by sam.saffron on Nov 14, 2025" [level=2] [ref=f1e673]
+                - article "post by sam.saffron on Nov 14, 2025" [ref=f1e674]:
+                  - generic [ref=f1e675]:
+                    - link [aria-hidden] [ref=f1e678] [cursor=pointer]:
+                      - /url: /u/sam.saffron
+                    - generic [ref=f1e679]:
+                      - generic [ref=f1e680]:
+                        - link "sam.saffron's profile" [ref=f1e683] [cursor=pointer]:
+                          - /url: /u/sam.saffron
+                          - text: sam.saffron
+                        - link "Nov 14, 2025" [ref=f1e686] [cursor=pointer]:
+                          - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/11
+                          - generic [aria-hidden] [ref=f1e687]: Nov 2025
+                      - generic [ref=f1e688]:
+                        - generic [ref=f1e689]:
+                          - paragraph [ref=f1e690]: Note it is not documented anywhere, but the API is super particular.
+                          - paragraph [ref=f1e691]: "You need to maintain the exact shape you got including ids of both the reasoning and message and summary. Otherwise you get stuff like:"
+                          - code [ref=f1e694]: "{“error”: {“message”: “Item ‘rs_07db81b90333bde7006916cd15d23c81a2b6af8999a6235a7b’ of type ‘reasoning’ was provided without its required following item.”,“type”: “invalid_request_error”,“param”: “input”,“code”: null}}"
+                          - paragraph [ref=f1e695]: Generally stuff is pretty forgiving in the API but here it looks like you need to provide exact copies.
+                          - paragraph [ref=f1e696]: "So to pass it you need: (id, type, encrypted_content, summary) AND (id) for the message following."
+                          - paragraph [ref=f1e697]: Exact copying is ideal, but sadly when you have a generic API layer this is a bit more complicated.
+                        - group "Post actions" [ref=f1e698]:
+                          - button "2 reactions" [ref=f1e701] [cursor=pointer]:
+                            - img "heart" [ref=f1e705]
+                            - generic [aria-hidden]: "2"
+                          - generic [ref=f1e706]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e709] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e710] [cursor=pointer]
+                          - generic:
+                            - list
+              - generic [ref=f1e712]:
+                - heading "post by _j on Nov 14, 2025" [level=2] [ref=f1e713]
+                - article "post by _j on Nov 14, 2025" [ref=f1e714]:
+                  - generic [ref=f1e715]:
+                    - link [aria-hidden] [ref=f1e718] [cursor=pointer]:
+                      - /url: /u/_j
+                    - generic [ref=f1e719]:
+                      - generic [ref=f1e720]:
+                        - generic [ref=f1e721]:
+                          - link "_j's profile" [ref=f1e723] [cursor=pointer]:
+                            - /url: /u/_j
+                            - text: _j
+                          - button [ref=f1e725] [cursor=pointer]:
+                            - img "women_with_bunny_ears" [ref=f1e727]
+                        - generic [ref=f1e728]:
+                          - button "post edit history" [ref=f1e730] [cursor=pointer]:
+                            - generic [ref=f1e732]: "1"
+                          - link "Nov 14, 2025" [ref=f1e734] [cursor=pointer]:
+                            - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/12
+                            - generic [aria-hidden] [ref=f1e735]: Nov 2025
+                      - generic [ref=f1e736]:
+                        - generic [ref=f1e737]:
+                          - generic [ref=f1e738] [cursor=pointer]:
+                            - text: "sam.saffron:"
+                            - generic [ref=f1e739]:
+                              - button "Expand" [ref=f1e740]
+                              - link "go to the quoted post" [ref=f1e742]:
+                                - /url: /t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/11
+                          - blockquote [ref=f1e744]:
+                            - paragraph [ref=f1e746]: here it looks like you need to provide exact copies.
+                          - paragraph [ref=f1e747]: Thanks for an interesting observation.
+                          - paragraph [ref=f1e748]: In your error, I wonder what “following item” is supposed to be referring to, as an “rs_” ID is for an entire reasoning container, which can have multiple array items inside. “Following” is language that would indicate something that comes after that “type”:“reasoning” object externally, such as “type”:“message”…
+                          - paragraph [ref=f1e749]: "Referencing a response.done for “output”, a single ID for all:"
+                          - code [ref=f1e752]: "\"output\": [ { \"id\": \"rs_045fb12aa0dfc2ea0069170733badc8197969fd65da2ca2501\", \"type\": \"reasoning\", \"encrypted_content\": \"gAAAAABpF...zbM_w==\", \"summary\": [ { \"type\": \"summary_text\", \"text\": \"**Formulating a short introduction**\\n\\nI need to introduce myself in under 8 words. First, I tried \\\"ChatAPI: Helpful AI offering concise answers,\\\" which totals 6 words. Then I revised it to \\\"ChatAPI: Your helpful, concise AI assistant,\\\" which is also 6 words. Finally, I thought of \\\"I'm ChatAPI: concise, insightful, helpful AI,\\\" which is 7 words. I could also go with \\\"I'm ChatAPI: your helpful, insightful AI\\\" for a total of 7 words.\" }, { \"type\": \"summary_text\", \"text\": \"**Finalizing my introduction**\\n\\nI'm working on a concise introduction that\\u2019s under 8 words. I counted: \\\"I'm ChatAPI: your helpful, insightful AI,\\\" which totals 7 words, and it's acceptable. I also thought, \\\"I'm ChatAPI: concise, helpful AI insights provider,\\\" but that sums up to 7 as well. Ultimately, I prefer saying, \\\"I'm ChatAPI: concise, helpful AI friend,\\\" which is 6 words. That feels friendly and direct, so I\\u2019ll go with that as my final answer.\" } ] },"
+                          - paragraph [ref=f1e753]:
+                            - text: "The validation of “reasoning” input items is sort of documented in OpenAPI specification. It is a collector for all reasoning: an array of multiple summary items, and nullable"
+                            - code [ref=f1e754]: encrypted_content
+                          - paragraph [ref=f1e755]: In “input”,
+                          - list [ref=f1e756]:
+                            - listitem [ref=f1e757]:
+                              - code [ref=f1e758]: type
+                              - text: "- string, enum “reasoning” (Always"
+                              - code [ref=f1e759]: reasoning
+                              - text: ) -
+                              - emphasis [ref=f1e760]:
+                                - strong [ref=f1e761]: Required
+                            - listitem [ref=f1e762]:
+                              - code [ref=f1e763]: id
+                              - text: "- string -"
+                              - emphasis [ref=f1e764]:
+                                - strong [ref=f1e765]: Required
+                            - listitem [ref=f1e766]:
+                              - code [ref=f1e767]: encrypted_content
+                              - text: "- anyOf: string | ‘null’"
+                            - listitem [ref=f1e768]:
+                              - code [ref=f1e769]: summary
+                              - text: "- array - -"
+                              - emphasis [ref=f1e770]:
+                                - strong [ref=f1e771]: Required
+                              - list [ref=f1e772]:
+                                - listitem [ref=f1e773]:
+                                  - text: items objects
+                                  - list [ref=f1e774]:
+                                    - listitem [ref=f1e775]:
+                                      - code [ref=f1e776]: type
+                                      - text: "- string, required"
+                                    - listitem [ref=f1e777]:
+                                      - code [ref=f1e778]: text
+                                      - text: "- string, required"
+                            - listitem [ref=f1e779]:
+                              - code [ref=f1e780]: content
+                              - text: "- array (clear text of GPT-OSS)"
+                              - list [ref=f1e781]:
+                                - listitem [ref=f1e782]:
+                                  - text: items objects
+                                  - list [ref=f1e783]:
+                                    - listitem [ref=f1e784]:
+                                      - code [ref=f1e785]: type
+                                      - text: "- string, required"
+                                    - listitem [ref=f1e786]:
+                                      - code [ref=f1e787]: text
+                                      - text: "- string, required"
+                            - listitem [ref=f1e788]:
+                              - code [ref=f1e789]: status
+                              - text: "- string, enum [“in_progress”, “completed”, “incomplete”]"
+                          - group [ref=f1e790]:
+                            - generic "► Source specification, 'input'" [ref=f1e791] [cursor=pointer]
+                          - paragraph [ref=f1e792]:
+                            - text: Thus, the
+                            - code [ref=f1e793]: summary
+                            - text: array must be present, but can be 0-length.
+                            - code [ref=f1e794]: "\"include\" = [\"reasoning.encrypted_content\"]"
+                            - text: is optional in your request, so of course optional in your return.
+                          - paragraph [ref=f1e795]: A stateless API can’t know what was sent, so you should be able to pass about anything you want with zero knowledge of the expectation by the API. Even a made-up ID should be tolerated, along with made-up summary texts (seemingly pointless to transmit, so just empty the summary list). Even in encrypted reasoning, the summaries are external to that.
+                          - paragraph [ref=f1e796]: The only cruel joke would be if the ID is a validated hash of some summary content or even message, or similar in the encryption.
+                          - paragraph [ref=f1e797]: I’d be interested to know if you have issues emptying the summary array (or writing whatever you want as unused text).
+                          - separator [ref=f1e798]
+                          - paragraph [ref=f1e799]: "Now: is encrypted reasoning salted or a certificate per organization; can I share my response content and another org can replay it?"
+                          - heading "Heading linkreasoning and message shape, 2 summary_text" [level=3] [ref=f1e800]:
+                            - link "Heading link":
+                              - /url: "#p-1853043-reasoning-and-message-shape-2-summary_text-1"
+                            - text: reasoning and message shape, 2 summary_text
+                          - list [ref=f1e801]:
+                            - listitem [ref=f1e802]: for you to even try as input
+                          - code [ref=f1e805]: "\"model\": \"o3-mini-2025-01-31\", \"output\": [ { \"id\": \"rs_045fb12aa0dfc2ea0069170733badc8197969fd65da2ca2501\", \"type\": \"reasoning\", \"encrypted_content\": \"gAAAAABpFwc8gea3wdYML_Vmb6fRPBc5jJ708Y0ReNfxqLUQ2zFNWmbyBstUDp_0nFTsLZRmp15oScu1_BdyeqKz-h-o-xlAHPM_U4AcjVwigbUzkErTzPfXjV3i3hiC3FtoEWYr4N7RSRY9B7Z-j4PjAb1bSQP6uRIwOhSCFZ2OWt0nw0lRoT5NA-qe8yti0HmpKh4rJJHvkFOVeyhlNGMApO_1VOOUO-igBDKhmraCdDhZXc_LppOXcFhtD9Er-DIi3wslv9UAm61t6dR2yUXMQywQsqAo0Xg-8GJgtF6pVO9YUC-UgfW2uV_ofx_hzyVzrYLYQxNVYHtWMraFSKhjdQdUpcWdPirziQ1i5z2yLgzFoR5_4mllrTNQ21qnAOmZjfptBWf4heF_vmyU_aw_xjvKCzbM_w==\", \"summary\": [ { \"type\": \"summary_text\", \"text\": \"**Formulating a short introduction**\\n\\nI need to introduce myself in under 8 words. First, I tried \\\"ChatAPI: Helpful AI offering concise answers,\\\" which totals 6 words. Then I revised it to \\\"ChatAPI: Your helpful, concise AI assistant,\\\" which is also 6 words. Finally, I thought of \\\"I'm ChatAPI: concise, insightful, helpful AI,\\\" which is 7 words. I could also go with \\\"I'm ChatAPI: your helpful, insightful AI\\\" for a total of 7 words.\" }, { \"type\": \"summary_text\", \"text\": \"**Finalizing my introduction**\\n\\nI'm working on a concise introduction that\\u2019s under 8 words. I counted: \\\"I'm ChatAPI: your helpful, insightful AI,\\\" which totals 7 words, and it's acceptable. I also thought, \\\"I'm ChatAPI: concise, helpful AI insights provider,\\\" but that sums up to 7 as well. Ultimately, I prefer saying, \\\"I'm ChatAPI: concise, helpful AI friend,\\\" which is 6 words. That feels friendly and direct, so I\\u2019ll go with that as my final answer.\" } ] }, { \"id\": \"msg_045fb12aa0dfc2ea006917073cb7c88197acf5736b9c7a9aa3\", \"type\": \"message\", \"status\": \"completed\", \"content\": [ { \"type\": \"output_text\", \"annotations\": [], \"logprobs\": [], \"text\": \"I'm ChatAPI: your concise, helpful AI.\" } ], \"role\": \"assistant\" } ],"
+                        - group "Post actions" [ref=f1e806]:
+                          - button "1 reaction" [ref=f1e809] [cursor=pointer]:
+                            - img "heart" [ref=f1e813]
+                            - generic [aria-hidden]: "1"
+                          - generic [ref=f1e814]:
+                            - generic "Please sign up or log in to like this post" [ref=f1e817] [cursor=pointer]:
+                              - button "Please sign up or log in to like this post"
+                            - button "copy a link to this post to clipboard" [ref=f1e818] [cursor=pointer]
+                          - generic:
+                            - list
+                      - list [ref=f1e821]:
+                        - listitem [ref=f1e822]:
+                          - link "How stateless is reasoning.encrypted_content? 7" [ref=f1e823] [cursor=pointer]:
+                            - /url: https://community.openai.com/t/how-stateless-is-reasoning-encrypted-content/1366697/2
+                            - generic [ref=f1e825]: How stateless is reasoning.encrypted_content?
+                            - text: "7"
+                        - listitem [ref=f1e826]:
+                          - 'link "Codex App: Cannot resume session after API key switch - \"encrypted content organization_id mismatch\" 2" [ref=f1e827] [cursor=pointer]':
+                            - /url: https://community.openai.com/t/codex-app-cannot-resume-session-after-api-key-switch-encrypted-content-organization-id-mismatch/1374803/2
+                            - generic [ref=f1e829]: "Codex App: Cannot resume session after API key switch - \"encrypted content organization_id mismatch\""
+                            - text: "2"
+          - region [ref=f1e832]:
+            - button "Reply" [ref=f1e834] [cursor=pointer]
+          - complementary [ref=f1e839]:
+            - heading "Related topics" [level=3] [ref=f1e840]
+            - table [ref=f1e845]:
+              - caption [ref=f1e846]: Topic list, column headers with buttons are sortable.
+              - rowgroup [ref=f1e847]:
+                - row [ref=f1e848]:
+                  - columnheader "Topic" [ref=f1e849]
+                  - columnheader "Replies" [ref=f1e851]
+                  - columnheader "Activity" [ref=f1e853]
+              - rowgroup [ref=f1e855]:
+                - row [ref=f1e856]:
+                  - cell [ref=f1e857]:
+                    - heading [level=2] [ref=f1e858]:
+                      - generic "This topic has a solution" [ref=f1e860]
+                      - link "Does the responses API need reasoning summary from previous calls?" [ref=f1e862] [cursor=pointer]:
+                        - /url: /t/does-the-responses-api-need-reasoning-summary-from-previous-calls/1375494
+                    - generic [ref=f1e863]:
+                      - link "API" [ref=f1e864] [cursor=pointer]:
+                        - /url: /c/api/7
+                      - list "Tags" [ref=f1e867]:
+                        - listitem [ref=f1e868]:
+                          - link "api" [ref=f1e869] [cursor=pointer]:
+                            - /url: /tag/api/33
+                  - cell [ref=f1e870]:
+                    - link "1 reply, jump to first post" [ref=f1e871] [cursor=pointer]:
+                      - /url: /t/does-the-responses-api-need-reasoning-summary-from-previous-calls/1375494/1
+                      - text: "1"
+                  - cell [ref=f1e872]:
+                    - link "Mar 2" [ref=f1e873] [cursor=pointer]:
+                      - /url: /t/does-the-responses-api-need-reasoning-summary-from-previous-calls/1375494/2
+                - row [ref=f1e874]:
+                  - cell [ref=f1e875]:
+                    - heading [level=2] [ref=f1e876]:
+                      - link "Requests API does not support manual context management?" [ref=f1e877] [cursor=pointer]:
+                        - /url: /t/requests-api-does-not-support-manual-context-management/1269225
+                    - generic [ref=f1e878]:
+                      - link "API" [ref=f1e879] [cursor=pointer]:
+                        - /url: /c/api/7
+                      - list "Tags" [ref=f1e882]:
+                        - listitem [ref=f1e883]:
+                          - link "api" [ref=f1e884] [cursor=pointer]:
+                            - /url: /tag/api/33
+                  - cell [ref=f1e885]:
+                    - link "1 reply, jump to first post" [ref=f1e886] [cursor=pointer]:
+                      - /url: /t/requests-api-does-not-support-manual-context-management/1269225/1
+                      - text: "1"
+                  - cell [ref=f1e887]:
+                    - link "May 2025" [ref=f1e888] [cursor=pointer]:
+                      - /url: /t/requests-api-does-not-support-manual-context-management/1269225/2
+                - row [ref=f1e889]:
+                  - cell [ref=f1e890]:
+                    - heading [level=2] [ref=f1e891]:
+                      - 'link "Clarifications on `encrypted_content` usage pattern and impact" [ref=f1e892] [cursor=pointer]':
+                        - /url: /t/clarifications-on-encrypted-content-usage-pattern-and-impact/1355946
+                    - generic [ref=f1e893]:
+                      - link "API" [ref=f1e894] [cursor=pointer]:
+                        - /url: /c/api/7
+                      - list "Tags" [ref=f1e897]:
+                        - listitem [ref=f1e898]:
+                          - link "reasoning" [ref=f1e899] [cursor=pointer]:
+                            - /url: /tag/reasoning/610
+                  - cell [ref=f1e900]:
+                    - link "3 replies, jump to first post" [ref=f1e901] [cursor=pointer]:
+                      - /url: /t/clarifications-on-encrypted-content-usage-pattern-and-impact/1355946/1
+                      - text: "3"
+                  - cell [ref=f1e902]:
+                    - link "Sep 2025" [ref=f1e903] [cursor=pointer]:
+                      - /url: /t/clarifications-on-encrypted-content-usage-pattern-and-impact/1355946/4
+                - row [ref=f1e904]:
+                  - cell [ref=f1e905]:
+                    - heading [level=2] [ref=f1e906]:
+                      - link "How stateless is reasoning.encrypted_content?" [ref=f1e907] [cursor=pointer]:
+                        - /url: /t/how-stateless-is-reasoning-encrypted-content/1366697
+                    - generic [ref=f1e908]:
+                      - link "API" [ref=f1e909] [cursor=pointer]:
+                        - /url: /c/api/7
+                      - list "Tags" [ref=f1e912]:
+                        - listitem [ref=f1e913]:
+                          - link "responses-api" [ref=f1e914] [cursor=pointer]:
+                            - /url: /tag/responses-api/923
+                  - cell [ref=f1e915]:
+                    - link "2 replies, jump to first post" [ref=f1e916] [cursor=pointer]:
+                      - /url: /t/how-stateless-is-reasoning-encrypted-content/1366697/1
+                      - text: "2"
+                  - cell [ref=f1e917]:
+                    - link "Jan 14" [ref=f1e918] [cursor=pointer]:
+                      - /url: /t/how-stateless-is-reasoning-encrypted-content/1366697/3
+                - row [ref=f1e919]:
+                  - cell [ref=f1e920]:
+                    - heading [level=2] [ref=f1e921]:
+                      - link "Better performance from reasoning models using the Responses API (cookbook)" [ref=f1e922] [cursor=pointer]:
+                        - /url: /t/better-performance-from-reasoning-models-using-the-responses-api-cookbook/1260737
+                    - generic [ref=f1e923]:
+                      - link "Documentation" [ref=f1e924] [cursor=pointer]:
+                        - /url: /c/documentation/14
+                      - list "Tags" [ref=f1e927]:
+                        - listitem [ref=f1e928]:
+                          - link "responses-api" [ref=f1e929] [cursor=pointer]:
+                            - /url: /tag/responses-api/923
+                  - cell [ref=f1e930]:
+                    - link "1 reply, jump to first post" [ref=f1e931] [cursor=pointer]:
+                      - /url: /t/better-performance-from-reasoning-models-using-the-responses-api-cookbook/1260737/1
+                      - text: "1"
+                  - cell [ref=f1e932]:
+                    - link "May 2025" [ref=f1e933] [cursor=pointer]:
+                      - /url: /t/better-performance-from-reasoning-models-using-the-responses-api-cookbook/1260737/2
+        - dialog "User card"
+    - generic [ref=f1e936]:
+      - generic [ref=f1e937]:
+        - generic [ref=f1e938]: Developer Community
+        - generic [ref=f1e939]: Connect with other developers building with the OpenAI Platform.
+      - generic [ref=f1e941]:
+        - generic [ref=f1e942]:
+          - generic [ref=f1e943]: Help
+          - list [ref=f1e944]:
+            - listitem [ref=f1e945]:
+              - link "Support" [ref=f1e946] [cursor=pointer]:
+                - /url: https://help.openai.com/en/articles/6614161-how-can-i-contact-support
+        - generic [ref=f1e947]:
+          - generic [ref=f1e948]: Developer Resources
+          - list [ref=f1e949]:
+            - listitem [ref=f1e950]:
+              - link "API Documentation" [ref=f1e951] [cursor=pointer]:
+                - /url: https://platform.openai.com/overview
+            - listitem [ref=f1e952]:
+              - link "Service status" [ref=f1e953] [cursor=pointer]:
+                - /url: https://status.openai.com
+            - listitem [ref=f1e954]:
+              - link "Cookbook" [ref=f1e955] [cursor=pointer]:
+                - /url: https://github.com/openai/openai-cookbook
+      - generic [ref=f1e956]:
+        - generic [ref=f1e957]:
+          - link "Terms & policies" [ref=f1e958] [cursor=pointer]:
+            - /url: https://openai.com/policies
+          - link "Privacy policy" [ref=f1e959] [cursor=pointer]:
+            - /url: https://openai.com/policies/privacy-policy
+        - generic [ref=f1e960]:
+          - link "X / Twitter" [ref=f1e961] [cursor=pointer]:
+            - /url: https://twitter.com/OpenAIDevs
+          - link "GitHub" [ref=f1e963] [cursor=pointer]:
+            - /url: https://github.com/openai
+  - status [ref=f1e965]
+  - alert [ref=f1e966]

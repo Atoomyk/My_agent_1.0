@@ -134,6 +134,7 @@ class Agent:
         self.root: Path | None = None
         self.stop = threading.Event()
         self._agent_mode = "agent"
+        self._active_mode = "agent"
         self._last_tools: list = []
         self._context_from_api = False
         self.checkpoints = None
@@ -177,6 +178,11 @@ class Agent:
         self.provider.reset(self._system())
         self.provider.messages = cleaned
         return True
+
+    def _mode_changed(self, settings: dict) -> bool:
+        """Сменился ли режим агента относительно предыдущего хода."""
+        mode = normalize_agent_mode(settings.get("agent_mode"))
+        return mode != self._active_mode
 
     def close(self) -> None:
         self.stop.set()
@@ -251,6 +257,12 @@ class Agent:
             self.provider.reset(self._system())
             if previous is not None:
                 self.on_chat("Контекст модели сброшен: сменился провайдер.")
+        if self.provider.kind == "openai_responses" and self._mode_changed(settings):
+            # Другой режим — другая политика инструментов: переносить reasoning между ними нельзя.
+            self.provider.drop_reasoning()
+        # Храним нормализованный режим: иначе устаревшее "plan" в конфиге считалось бы
+        # сменой режима на каждом ходу и зря сбрасывало бы reasoning.
+        self._active_mode = normalize_agent_mode(settings.get("agent_mode"))
         self.provider.configure(settings)
         self.provider.set_system(self._system())
         scrubber = Scrubber(self.vault, literals_from_settings(settings))

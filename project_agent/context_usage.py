@@ -68,6 +68,10 @@ def _walk_tokens(value) -> int:
         total = 0
         for key, item in value.items():
             key_l = str(key).lower()
+            # Зашифрованные рассуждения — это не текст контекста: считай их как 0,
+            # иначе индикатор контекста завышается в разы.
+            if key_l in {"reasoning_encrypted", "encrypted_content", "reasoning_id"}:
+                continue
             if key_l in {"b64", "data"} and isinstance(item, str) and len(item) > 200:
                 total += 1200
                 continue

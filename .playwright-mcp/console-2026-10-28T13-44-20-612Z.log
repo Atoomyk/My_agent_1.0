@@ -1,0 +1,2 @@
+[     815ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) %o @ https://community.openai.com/t/how-to-use-reasoning-encrypted-content-with-store-false-stateless/1286934/8:0
+[     908ms] [LOG] ℹ️ Discourse v2026.11.0-latest — https://github.com/discourse/discourse/commits/70330015b8 — Ember v7.3.0 @ https://us1.discourse-cdn.com/openai1/assets/br/discourse-ksy7vpmy.digested.js:177

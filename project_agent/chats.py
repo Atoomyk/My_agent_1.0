@@ -175,6 +175,8 @@ def _clean_message(message) -> dict | None:
         reasoning = message.get("reasoning")
     if isinstance(reasoning, str) and reasoning.strip():
         item["reasoning_content"] = _clip_str(reasoning)
+    # reasoning_encrypted / reasoning_id намеренно не сохраняем: это большой base64-блоб,
+    # и после перезапуска продолжение рассуждений всё равно не нужно.
     return item
 
 

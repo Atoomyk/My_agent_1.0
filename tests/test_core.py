@@ -34,6 +34,7 @@ from project_agent.config import (
     save_font,
     save_theme,
 )
+from project_agent.context_usage import estimate_tokens
 from project_agent.mcp_client import McpHub
 from project_agent.patching import apply_diff
 from project_agent.paths import MAX_FILE_BYTES, PathError, list_entries, read_text_file, resolve_inside
@@ -2594,6 +2595,86 @@ class ResponsesProviderTests(unittest.TestCase):
         self.assertEqual(items[3]["call_id"], "call_a")
         self.assertEqual(items[3]["output"], "[a, b]")
 
+    def test_three_step_tool_loop_keeps_history_valid(self):
+        """Приёмка этапа 2: три шага tool-loop подряд, включая картинку в результате инструмента."""
+        bodies = []
+        steps = [
+            ("call_1", "list_dir", '{"path": "."}'),
+            ("call_2", "read_file", '{"path": "a.py"}'),
+            ("call_3", "read_file", '{"path": "b.py"}'),
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content.decode()))
+            index = len(bodies) - 1
+            if index >= len(steps):
+                return httpx.Response(
+                    200,
+                    json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "готово"}]}]},
+                )
+            call_id, name, arguments = steps[index]
+            events = [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "function_call", "id": f"fc_{call_id}", "call_id": call_id, "name": name},
+                },
+                {"type": "response.function_call_arguments.done", "output_index": 0, "arguments": arguments},
+                {"type": "response.completed", "response": {"usage": {"input_tokens": 10 + index, "output_tokens": 1}}},
+            ]
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_sse(events))
+
+        provider = self._provider(handler)
+        tools = [{"name": "read_file", "description": "d", "parameters": {"type": "object"}}]
+        redact = Scrubber(SecretVault(), [])
+        try:
+            turn = provider.complete(tools, redact)
+            self.assertEqual([call.id for call in turn.tool_calls], ["call_1"])
+            provider.add_tool_result("call_1", "list_dir", "[a, b]", None)
+            turn = provider.complete(tools, redact)
+            self.assertEqual([call.id for call in turn.tool_calls], ["call_2"])
+            provider.add_tool_result("call_2", "read_file", "код", [{"media_type": "image/png", "b64": "AAA"}])
+            turn = provider.complete(tools, redact)
+            self.assertEqual([call.id for call in turn.tool_calls], ["call_3"])
+            provider.add_tool_result("call_3", "read_file", "код2", None)
+            turn = provider.complete(tools, redact)
+        finally:
+            provider._http.close()
+
+        self.assertEqual(turn.text, "готово")
+        self.assertEqual(len(bodies), 4)
+        for body in bodies:
+            self.assertIn("tools", body)
+            self.assertNotIn("messages", body)
+
+        items = bodies[-1]["input"]
+        kinds = [item.get("type") or item.get("role") for item in items]
+        # Последний запрос — тот, что уходит после третьего результата: финального
+        # assistant-сообщения в нём ещё нет, оно придёт ответом на этот запрос.
+        self.assertEqual(
+            kinds,
+            [
+                "user",
+                "function_call",
+                "function_call_output",
+                "function_call",
+                "function_call_output",
+                "function_call",
+                "function_call_output",
+            ],
+        )
+        calls = [item for item in items if item.get("type") == "function_call"]
+        outputs = [item for item in items if item.get("type") == "function_call_output"]
+        # Результат связывается по call_id; item-id вызова в истории не нужен.
+        self.assertEqual([item["call_id"] for item in calls], ["call_1", "call_2", "call_3"])
+        self.assertEqual([item["call_id"] for item in outputs], ["call_1", "call_2", "call_3"])
+        self.assertNotIn("id", calls[0])
+        self.assertEqual(outputs[0]["output"], "[a, b]")
+        # Картинка в результате инструмента едет блоками, а не строкой.
+        self.assertEqual(outputs[1]["output"][0], {"type": "input_text", "text": "код"})
+        self.assertEqual(outputs[1]["output"][1], {"type": "input_image", "image_url": "data:image/png;base64,AAA"})
+        self.assertEqual(outputs[2]["output"], "код2")
+
     def test_empty_tools_are_not_sent(self):
         seen = {}
 
@@ -2741,6 +2822,358 @@ class ResponsesRegistrationTests(unittest.TestCase):
         self.assertEqual(loaded["provider"], "openai_responses")
         self.assertEqual(loaded["messages"][1]["tool_calls"][0]["id"], "call_1")
         self.assertEqual(loaded["messages"][2]["tool_call_id"], "call_1")
+
+
+class ResponsesDegradationTests(unittest.TestCase):
+    """Этап 4: 400 → убрать одно поле → повтор; внятные тексты для endpoint/tools."""
+
+    def _provider(self, handler):
+        provider = ResponsesProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "gpt-6.1-sol", "api_key": "k", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("привет", None)
+        return provider
+
+    @staticmethod
+    def _ok():
+        return httpx.Response(
+            200,
+            json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]},
+        )
+
+    def test_include_rejected_retried_without_include(self):
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            bodies.append(body)
+            if "include" in body:
+                return httpx.Response(400, json={"error": {"message": "Unsupported parameter: 'include'"}})
+            return self._ok()
+
+        provider = self._provider(handler)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []))
+            # Второй ход уже не должен снова ловить 400.
+            provider.add_user("ещё", None)
+            provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertEqual(turn.text, "ok")
+        self.assertIn("include", bodies[0])
+        self.assertNotIn("include", bodies[1])
+        self.assertNotIn("include", bodies[2])
+        self.assertEqual(len(bodies), 3)
+
+    def test_unparsable_400_is_raised_as_is(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"message": "model not found"}})
+
+        provider = self._provider(handler)
+        try:
+            with self.assertRaises(ApiError) as ctx:
+                provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertIn("model not found", str(ctx.exception))
+
+    def test_unknown_endpoint_gives_readable_hint(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"message": "Not Found"}})
+
+        provider = self._provider(handler)
+        try:
+            with self.assertRaises(ApiError) as ctx:
+                provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertIn("/v1/responses", str(ctx.exception))
+        self.assertIn("base_url", str(ctx.exception))
+
+    def test_tools_rejected_gives_readable_hint(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"message": "tools are not supported for this model"}})
+
+        provider = self._provider(handler)
+        try:
+            with self.assertRaises(ApiError) as ctx:
+                provider.complete(
+                    [{"name": "read_file", "description": "d", "parameters": {"type": "object"}}],
+                    Scrubber(SecretVault(), []),
+                )
+        finally:
+            provider._http.close()
+        self.assertIn("tools", str(ctx.exception))
+
+
+class ResponsesReasoningTests(unittest.TestCase):
+    """Этап 5: blob рассуждений переносится между ходами и инвалидируется."""
+
+    ENCRYPTED = "gAAAAABencrypted-blob"
+
+    def _provider(self, handler):
+        provider = ResponsesProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "gpt-6.1-sol", "api_key": "k", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("посмотри папку", None)
+        return provider
+
+    def test_blob_is_stored_and_sent_back_as_reasoning_item(self):
+        seen = {}
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": self.ENCRYPTED, "summary": []},
+            },
+            {"type": "response.reasoning_summary_text.delta", "output_index": 0, "delta": "думаю"},
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_a", "name": "list_dir"},
+            },
+            {"type": "response.function_call_arguments.done", "output_index": 1, "arguments": '{"path": "."}'},
+            {"type": "response.completed", "response": {"usage": {"input_tokens": 12, "output_tokens": 3}}},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            if "first" in seen:
+                seen["second"] = body
+                return httpx.Response(
+                    200,
+                    json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "готово"}]}]},
+                )
+            seen["first"] = body
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_sse(events))
+
+        provider = self._provider(handler)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []))
+            stored = provider.messages[-1]
+            provider.add_tool_result(turn.tool_calls[0].id, "list_dir", "[a]", None)
+            provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+
+        self.assertEqual(seen["first"]["include"], ["reasoning.encrypted_content"])
+        self.assertEqual(stored["reasoning_encrypted"], self.ENCRYPTED)
+        self.assertEqual(stored["reasoning_id"], "rs_1")
+        items = seen["second"]["input"]
+        kinds = [item.get("type") or item.get("role") for item in items]
+        self.assertEqual(kinds, ["user", "reasoning", "function_call", "function_call_output"])
+        self.assertEqual(items[1]["encrypted_content"], self.ENCRYPTED)
+        self.assertEqual(items[1]["id"], "rs_1")
+        # summary обязателен для API, даже пустой.
+        self.assertEqual(items[1]["summary"], [])
+
+    def test_only_last_blob_is_resend(self):
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]},
+            )
+
+        provider = self._provider(handler)
+        provider.messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "старый ход",
+                    "reasoning_encrypted": "old-blob",
+                    "reasoning_id": "rs_old",
+                },
+                {"role": "user", "content": "ещё"},
+                {
+                    "role": "assistant",
+                    "content": "свежий ход",
+                    "reasoning_encrypted": self.ENCRYPTED,
+                    "reasoning_id": "rs_new",
+                },
+            ]
+        )
+        try:
+            provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        items = seen[0]["input"]
+        reasoning = [item for item in items if item.get("type") == "reasoning"]
+        self.assertEqual(len(reasoning), 1)
+        self.assertEqual(reasoning[0]["encrypted_content"], self.ENCRYPTED)
+        self.assertFalse(any(message.get("reasoning_encrypted") == "old-blob" for message in provider.messages))
+
+    def test_reasoning_dropped_on_rewind(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]},
+            )
+
+        provider = self._provider(handler)
+        provider.messages.append(
+            {"role": "assistant", "content": "ok", "reasoning_encrypted": self.ENCRYPTED, "reasoning_id": "rs_1"}
+        )
+        self.assertTrue(provider.rewind_to_last_user())
+        self.assertEqual([message["role"] for message in provider.messages], ["user"])
+        self.assertFalse(any(message.get("reasoning_encrypted") for message in provider.messages))
+
+    def test_partial_message_has_no_blob_and_no_calls(self):
+        feed = _responses_feed_for_tests()
+        feed.feed(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": self.ENCRYPTED, "summary": []},
+            }
+        )
+        feed.feed({"type": "response.output_text.delta", "output_index": 1, "delta": "частично"})
+        feed.feed(
+            {
+                "type": "response.output_item.added",
+                "output_index": 2,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_a", "name": "list_dir"},
+            }
+        )
+        partial = feed.partial_message()
+        self.assertEqual(partial["content"], "частично")
+        self.assertNotIn("tool_calls", partial)
+        self.assertNotIn("reasoning_encrypted", partial)
+
+    def test_non_stream_answer_keeps_reasoning(self):
+        data = {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_9",
+                    "encrypted_content": self.ENCRYPTED,
+                    "summary": [{"type": "summary_text", "text": "кратко"}],
+                },
+                {"type": "message", "content": [{"type": "output_text", "text": "ответ"}]},
+            ],
+            "usage": {"input_tokens": 7, "output_tokens": 2},
+        }
+        feed = _responses_feed_for_tests()
+        pieces = []
+        feed.from_json(data, pieces.append)
+        stored = feed.stored_message()
+        self.assertEqual(pieces, ["ответ"])
+        self.assertEqual(stored["content"], "ответ")
+        self.assertEqual(stored["reasoning_encrypted"], self.ENCRYPTED)
+        self.assertEqual(stored["reasoning_id"], "rs_9")
+        self.assertEqual(feed.reasoning(), "кратко")
+
+    def test_encrypted_blob_is_not_counted_as_context(self):
+        text_only = estimate_tokens("sys", [{"role": "assistant", "content": "привет"}])
+        with_blob = estimate_tokens(
+            "sys",
+            [
+                {
+                    "role": "assistant",
+                    "content": "привет",
+                    "reasoning_encrypted": "A" * 60_000,
+                    "reasoning_id": "rs_1",
+                }
+            ],
+        )
+        self.assertEqual(text_only, with_blob)
+
+    def test_chat_file_does_not_store_blob(self):
+        from project_agent.chats import sanitize_messages
+
+        cleaned = sanitize_messages(
+            [
+                {"role": "user", "content": "привет"},
+                {
+                    "role": "assistant",
+                    "content": "ответ",
+                    "reasoning_encrypted": "A" * 5000,
+                    "reasoning_id": "rs_1",
+                    "reasoning_content": "кратко",
+                },
+            ]
+        )
+        self.assertNotIn("reasoning_encrypted", cleaned[1])
+        self.assertNotIn("reasoning_id", cleaned[1])
+        self.assertEqual(cleaned[1]["reasoning_content"], "кратко")
+
+
+class ResponsesModeTests(unittest.TestCase):
+    """Смена режима агента сбрасывает blob рассуждений, но только настоящее изменение."""
+
+    ENCRYPTED = "gAAAAABmode-blob"
+
+    def test_reasoning_dropped_only_on_real_mode_change(self):
+        from project_agent.agent import Agent
+
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": self.ENCRYPTED, "summary": []},
+            },
+            {"type": "response.output_text.delta", "output_index": 1, "delta": "ок"},
+            {"type": "response.completed", "response": {"usage": {"input_tokens": 5, "output_tokens": 1}}},
+        ]
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content.decode()))
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_sse(events))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            vault = SecretVault()
+            hub = McpHub()
+            box = Toolbox(vault, lambda *_: False, hub, lambda: {"api_key": "", "mcp_servers": []})
+            agent = Agent(
+                vault,
+                box,
+                hub,
+                lambda _line: None,
+                lambda _journal: None,
+                lambda _status: None,
+                lambda *_args, **_kwargs: None,
+            )
+            try:
+                agent.set_root(root)
+                provider = ResponsesProvider()
+                provider._transport = httpx.MockTransport(handler)
+                agent.provider = provider
+                agent.provider_kind = "openai_responses"
+                settings = {
+                    "provider": "openai_responses",
+                    "model": "gpt-6.1-sol",
+                    "api_key": "k",
+                    "base_url": "http://example.test/v1",
+                    "mcp_servers": [],
+                    "context_limit": 256000,
+                    "agent_mode": "agent",
+                }
+                agent.run_turn("первый", [], settings, threading.Event())
+                first_turn = provider.messages[1]
+                self.assertEqual(first_turn["reasoning_encrypted"], self.ENCRYPTED)
+                # Устаревшее "plan" — это Ask: режим правда сменился, blob отбрасываем.
+                agent.run_turn("второй", [], {**settings, "agent_mode": "plan"}, threading.Event())
+                self.assertNotIn("reasoning_encrypted", first_turn)
+                self.assertFalse(any(item.get("type") == "reasoning" for item in bodies[1]["input"]))
+                self.assertEqual(provider.messages[-1]["reasoning_encrypted"], self.ENCRYPTED)
+                # Тот же режим на следующем ходу сменой уже не считается: blob переносится.
+                agent.run_turn("третий", [], {**settings, "agent_mode": "ask"}, threading.Event())
+                self.assertTrue(any(item.get("type") == "reasoning" for item in bodies[2]["input"]))
+            finally:
+                hub.close()
+
+
+def _responses_feed_for_tests():
+    from project_agent.providers import _ResponsesFeed
+
+    return _ResponsesFeed()
 
 
 def _sse(events: list[dict], done: bool = True) -> bytes:

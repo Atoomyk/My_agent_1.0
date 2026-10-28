@@ -16,6 +16,10 @@ API_CONNECT_TIMEOUT = 20.0
 API_READ_TIMEOUT = 300.0
 # Весь один stream, даже если чанки продолжают идти.
 API_OVERALL_TIMEOUT = 900.0
+# Сколько раз Responses-провайдер может убрать одно поле из payload и повторить запрос (разбор 400).
+RESPONSES_MAX_RETRIES = 3
+# Перенос рассуждений между ходами: blob приходит только с этим include.
+RESPONSES_INCLUDE = "reasoning.encrypted_content"
 
 
 class Stopped(Exception):
@@ -555,26 +559,123 @@ class ResponsesProvider(OpenAIProvider):
 
     kind = "openai_responses"
 
-    def complete(self, tools: list[dict], redact, on_text=None) -> ModelTurn:
-        if self._cancel.is_set():
-            raise Stopped()
-        self.scrub_inplace(redact)
+    def drop_reasoning(self) -> None:
+        """Выбросить blob-ы рассуждений: после отмены/сжатия они уже недействительны."""
+        for message in self.messages:
+            if isinstance(message, dict):
+                message.pop("reasoning_encrypted", None)
+                message.pop("reasoning_id", None)
+
+    def _prune_reasoning(self) -> None:
+        """Оставить blob рассуждений только у последнего assistant-сообщения.
+
+        Для продолжения хода нужен reasoning лишь последнего шага; более старые blob-ы
+        каждый ход заново оплачивались бы как input-токены без всякой пользы.
+        """
+        last = -1
+        for index, message in enumerate(self.messages):
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                if message.get("reasoning_encrypted"):
+                    last = index
+        if last <= 0:
+            return
+        for index, message in enumerate(self.messages):
+            if index == last or not isinstance(message, dict):
+                continue
+            message.pop("reasoning_encrypted", None)
+            message.pop("reasoning_id", None)
+
+    def rewind_to_last_user(self) -> bool:
+        found = super().rewind_to_last_user()
+        # Отменённый ход оставил бы в контексте план, который больше не выполняется.
+        self.drop_reasoning()
+        return found
+
+    def drop_incomplete_tail(self) -> None:
+        super().drop_incomplete_tail()
+        self.drop_reasoning()
+
+    def summarize(self, redact) -> str:
+        summary = super().summarize(redact)
+        self.drop_reasoning()
+        return summary
+
+    def _payload(
+        self, tools: list[dict], send_tools: bool, send_store: bool, send_include: bool, send_reasoning: bool
+    ) -> dict:
         payload = {
             "model": self.settings.get("model") or "",
             "instructions": self.system,
-            "input": _responses_input(self.messages),
-            "store": False,
+            "input": _responses_input(self.messages, include_reasoning=send_reasoning),
             "stream": True,
         }
-        if tools:
+        if send_store:
+            payload["store"] = False
+        if send_include:
+            payload["include"] = [RESPONSES_INCLUDE]
+        if tools and send_tools:
             # Пустой список не отправляем: часть эндпоинтов считает это «запросом с tools».
             payload["tools"] = [responses_tool(tool) for tool in tools]
+        return payload
+
+    def configure(self, settings: dict) -> None:
+        previous = (self.settings or {}).get("base_url") or ""
+        super().configure(settings)
+        if previous != (settings.get("base_url") or ""):
+            # Другой шлюз — другие возможности: деградацию начинаем заново.
+            self._caps_state = None
+
+    def _caps(self) -> dict:
+        """Что уже отверг конкретный шлюз. Держим на объекте, чтобы не ловить 400 каждый шаг."""
+        caps = getattr(self, "_caps_state", None)
+        if caps is None:
+            caps = {"store": True, "include": True, "reasoning": True}
+            self._caps_state = caps
+        return caps
+
+    def complete(self, tools: list[dict], redact, on_text=None) -> ModelTurn:
+        """Стрим Responses с деградацией: на 400 убираем одно «лишнее» поле и повторяем.
+
+        Порядок разбора важен: сначала include (вместе с ним уходят и reasoning-элементы),
+        затем store. tools и неизвестный эндпоинт не «лечим» — сообщаем внятным текстом.
+        """
+        if self._cancel.is_set():
+            raise Stopped()
+        self.scrub_inplace(redact)
+        self._prune_reasoning()
         headers = {"Content-Type": "application/json"}
         key = (self.settings.get("api_key") or "").strip()
         if key:
             headers["Authorization"] = f"Bearer {key}"
         url = responses_url(self.settings.get("base_url") or "")
-        return self._run_stream(url, payload, headers, redact, _ResponsesFeed(), on_text)
+        caps = self._caps()
+        attempts = 0
+        while True:
+            payload = self._payload(tools, True, caps["store"], caps["include"], caps["reasoning"])
+            try:
+                return self._run_stream(url, payload, headers, redact, _ResponsesFeed(), on_text)
+            except ApiError as exc:
+                # Частичный текст уже лёг в историю — повтор дал бы дубль.
+                if exc.partial or not str(exc) or attempts >= RESPONSES_MAX_RETRIES:
+                    raise
+                kind = _responses_retry_kind(exc)
+                if kind in ("endpoint", "tools"):
+                    raise ApiError(_responses_hint(exc, kind), exc.partial) from None
+                changed = False
+                if kind in ("include", "reasoning"):
+                    if caps["include"]:
+                        caps["include"] = False
+                        changed = True
+                    if caps["reasoning"]:
+                        caps["reasoning"] = False
+                        self.drop_reasoning()
+                        changed = True
+                elif kind == "store" and caps["store"]:
+                    caps["store"] = False
+                    changed = True
+                if not changed:
+                    raise
+                attempts += 1
 
 
 def build_provider(kind: str):
@@ -687,11 +788,29 @@ def _responses_output(content):
     return blocks
 
 
-def _responses_input(messages: list) -> list:
+def _responses_reasoning(message: dict) -> dict | None:
+    """Сохранённый blob рассуждений → reasoning-элемент Responses.
+
+    API строгий: элемент обязан идти первым в своём ходе и нести ``summary``
+    (пустой массив допустим), иначе 400 «reasoning ... without its required following item».
+    """
+    if not isinstance(message, dict):
+        return None
+    blob = message.get("reasoning_encrypted")
+    if not isinstance(blob, str) or not blob:
+        return None
+    item = {"type": "reasoning", "encrypted_content": blob, "summary": []}
+    item_id = message.get("reasoning_id")
+    if isinstance(item_id, str) and item_id:
+        item["id"] = item_id
+    return item
+
+
+def _responses_input(messages: list, include_reasoning: bool = True) -> list:
     """История в chat-подобном виде → input-элементы Responses API.
 
-    Порядок внутри хода важен: сначала assistant-текст, затем его function_call;
-    результат инструмента — отдельный элемент function_call_output.
+    Порядок внутри хода важен: сначала reasoning (если есть), затем assistant-текст,
+    затем его function_call; результат инструмента — отдельный function_call_output.
     """
     items = []
     for message in messages or []:
@@ -705,12 +824,19 @@ def _responses_input(messages: list) -> list:
         elif role == "assistant":
             content = message.get("content")
             text = content if isinstance(content, str) else _text_of(content)
+            parts = []
             if text.strip():
-                items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+                parts.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
             for call in message.get("tool_calls") or []:
                 item = _responses_call(call)
                 if item is not None:
-                    items.append(item)
+                    parts.append(item)
+            if include_reasoning and parts:
+                # reasoning обязан идти первым и не может висеть без следующего элемента.
+                reasoning = _responses_reasoning(message)
+                if reasoning is not None:
+                    parts.insert(0, reasoning)
+            items.extend(parts)
         elif role == "tool":
             items.append(
                 {
@@ -720,6 +846,41 @@ def _responses_input(messages: list) -> list:
                 }
             )
     return items
+
+
+def _responses_retry_kind(exc: Exception) -> str:
+    """По тексту ошибки понять, какое поле payload шлюз не принял."""
+    text = str(exc or "").lower()
+    if not text:
+        return ""
+    if "unknown url" in text or "no route" in text or "unsupported url" in text:
+        return "endpoint"
+    if "404" in text and "model" not in text:
+        return "endpoint"
+    # reasoning проверяем раньше tools: текст ошибки про порядок items может упоминать function_call.
+    if "include" in text or "encrypted_content" in text:
+        return "include"
+    if "reasoning" in text:
+        return "reasoning"
+    if "tools" in text or "tool_choice" in text:
+        return "tools"
+    if "store" in text:
+        return "store"
+    return ""
+
+
+def _responses_hint(exc: Exception, kind: str) -> str:
+    """Понятный текст вместо голого JSON от шлюза."""
+    detail = str(exc or "")[:300]
+    if kind == "endpoint":
+        return (
+            "Эндпоинт не знает /v1/responses: "
+            f"{detail}. Проверьте base_url в настройках или выберите другого провайдера."
+        )
+    return (
+        "Модель не принимает tools на этом API: "
+        f"{detail}. Режим Agent недоступен — используйте провайдер OpenAI-совместимый."
+    )
 
 
 def _openai_content(text: str, images: list | None):
@@ -1140,6 +1301,8 @@ class _ResponsesFeed:
     def __init__(self) -> None:
         self.text_parts: list[str] = []
         self.reasoning_parts: list[str] = []
+        self.reasoning_encrypted = ""
+        self.reasoning_id = ""
         self.items: dict[int, dict] = {}
         self.usage = None
         self.usage_data = None
@@ -1187,6 +1350,11 @@ class _ResponsesFeed:
             value = item.get(key)
             if isinstance(value, str) and value:
                 slot[key] = value
+        encrypted = item.get("encrypted_content")
+        if isinstance(encrypted, str) and encrypted:
+            slot["encrypted_content"] = encrypted
+            self.reasoning_encrypted = encrypted
+            self.reasoning_id = str(item.get("id") or self.reasoning_id)
         arguments = item.get("arguments")
         if isinstance(arguments, str) and arguments:
             slot["arguments"] = arguments
@@ -1253,6 +1421,16 @@ class _ResponsesFeed:
         usage = data.get("usage")
         if isinstance(usage, dict):
             self.usage = usage
+        for item in self.raw_output:
+            if item.get("type") != "reasoning":
+                continue
+            encrypted = item.get("encrypted_content")
+            if isinstance(encrypted, str) and encrypted:
+                self.reasoning_encrypted = encrypted
+                self.reasoning_id = str(item.get("id") or "")
+            for block in item.get("summary") or []:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    self.reasoning_parts.append(block["text"])
         text = self.text()
         if text and on_text is not None:
             on_text(text)
@@ -1315,9 +1493,15 @@ class _ResponsesFeed:
         reason = self.reasoning()
         if reason:
             stored["reasoning_content"] = reason
+        if self.reasoning_encrypted:
+            # Blob переносим в следующий ход; в файл чата он не попадает (см. chats._clean_message).
+            stored["reasoning_encrypted"] = self.reasoning_encrypted
+            if self.reasoning_id:
+                stored["reasoning_id"] = self.reasoning_id
         return stored
 
     def partial_message(self) -> dict:
+        # Blob и висящий function_call в историю не отдаём: следующий запрос был бы невалиден.
         stored = {"role": "assistant", "content": self.text()}
         reason = self.reasoning()
         if reason:
