@@ -26,6 +26,7 @@ from project_agent.checkpoints import (
 from project_agent.config import (
     DEFAULT_CODE_FONT,
     DEFAULT_UI_FONT,
+    ai_settings,
     default_config,
     load_config,
     needs_api_key,
@@ -36,7 +37,17 @@ from project_agent.config import (
 from project_agent.mcp_client import McpHub
 from project_agent.patching import apply_diff
 from project_agent.paths import MAX_FILE_BYTES, PathError, list_entries, read_text_file, resolve_inside
-from project_agent.providers import AnthropicProvider, OpenAIProvider, Stopped
+from project_agent.providers import (
+    AnthropicProvider,
+    ApiError,
+    OpenAIProvider,
+    ResponsesProvider,
+    Stopped,
+    _responses_input,
+    _responses_output,
+    build_provider,
+    responses_url,
+)
 from project_agent.secrets import Scrubber, SecretVault, looks_like_literal_secret, scrub_outbound
 from project_agent.testing import (
     clip_output,
@@ -2438,6 +2449,298 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].id, "toolu_1")
         stored = provider.messages[-1]["content"]
         self.assertEqual(stored[1]["input"], {"path": "a.py"})
+
+
+class ResponsesProviderTests(unittest.TestCase):
+    def _provider(self, handler):
+        provider = ResponsesProvider()
+        provider._transport = httpx.MockTransport(handler)
+        provider.configure({"model": "gpt-6.1-sol", "api_key": "k", "base_url": "http://example.test/v1"})
+        provider.set_system("helper")
+        provider.add_user("прочитай файл", None)
+        return provider
+
+    def test_responses_url_variants(self):
+        self.assertEqual(responses_url(""), "https://api.openai.com/v1/responses")
+        self.assertEqual(responses_url("https://api.test/v1"), "https://api.test/v1/responses")
+        self.assertEqual(responses_url("https://api.test/v1/responses"), "https://api.test/v1/responses")
+
+    def test_payload_shape_has_tools_and_no_chat_fields(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content.decode())
+            seen["auth"] = request.headers.get("Authorization")
+            return httpx.Response(
+                200,
+                json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]},
+            )
+
+        provider = self._provider(handler)
+        provider._apply_provider_prefs = lambda payload: {**payload, "provider": {"sort": "price"}}
+        provider.configure(
+            {
+                "model": "gpt-6.1-sol",
+                "api_key": "k",
+                "base_url": "http://example.test/v1",
+                "prefer_cheap_provider": True,
+            }
+        )
+        try:
+            turn = provider.complete(
+                [{"name": "read_file", "description": "d", "parameters": {"type": "object"}}],
+                Scrubber(SecretVault(), []),
+            )
+        finally:
+            provider._http.close()
+        body = seen["body"]
+        self.assertEqual(turn.text, "ok")
+        self.assertEqual(seen["auth"], "Bearer k")
+        self.assertTrue(body["stream"])
+        self.assertFalse(body["store"])
+        self.assertNotIn("provider", body)
+        self.assertEqual(body["instructions"], "helper")
+        self.assertNotIn("max_tokens", body)
+        self.assertNotIn("messages", body)
+        self.assertEqual(
+            body["tools"],
+            [{"type": "function", "name": "read_file", "description": "d", "parameters": {"type": "object"}}],
+        )
+        self.assertEqual(body["input"][0]["role"], "user")
+        self.assertEqual(body["input"][0]["content"], [{"type": "input_text", "text": "прочитай файл"}])
+
+    def test_stream_collects_two_calls_with_call_id(self):
+        events = [
+            {"type": "response.output_text.delta", "output_index": 0, "delta": "Смотрю"},
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_a", "name": "list_dir"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 1,
+                "delta": '{"path":',
+            },
+            {"type": "response.function_call_arguments.done", "output_index": 1, "arguments": '{"path": "."}'},
+            {
+                "type": "response.output_item.added",
+                "output_index": 2,
+                "item": {"type": "function_call", "id": "fc_2", "call_id": "call_b", "name": "read_file"},
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 2,
+                "arguments": '{"path": "a.py"}',
+            },
+            {"type": "response.completed", "response": {"usage": {"input_tokens": 50, "output_tokens": 10}}},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_sse(events))
+
+        provider = self._provider(handler)
+        try:
+            turn = provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertEqual(turn.text, "Смотрю")
+        self.assertEqual(turn.prompt_tokens, 50)
+        self.assertEqual([call.name for call in turn.tool_calls], ["list_dir", "read_file"])
+        self.assertEqual([call.id for call in turn.tool_calls], ["call_a", "call_b"])
+        self.assertEqual(turn.tool_calls[1].arguments, {"path": "a.py"})
+        stored = provider.messages[-1]
+        self.assertEqual(stored["content"], "Смотрю")
+        self.assertEqual(stored["tool_calls"][0]["id"], "call_a")
+        self.assertEqual(stored["tool_calls"][0]["type"], "function")
+        self.assertEqual(stored["tool_calls"][0]["function"]["name"], "list_dir")
+        self.assertIn('"path": "."', stored["tool_calls"][0]["function"]["arguments"])
+
+    def test_tool_history_goes_back_as_function_items(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "готово"}]}]},
+            )
+
+        provider = self._provider(handler)
+        # Как в реальном цикле: ответ модели с вызовом, затем результат инструмента.
+        provider.messages.append(
+            {
+                "role": "assistant",
+                "content": "Смотрю папку",
+                "tool_calls": [
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {"name": "list_dir", "arguments": '{"path": "."}'},
+                    }
+                ],
+            }
+        )
+        provider.add_tool_result("call_a", "list_dir", "[a, b]", None)
+        try:
+            provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        items = seen["body"]["input"]
+        kinds = [item.get("type") or item.get("role") for item in items]
+        self.assertEqual(kinds, ["user", "assistant", "function_call", "function_call_output"])
+        self.assertEqual(items[2]["call_id"], "call_a")
+        self.assertEqual(items[2]["name"], "list_dir")
+        self.assertEqual(items[3]["call_id"], "call_a")
+        self.assertEqual(items[3]["output"], "[a, b]")
+
+    def test_empty_tools_are_not_sent(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]},
+            )
+
+        provider = self._provider(handler)
+        try:
+            provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+        self.assertNotIn("tools", seen["body"])
+
+    def test_error_event_raises_api_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse([{"type": "error", "error": {"message": "bad model"}}]),
+            )
+
+        provider = self._provider(handler)
+        try:
+            with self.assertRaises(ApiError):
+                provider.complete([], Scrubber(SecretVault(), []))
+        finally:
+            provider._http.close()
+
+    def test_responses_input_keeps_order_and_images(self):
+        items = _responses_input(
+            [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": {"path": "a.py"}},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "data"},
+            ]
+        )
+        self.assertEqual(items[0], {"role": "user", "content": [{"type": "input_text", "text": "hi"}]})
+        self.assertEqual(items[1]["type"], "function_call")
+        self.assertEqual(items[1]["call_id"], "call_1")
+        self.assertEqual(items[1]["arguments"], '{"path": "a.py"}')
+        self.assertEqual(items[2]["type"], "function_call_output")
+        self.assertNotIn("role", items[1])
+
+        with_image = _responses_input(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "смотри"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(
+            with_image[0]["content"],
+            [
+                {"type": "input_text", "text": "смотри"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAA"},
+            ],
+        )
+
+    def test_responses_output_string_and_blocks(self):
+        self.assertEqual(_responses_output("plain"), "plain")
+        self.assertEqual(
+            _responses_output([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]),
+            "a\nb",
+        )
+        mixed = _responses_output(
+            [
+                {"type": "text", "text": "a"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+            ]
+        )
+        self.assertIsInstance(mixed, list)
+        self.assertEqual(mixed[1], {"type": "input_image", "image_url": "data:image/png;base64,AAA"})
+
+
+class ResponsesRegistrationTests(unittest.TestCase):
+    def test_provider_is_registered_in_all_places(self):
+        from project_agent.chats import PROVIDERS
+        from project_agent.ui_theme import LABEL_BY_PROVIDER, PROVIDER_LABELS
+
+        self.assertEqual(ai_settings({"provider": "openai_responses"})["provider"], "openai_responses")
+        self.assertIn("openai_responses", PROVIDERS)
+        self.assertEqual(PROVIDER_LABELS["OpenAI Responses"], "openai_responses")
+        self.assertEqual(LABEL_BY_PROVIDER["openai_responses"], "OpenAI Responses")
+        self.assertEqual(build_provider("openai_responses").kind, "openai_responses")
+
+    def test_unknown_provider_falls_back_to_openai(self):
+        self.assertEqual(ai_settings({"provider": "нет-такого"})["provider"], "openai")
+        self.assertEqual(build_provider("нет-такого").kind, "openai")
+
+    def test_needs_api_key_for_responses(self):
+        self.assertTrue(needs_api_key("openai_responses", "", ""))
+        self.assertTrue(needs_api_key("openai_responses", "https://api.openai.com/v1", ""))
+        self.assertFalse(needs_api_key("openai_responses", "http://localhost:8080/v1", ""))
+        self.assertFalse(needs_api_key("openai_responses", "", "ключ"))
+
+    def test_chat_keeps_responses_provider_and_tool_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                folder = Path(tmp) / "proj"
+                folder.mkdir()
+                chat_id = new_chat_id()
+                messages = [
+                    {"role": "user", "content": "привет"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "list_dir", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "[]"},
+                ]
+                save_chat(chat_id, "чат", str(folder), ["Вы: привет"], messages, "openai_responses")
+                loaded = load_chat(chat_id)
+                delete_chat(chat_id)
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+        self.assertEqual(loaded["provider"], "openai_responses")
+        self.assertEqual(loaded["messages"][1]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(loaded["messages"][2]["tool_call_id"], "call_1")
 
 
 def _sse(events: list[dict], done: bool = True) -> bytes:

@@ -17,7 +17,7 @@ MAX_MESSAGES = 200
 MAX_MESSAGE_CHARS = 200_000
 MAX_CHAT_JSON_CHARS = 4_000_000
 IMAGE_NOTE = "[изображение опущено при сохранении чата]"
-PROVIDERS = frozenset({"openai", "anthropic"})
+PROVIDERS = frozenset({"openai", "anthropic", "openai_responses"})
 CHAT_GROUP_LABELS = {"today": "Сегодня", "yesterday": "Вчера", "earlier": "Ранее"}
 CONTENT_KEYS = ("title", "project_dir", "lines", "messages", "provider")
 

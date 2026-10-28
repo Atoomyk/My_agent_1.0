@@ -157,7 +157,7 @@ class Agent:
     def export_session(self) -> tuple[str, list]:
         if self.provider is None:
             return "", []
-        kind = self.provider.kind if self.provider.kind in ("openai", "anthropic") else ""
+        kind = self.provider.kind if self.provider.kind in ("openai", "anthropic", "openai_responses") else ""
         messages = list(self.provider.messages or [])
         return kind, messages
 
@@ -165,7 +165,7 @@ class Agent:
         from project_agent.chats import sanitize_messages
 
         kind = str(provider or "").strip().lower()
-        if kind not in ("openai", "anthropic"):
+        if kind not in ("openai", "anthropic", "openai_responses"):
             return False
         cleaned = sanitize_messages(messages)
         if not cleaned:

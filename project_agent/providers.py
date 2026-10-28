@@ -55,6 +55,15 @@ def chat_url(base: str) -> str:
     return base + "/chat/completions"
 
 
+def responses_url(base: str) -> str:
+    base = (base or DEFAULT_OPENAI_BASE).rstrip("/")
+    if base.endswith("/responses"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/responses"
+    return base + "/v1/responses"
+
+
 def messages_url(base: str) -> str:
     base = (base or DEFAULT_ANTHROPIC_BASE).rstrip("/")
     if base.endswith("/messages"):
@@ -79,6 +88,16 @@ def openai_tool(spec: dict) -> dict:
             "description": spec["description"],
             "parameters": spec["parameters"],
         },
+    }
+
+
+def responses_tool(spec: dict) -> dict:
+    """Инструмент в формате Responses: без вложенного "function"."""
+    return {
+        "type": "function",
+        "name": spec["name"],
+        "description": spec["description"],
+        "parameters": spec["parameters"],
     }
 
 
@@ -524,9 +543,45 @@ class AnthropicProvider(_HttpProvider):
         return summary
 
 
+class ResponsesProvider(OpenAIProvider):
+    """Провайдер /v1/responses (модели, у которых tools есть только в Responses API).
+
+    История хранится в том же chat-подобном виде, что у OpenAIProvider, поэтому
+    add_user / add_tool_result / summarize / rewind_to_last_user достаются по наследству.
+    В input-элементы Responses история переводится только на отправке.
+    ``provider: {"sort": "price"}`` из _apply_provider_prefs сюда не добавляется:
+    к Responses-эндпоинту это поле не относится.
+    """
+
+    kind = "openai_responses"
+
+    def complete(self, tools: list[dict], redact, on_text=None) -> ModelTurn:
+        if self._cancel.is_set():
+            raise Stopped()
+        self.scrub_inplace(redact)
+        payload = {
+            "model": self.settings.get("model") or "",
+            "instructions": self.system,
+            "input": _responses_input(self.messages),
+            "store": False,
+            "stream": True,
+        }
+        if tools:
+            # Пустой список не отправляем: часть эндпоинтов считает это «запросом с tools».
+            payload["tools"] = [responses_tool(tool) for tool in tools]
+        headers = {"Content-Type": "application/json"}
+        key = (self.settings.get("api_key") or "").strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        url = responses_url(self.settings.get("base_url") or "")
+        return self._run_stream(url, payload, headers, redact, _ResponsesFeed(), on_text)
+
+
 def build_provider(kind: str):
     if kind == "anthropic":
         return AnthropicProvider()
+    if kind == "openai_responses":
+        return ResponsesProvider()
     return OpenAIProvider()
 
 
@@ -571,6 +626,100 @@ def request_image(
             downloaded.raise_for_status()
             return downloaded.content
     raise ApiError("API изображений вернуло ответ без файла")
+
+
+def _responses_blocks(content) -> list:
+    """Chat-подобный content → блоки Responses (input_text / input_image)."""
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}] if content else []
+    blocks = []
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    blocks.append({"type": "input_text", "text": text})
+            elif kind == "image_url":
+                image = part.get("image_url")
+                url = image.get("url") if isinstance(image, dict) else image
+                if isinstance(url, str) and url:
+                    blocks.append({"type": "input_image", "image_url": url})
+    return blocks
+
+
+def _responses_call(call: dict) -> dict | None:
+    """Элемент истории tool_calls → function_call.
+
+    В истории у нас лежит call_id (по нему потом связывается результат), поэтому
+    в ``call_id`` уходит ``id``, а не ``id`` элемента — это разные поля в Responses.
+    """
+    if not isinstance(call, dict):
+        return None
+    function = call.get("function") or {}
+    name = str(function.get("name") or "")
+    if not name:
+        return None
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    elif not isinstance(arguments, str) or not arguments:
+        arguments = "{}"
+    return {
+        "type": "function_call",
+        "call_id": str(call.get("id") or ""),
+        "name": name,
+        "arguments": arguments,
+    }
+
+
+def _responses_output(content):
+    """Результат инструмента: строка, либо блоки, если в результате есть картинки."""
+    if isinstance(content, str):
+        return content
+    blocks = _responses_blocks(content)
+    if not blocks:
+        return ""
+    if not any(block.get("type") == "input_image" for block in blocks):
+        return "\n".join(block.get("text") or "" for block in blocks)
+    return blocks
+
+
+def _responses_input(messages: list) -> list:
+    """История в chat-подобном виде → input-элементы Responses API.
+
+    Порядок внутри хода важен: сначала assistant-текст, затем его function_call;
+    результат инструмента — отдельный элемент function_call_output.
+    """
+    items = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "user":
+            blocks = _responses_blocks(message.get("content"))
+            if blocks:
+                items.append({"role": "user", "content": blocks})
+        elif role == "assistant":
+            content = message.get("content")
+            text = content if isinstance(content, str) else _text_of(content)
+            if text.strip():
+                items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+            for call in message.get("tool_calls") or []:
+                item = _responses_call(call)
+                if item is not None:
+                    items.append(item)
+        elif role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id") or ""),
+                    "output": _responses_output(message.get("content")),
+                }
+            )
+    return items
 
 
 def _openai_content(text: str, images: list | None):
@@ -970,6 +1119,210 @@ class _AnthropicFeed:
 
     def partial_message(self) -> dict:
         return {"role": "assistant", "content": [{"type": "text", "text": self.text()}]}
+
+    def usage_payload(self) -> dict:
+        if isinstance(self.usage_data, dict):
+            return self.usage_data
+        if isinstance(self.usage, dict):
+            return {"usage": self.usage}
+        return {}
+
+
+class _ResponsesFeed:
+    """Разбор ответа Responses API: поток событий response.* и цельный JSON.
+
+    Текст собирается из response.output_text.delta, вызовы инструментов — из
+    output_item.added/done и function_call_arguments.delta/done.
+    У function_call есть и item-id, и call_id: наружу (в ToolCall.id и в истории)
+    отдаём call_id, иначе следующий запрос получит 400.
+    """
+
+    def __init__(self) -> None:
+        self.text_parts: list[str] = []
+        self.reasoning_parts: list[str] = []
+        self.items: dict[int, dict] = {}
+        self.usage = None
+        self.usage_data = None
+        self.raw_output = None
+
+    def text(self) -> str:
+        if self.raw_output is not None:
+            parts = []
+            for item in self.raw_output:
+                if item.get("type") != "message":
+                    continue
+                for block in item.get("content") or []:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") in ("output_text", "text"):
+                        parts.append(str(block.get("text") or ""))
+            return "".join(parts)
+        return "".join(self.text_parts)
+
+    def reasoning(self) -> str:
+        return "".join(self.reasoning_parts)
+
+    @staticmethod
+    def _index_of(event: dict) -> int:
+        try:
+            return int(event.get("output_index") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _slot(self, event: dict) -> dict:
+        index = self._index_of(event)
+        return self.items.setdefault(
+            index, {"id": "", "call_id": "", "name": "", "arguments": "", "type": ""}
+        )
+
+    def _take_item(self, event: dict) -> None:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        slot = self._slot(event)
+        kind = str(item.get("type") or "")
+        if kind:
+            slot["type"] = kind
+        for key in ("id", "call_id", "name"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                slot[key] = value
+        arguments = item.get("arguments")
+        if isinstance(arguments, str) and arguments:
+            slot["arguments"] = arguments
+
+    @staticmethod
+    def _error_text(event: dict) -> str:
+        error = event.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])[:400]
+        if isinstance(error, str) and error:
+            return error[:400]
+        response = event.get("response")
+        if isinstance(response, dict):
+            error = response.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                return str(error["message"])[:400]
+        return "ошибка API Responses"
+
+    def feed(self, event: dict) -> str:
+        kind = str(event.get("type") or "")
+        if kind in ("error", "response.failed", "response.incomplete"):
+            raise ApiError(self._error_text(event))
+        if kind in ("response.output_item.added", "response.output_item.done"):
+            self._take_item(event)
+            return ""
+        if kind == "response.function_call_arguments.delta":
+            slot = self._slot(event)
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                slot["arguments"] += delta
+            return ""
+        if kind == "response.function_call_arguments.done":
+            slot = self._slot(event)
+            arguments = event.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                slot["arguments"] = arguments
+            return ""
+        if kind == "response.output_text.delta":
+            piece = event.get("delta")
+            if isinstance(piece, str) and piece:
+                self.text_parts.append(piece)
+                return piece
+            return ""
+        if kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            piece = event.get("delta")
+            if isinstance(piece, str) and piece:
+                self.reasoning_parts.append(piece)
+            return ""
+        if kind == "response.completed":
+            response = event.get("response")
+            if isinstance(response, dict):
+                self.usage_data = response
+                usage = response.get("usage")
+                if isinstance(usage, dict):
+                    self.usage = usage
+        return ""
+
+    def from_json(self, data: dict, on_text) -> None:
+        output = data.get("output")
+        if not isinstance(output, list):
+            raise ApiError("непонятный ответ API")
+        self.raw_output = [item for item in output if isinstance(item, dict)]
+        self.usage_data = data
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            self.usage = usage
+        text = self.text()
+        if text and on_text is not None:
+            on_text(text)
+
+    def _call_slots(self) -> list[dict]:
+        if self.raw_output is not None:
+            slots = []
+            for item in self.raw_output:
+                if not isinstance(item, dict) or item.get("type") != "function_call":
+                    continue
+                arguments = item.get("arguments")
+                slots.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "call_id": str(item.get("call_id") or ""),
+                        "name": str(item.get("name") or ""),
+                        "arguments": arguments if isinstance(arguments, str) else "",
+                    }
+                )
+            return slots
+        return [
+            self.items[index] for index in sorted(self.items) if self.items[index].get("type") == "function_call"
+        ]
+
+    def tool_calls(self) -> list[ToolCall]:
+        calls = []
+        for index, slot in enumerate(self._call_slots()):
+            if not slot.get("name"):
+                continue
+            # Связь с результатом идёт по call_id, а не по id элемента.
+            calls.append(
+                ToolCall(
+                    id=str(slot.get("call_id") or slot.get("id") or f"call_{index}"),
+                    name=str(slot["name"]),
+                    arguments=_parse_args(slot.get("arguments")),
+                )
+            )
+        return calls
+
+    def _stored_calls(self) -> list[dict]:
+        stored = []
+        for index, slot in enumerate(self._call_slots()):
+            if not slot.get("name"):
+                continue
+            stored.append(
+                {
+                    "id": str(slot.get("call_id") or slot.get("id") or f"call_{index}"),
+                    "type": "function",
+                    "function": {"name": str(slot["name"]), "arguments": slot.get("arguments") or "{}"},
+                }
+            )
+        return stored
+
+    def stored_message(self) -> dict:
+        text = self.text()
+        stored = {"role": "assistant", "content": text if text else None}
+        calls = self._stored_calls()
+        if calls:
+            stored["tool_calls"] = calls
+        reason = self.reasoning()
+        if reason:
+            stored["reasoning_content"] = reason
+        return stored
+
+    def partial_message(self) -> dict:
+        stored = {"role": "assistant", "content": self.text()}
+        reason = self.reasoning()
+        if reason:
+            stored["reasoning_content"] = reason
+        return stored
 
     def usage_payload(self) -> dict:
         if isinstance(self.usage_data, dict):

@@ -56,7 +56,7 @@ def default_config() -> dict:
 
 def ai_settings(data: dict) -> dict:
     provider = str(data.get("provider") or "openai")
-    if provider not in ("openai", "anthropic"):
+    if provider not in ("openai", "anthropic", "openai_responses"):
         provider = "openai"
     try:
         steps = int(data.get("max_steps") or 25)

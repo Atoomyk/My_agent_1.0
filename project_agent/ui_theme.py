@@ -10,6 +10,7 @@ from __future__ import annotations
 PROVIDER_LABELS = {
     "OpenAI-совместимый": "openai",
     "Anthropic": "anthropic",
+    "OpenAI Responses": "openai_responses",
 }
 LABEL_BY_PROVIDER = {value: key for key, value in PROVIDER_LABELS.items()}
 MODE_LABELS = {

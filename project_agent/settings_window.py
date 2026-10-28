@@ -186,7 +186,7 @@ class SettingsWindow(ctk.CTkToplevel):
         app._sync_profile_menu()
         app._field(page, "Провайдер", top=4)
         quiet_menu(page, app.provider_var, list(PROVIDER_LABELS)).pack(fill="x", padx=8, pady=(2, 2))
-        app._entry(page, "URL API", app.base_url_var, "пусто — OpenAI или Anthropic", top=4, gap=2)
+        app._entry(page, "URL API", app.base_url_var, "пусто — OpenAI, Anthropic или Responses", top=4, gap=2)
         app._entry(page, "Модель", app.model_var, "имя модели", top=4, gap=2)
         app._entry(page, "Ключ", app.api_key_var, "", secret=True, top=4, gap=2)
         app._entry(page, "Лимит шагов", app.steps_var, "25", top=4, gap=2)
