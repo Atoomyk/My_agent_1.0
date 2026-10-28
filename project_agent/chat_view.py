@@ -69,6 +69,7 @@ from project_agent.ui_theme import (
     USER_TEXT,
 )
 from project_agent.ui_widgets import (
+    bind_wheel_scroll,
     icon_button,
     quiet_button,
     _paint_copy,
@@ -723,47 +724,175 @@ class ChatViewMixin:
     def _make_user_bubble(self, body: str, copy_text: str) -> dict:
         bubble_w = self._user_bubble_width()
         inner_w = max(120, bubble_w - 24)
-        wrap = max(100, inner_w - 4)
         frame = ctk.CTkFrame(
             self.chat._textbox,
             fg_color=INK,
             corner_radius=14,
             border_width=1,
             border_color=BORDER,
+            width=inner_w + 24,
+            height=1,
         )
-        message = ctk.CTkLabel(
+        frame.pack_propagate(False)
+        # Сообщение — read-only Text: в CTkLabel нельзя ни выделить, ни скопировать текст.
+        box = tk.Text(
             frame,
-            text=body,
-            text_color=USER_TEXT,
-            font=self._font(13),
-            width=inner_w,
-            wraplength=wrap,
-            justify="left",
-            anchor="w",
+            wrap="word",
+            height=max(1, body.count("\n") + 1),
+            width=1,
+            bd=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            bg=_tone(INK),
+            fg=_tone(USER_TEXT),
+            font=self._px_font(13),
+            cursor="arrow",
+            takefocus=0,
+            insertwidth=0,
+            selectbackground=_tone(SELECT),
+            selectforeground=_tone(TEXT),
         )
-        message.pack(fill="x", padx=12, pady=(10, 4 if copy_text else 10))
+        self._sync_bubble_selection(box)
+        box.insert("1.0", body)
+        box.configure(state="disabled")
+        mark_readonly(box)
         chip = None
         if copy_text:
             chip = self._make_copy_chip(copy_text, INK, parent=frame)
+        item = {
+            "frame": frame,
+            "box": box,
+            "chip": chip,
+            "body": body,
+            "copy_text": copy_text,
+            "inner_w": inner_w,
+        }
+        box.pack(fill="both", expand=True, padx=12, pady=(10, 4 if copy_text else 10))
+        if chip is not None:
             chip.pack(anchor="w", padx=10, pady=(0, 8))
-        return {"frame": frame, "message": message, "chip": chip, "body": body}
+        box.bind("<Button-3>", lambda event, item=item: self._bubble_menu(event, item))
+        box.bind("<Configure>", lambda _event, item=item: self._fit_user_bubble(item))
+        bind_wheel_scroll(self.chat._textbox, frame)
+        # До маппинга размер считаем по переводам строк; после — уточняем по displaylines.
+        self._fit_user_bubble(item)
+        self.after_idle(lambda item=item: self._fit_user_bubble(item))
+        return item
+
+    def _sync_bubble_selection(self, box) -> None:
+        """Клик по disabled-Text фокус не забирает, а неактивный Text не рисует выделение.
+
+        Без явного ``-inactiveselectbackground`` пользователь не увидел бы, что именно
+        он выделил (сам Ctrl+C работает и так, через ``bind_class("Text", ...)``).
+        """
+        try:
+            box.tk.call(box._w, "configure", "-inactiveselectbackground", _tone(SELECT))
+        except tk.TclError:
+            return
+
+    def _user_bubble_line_h(self, box) -> int:
+        try:
+            linespace = box.tk.call("font", "metrics", box.cget("font"), "-linespace")
+            return max(1, int(float(linespace)))
+        except (tk.TclError, TypeError, ValueError):
+            return max(1, -int(self._px_font(13)[1]))
+
+    def _fit_user_bubble(self, item: dict) -> None:
+        """Высота пузыря — по числу перенесённых строк; до маппинга считаем по переводам строк."""
+        frame = item.get("frame")
+        box = item.get("box")
+        if frame is None or box is None:
+            return
+        try:
+            if not (frame.winfo_exists() and box.winfo_exists()):
+                return
+        except tk.TclError:
+            return
+        try:
+            lines = 0
+            if int(box.winfo_width()) >= 50:
+                counted = box.count("1.0", "end", "displaylines")
+                if counted:
+                    lines = max(1, int(counted[0]))
+            if not lines:
+                lines = max(1, str(item.get("body") or "").count("\n") + 1)
+            chip = item.get("chip")
+            extra = 10 + (4 if chip is not None else 10) + 2
+            if chip is not None:
+                extra += max(1, int(chip.winfo_reqheight())) + 8
+            width = max(120, int(item.get("inner_w") or 0)) + 24
+            height = lines * self._user_bubble_line_h(box) + extra
+            # <Configure> приходит и от нашей же подгонки: без сверки получился бы цикл.
+            if item.get("_fit_size") == (width, height, lines):
+                return
+            item["_fit_size"] = (width, height, lines)
+            box.configure(height=lines)
+            frame.configure(width=width, height=height)
+        except (tk.TclError, TypeError, ValueError):
+            return
+
+    def _bubble_menu(self, event, item: dict) -> str | None:
+        box = item.get("box")
+        if box is None:
+            return None
+        # Выделение снимаем до tk_popup: на Windows оно сбрасывается при grab меню.
+        selected = _selection(box)
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bd=0,
+            bg=_tone(PANEL),
+            fg=_tone(TEXT),
+            activebackground=_tone(SELECT),
+            activeforeground=_tone(TEXT),
+            font=self._px_font(12),
+        )
+        menu.add_command(
+            label="Копировать",
+            state="normal" if selected else "disabled",
+            command=lambda text=selected: apply_layout_clipboard(box, "copy", text),
+        )
+        menu.add_command(
+            label="Выделить всё", command=lambda: apply_layout_clipboard(box, "select")
+        )
+        copy_text = item.get("copy_text") or item.get("body") or ""
+        if copy_text:
+            menu.add_command(
+                label="Копировать сообщение",
+                command=lambda text=copy_text: self._copy_agent_message(text),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _restyle_user_bubbles(self) -> None:
         bubble_w = self._user_bubble_width()
         inner_w = max(120, bubble_w - 24)
-        wrap = max(100, inner_w - 4)
         for item in list(getattr(self, "_user_bubbles", [])):
             frame = item.get("frame")
+            box = item.get("box")
             try:
                 if frame is None or not frame.winfo_exists():
                     continue
                 frame.configure(fg_color=INK, border_color=BORDER)
-                item["message"].configure(text_color=USER_TEXT, width=inner_w, wraplength=wrap)
+                item["inner_w"] = inner_w
+                if box is not None and box.winfo_exists():
+                    box.configure(
+                        bg=_tone(INK),
+                        fg=_tone(USER_TEXT),
+                        font=self._px_font(13),
+                        selectbackground=_tone(SELECT),
+                        selectforeground=_tone(TEXT),
+                    )
+                    self._sync_bubble_selection(box)
                 chip = item.get("chip")
                 if chip is not None and chip.winfo_exists():
                     chip.configure(bg=_tone(INK))
             except tk.TclError:
                 continue
+            self._fit_user_bubble(item)
 
     def _copy_agent_message(self, text: str) -> None:
         body = (text or "").rstrip()
