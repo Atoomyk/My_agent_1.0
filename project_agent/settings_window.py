@@ -9,7 +9,7 @@
 ``provider_var``, ``base_url_var``, ``model_var``, ``api_key_var``,
 ``steps_var``, ``prefer_cheap_var``, ``image_*`` переменные, ``test_preset_var``,
 ``test_timeout_var``, ``test_fix_rounds_var``, ``agent_shell_var``,
-``auto_write_var``, ``mcp_*`` переменные и поля-виджеты (``mcp_list``,
+``auto_write_var``, ``auto_shell_no_confirm_var``, ``mcp_*`` переменные и поля-виджеты (``mcp_list``,
 ``rules_label``, ``index_label``, ``allowed_box``), а также методы
 ``_field``, ``_entry``, ``_pick_font``, ``_on_theme_pick``, ``_on_profile_pick``,
 ``_bind_profile_rename``, ``_sync_profile_menu``, ``_on_test_preset_pick``,
@@ -249,7 +249,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         ctk.CTkLabel(
             page,
-            text="Пресет тестов — для run_tests. Allowlist — для run_allowed. Почти свободный shell (run_shell) — по чекбоксу ниже, выкл по умолчанию. Каждый запуск с подтверждением.",
+            text="Пресет тестов — для run_tests. Allowlist — для run_allowed. Почти свободный shell (run_shell) — по чекбоксу ниже, выкл по умолчанию. Подтверждение — для каждого запуска, если его не сняли в разделе Безопасность.",
             wraplength=400,
             justify="left",
             text_color=MUTED,
@@ -273,7 +273,8 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(
             page,
             text=(
-                "Выкл по умолчанию. Только Agent/Debug; confirm каждый раз. Не интерактивный терминал. "
+                "Выкл по умолчанию. Только Agent/Debug; confirm каждый раз "
+                "(снять можно в разделе Безопасность, для detach он остаётся). Не интерактивный терминал. "
                 "Агент обязан указать причину запуска (summary) — она видна в диалоге подтверждения."
             ),
             wraplength=400,
@@ -376,12 +377,37 @@ class SettingsWindow(ctk.CTkToplevel):
             button_hover_color=BUTTON_HOVER,
             font=(app.ui_font, 12),
         ).pack(fill="x", padx=8, pady=(8, 4))
+        ctk.CTkSwitch(
+            page,
+            text="Не спрашивать подтверждение для run_shell",
+            variable=app.auto_shell_no_confirm_var,
+            command=app._on_shell_confirm_toggle,
+            text_color=TEXT,
+            progress_color=CTX_OK,
+            button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER,
+            font=(app.ui_font, 12),
+        ).pack(fill="x", padx=8, pady=(8, 2))
+        ctk.CTkLabel(
+            page,
+            text=(
+                "Выкл по умолчанию. При включении спросим подтверждение один раз. "
+                "Detach-запуски (фоновые процессы) спрашивают всегда: у них нет ни вывода, "
+                "ни кода возврата. Нужен включённый «Почти свободный shell» в разделе Проект."
+            ),
+            wraplength=400,
+            justify="left",
+            text_color=MUTED,
+            font=(app.ui_font, 11),
+        ).pack(fill="x", padx=8, pady=(0, 4))
         notes = (
             "Ключ и настройки хранятся только в %APPDATA%\\ProjectAgent\\config.json — в программу они не зашиты.\n\n"
             "Перед отправкой модели пароли и похожие значения заменяются метками [[SEC:...]].\n\n"
             "По умолчанию запись файла спрашивает подтверждение. Переключатель выше снимает диалог "
             "только для write_file / apply_patch внутри открытой папки проекта.\n\n"
-            "Генерация изображения, run_tests, run_allowed, run_shell и git commit всегда спрашивают подтверждение.\n\n"
+            "Генерация изображения, run_tests, run_allowed и git commit всегда спрашивают подтверждение.\n\n"
+            "run_shell спрашивает подтверждение по умолчанию; свитч выше снимает диалог, "
+            "кроме detach-запусков (фоновые процессы).\n\n"
             "Почти свободный shell (run_shell) — только если включён в Проект; по умолчанию выкл. "
             "Тесты — пресет; разовые команды — id из allowlist; shell — argv без метасимволов. "
             "Лимит shell за ход настраивается (0 — без лимита). Агент обязан указать причину запуска.\n\n"

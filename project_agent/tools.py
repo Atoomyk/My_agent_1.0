@@ -105,6 +105,11 @@ def _flag_bool(raw) -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+def _setting_flag(settings, key: str) -> bool:
+    """Флаг из настроек: bool/int/строка, мусор — False."""
+    return _flag_bool((settings or {}).get(key))
+
+
 TOOL_SPECS = [
     {
         "name": "list_dir",
@@ -1108,11 +1113,19 @@ class Toolbox:
         else:
             summary = self._summary(args.get("summary"), f"Shell, таймаут {timeout} с", 0)
             detail = rendered
-        if self._stopped() or not self.confirm("run_shell", summary, detail):
+        # «Не спрашивать подтверждение» из настроек. Detach — исключение: там диалог
+        # единственная точка контроля (нет вывода, кода возврата и остановки).
+        unconfirmed = not detach and self._auto_shell_no_confirm()
+        if not unconfirmed and (self._stopped() or not self.confirm("run_shell", summary, detail)):
             return ToolOutcome(
                 "Пользователь отказался запускать команду. Не повторяй без новой причины.",
                 "run_shell: отказ",
             )
+
+        def audit() -> str:
+            """Журнал: пометка, что команда шла без диалога подтверждения."""
+            return " (без подтверждения)" if unconfirmed else ""
+
         if self._stopped():
             return ToolOutcome("Остановлено.", "run_shell: остановлено")
         title = "run_shell"
@@ -1149,10 +1162,10 @@ class Toolbox:
                 f"Таймаут {timeout} с. {step_text()}.\n"
                 f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
-            self._emit_run("end", title=title, status=f"таймаут{quota()}")
+            self._emit_run("end", title=title, status=f"таймаут{quota()}{audit()}")
             return ToolOutcome(
                 body + self._touched_suffix(),
-                f"run_shell: таймаут{quota()}",
+                f"run_shell: таймаут{quota()}{audit()}",
             )
         code = 0 if result.code is None else int(result.code)
         status = "OK" if code == 0 else f"FAIL ({code})"
@@ -1169,31 +1182,31 @@ class Toolbox:
                 self._emit_run(
                     "end",
                     title=title,
-                    status=f"повтор {status}{quota()}",
+                    status=f"повтор {status}{quota()}{audit()}",
                 )
                 return ToolOutcome(
                     body + self._fail_context(result.output, code),
-                    f"run_shell: повтор {status}{quota()}",
+                    f"run_shell: повтор {status}{quota()}{audit()}",
                 )
             self._last_fail_key = fail_key
             body = (
                 f"{status}. {step_text()}.\n"
                 f"Команда: {format_command(result.command)}\n\n{result.output}"
             ).strip()
-            self._emit_run("end", title=title, status=f"{status}{quota()}")
+            self._emit_run("end", title=title, status=f"{status}{quota()}{audit()}")
             return ToolOutcome(
                 body + self._fail_context(result.output, code),
-                f"run_shell: {status}{quota()}",
+                f"run_shell: {status}{quota()}{audit()}",
             )
         self._last_fail_key = ""
         body = (
             f"{status}. {step_text()}.\n"
             f"Команда: {format_command(result.command)}\n\n{result.output}"
         ).strip()
-        self._emit_run("end", title=title, status=f"{status}{quota()}")
+        self._emit_run("end", title=title, status=f"{status}{quota()}{audit()}")
         return ToolOutcome(
             body + self._touched_suffix(),
-            f"run_shell: {status}{quota()}",
+            f"run_shell: {status}{quota()}{audit()}",
         )
 
     def _run_detached(self, title: str, root, command, journal_prefix: str) -> ToolOutcome:
@@ -1342,13 +1355,15 @@ class Toolbox:
         return ToolOutcome(text[:30_000], journal, images)
 
     def _auto_write_project(self) -> bool:
-        settings = self.settings() or {}
-        raw = settings.get("auto_write_project")
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            return bool(raw)
-        return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+        return _setting_flag(self.settings(), "auto_write_project")
+
+    def _auto_shell_no_confirm(self) -> bool:
+        """«Настройки → Безопасность»: не спрашивать подтверждение для run_shell.
+
+        Detach-запуски (фоновые процессы) всё равно спрашивают: там диалог —
+        единственная точка контроля, вывода и кода возврата у агента нет.
+        """
+        return _setting_flag(self.settings(), "auto_shell_no_confirm")
 
     def _confirm_project_write(
         self,

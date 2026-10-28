@@ -40,6 +40,7 @@ def default_config() -> dict:
         "shell_max_per_turn": 3,
         "allowed_commands": [],
         "agent_shell_enabled": False,
+        "auto_shell_no_confirm": False,
         "active_profile": "",
         "profiles": [],
         "mcp_servers": [],
@@ -203,6 +204,10 @@ def _agent_shell_enabled(raw) -> bool:
     return _flag(raw)
 
 
+def _auto_shell_no_confirm(raw) -> bool:
+    return _flag(raw)
+
+
 def _flag(raw) -> bool:
     if isinstance(raw, bool):
         return raw
@@ -311,6 +316,7 @@ def load_config(path: Path | None = None) -> tuple[dict, str | None]:
     merged["shell_max_per_turn"] = _shell_max_per_turn(data.get("shell_max_per_turn"))
     merged["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     merged["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
+    merged["auto_shell_no_confirm"] = _auto_shell_no_confirm(data.get("auto_shell_no_confirm"))
     merged["agent_mode"] = _agent_mode(data.get("agent_mode"))
     merged["context_limit"] = _context_limit(data.get("context_limit"))
     merged["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))
@@ -339,6 +345,7 @@ def save_config(data: dict, path: Path | None = None) -> None:
     payload["shell_max_per_turn"] = _shell_max_per_turn(data.get("shell_max_per_turn"))
     payload["allowed_commands"] = _allowed_commands(data.get("allowed_commands"))
     payload["agent_shell_enabled"] = _agent_shell_enabled(data.get("agent_shell_enabled"))
+    payload["auto_shell_no_confirm"] = _auto_shell_no_confirm(data.get("auto_shell_no_confirm"))
     payload["agent_mode"] = _agent_mode(data.get("agent_mode"))
     payload["context_limit"] = _context_limit(data.get("context_limit"))
     payload["auto_write_project"] = _auto_write_project(data.get("auto_write_project"))

@@ -3201,5 +3201,94 @@ class CheckpointTests(unittest.TestCase):
         box.mcp.close()
 
 
+class ShellConfirmTests(unittest.TestCase):
+    """auto_shell_no_confirm: run_shell без диалога, detach — всегда с диалогом."""
+
+    def _box(self, root: Path, settings: dict):
+        asked: list[str] = []
+
+        def confirm(path, *_args, **_kwargs):
+            asked.append(str(path))
+            return True
+
+        box = Toolbox(SecretVault(), confirm, McpHub(), lambda: dict(settings))
+        box.set_root(root)
+        box.begin_turn()
+        self.addCleanup(box.mcp.close)
+        return box, asked
+
+    def _base(self, **extra) -> dict:
+        settings = {
+            "agent_mode": "agent",
+            "agent_shell_enabled": True,
+            "shell_max_per_turn": 5,
+            "test_timeout": 30,
+        }
+        settings.update(extra)
+        return settings
+
+    def test_flag_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            save_config({"auto_shell_no_confirm": "yes"}, path)
+            data, error = load_config(path)
+            self.assertIsNone(error)
+            self.assertIs(data["auto_shell_no_confirm"], True)
+            save_config({"auto_shell_no_confirm": "мусор"}, path)
+            data, _ = load_config(path)
+            self.assertIs(data["auto_shell_no_confirm"], False)
+            self.assertIs(default_config()["auto_shell_no_confirm"], False)
+
+    def test_no_confirm_runs_without_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            box, asked = self._box(
+                root, self._base(auto_shell_no_confirm=True, shell_max_per_turn=0)
+            )
+            outcome = box.execute(
+                "run_shell",
+                {"argv": [sys.executable, "-c", "print(1)"], "summary": "проверка"},
+            )
+            self.assertEqual(asked, [])
+            self.assertIn("без подтверждения", outcome.journal)
+            self.assertIn("OK", outcome.model_text)
+
+    def test_confirm_kept_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            box, asked = self._box(Path(tmp), self._base())
+            box.execute(
+                "run_shell",
+                {"argv": [sys.executable, "-c", "print(1)"], "summary": "проверка"},
+            )
+            self.assertEqual(asked, ["run_shell"])
+
+    def test_detach_still_asks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            box, asked = self._box(
+                Path(tmp), self._base(auto_shell_no_confirm=True, shell_max_per_turn=0)
+            )
+            box.execute(
+                "run_shell",
+                {
+                    "argv": [sys.executable, "-c", "pass"],
+                    "summary": "фоновый запуск",
+                    "detach": True,
+                },
+            )
+            self.assertEqual(asked, ["run_shell"])
+
+    def test_disabled_shell_ignores_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            box, asked = self._box(
+                Path(tmp), self._base(agent_shell_enabled=False, auto_shell_no_confirm=True)
+            )
+            outcome = box.execute(
+                "run_shell",
+                {"argv": [sys.executable, "-c", "print(1)"], "summary": "проверка"},
+            )
+            self.assertEqual(asked, [])
+            self.assertIn("выключено", outcome.journal)
+
+
 if __name__ == "__main__":
     unittest.main()

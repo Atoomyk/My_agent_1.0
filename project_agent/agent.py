@@ -198,12 +198,23 @@ class Agent:
 
             limit = normalize_shell_limit(settings.get("shell_max_per_turn"))
             limit_text = f"лимит {limit} за ход" if limit else "без лимита за ход"
+            raw = settings.get("auto_shell_no_confirm")
+            if isinstance(raw, (bool, int, float)):
+                no_confirm = bool(raw)
+            else:
+                no_confirm = str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+            confirm_text = (
+                "подтверждение для обычных запусков отключено в настройках (человек уже согласился); "
+                "для detach=true подтверждение остаётся"
+                if no_confirm
+                else "только после подтверждения"
+            )
             return (
-                "Включён run_shell (почти свободный argv в корне проекта): только после подтверждения, "
+                f"Включён run_shell (почти свободный argv в корне проекта): {confirm_text}, "
                 f"{limit_text}, без shell-метасимволов (кроме переводов строк) и без cmd / powershell -Command. "
                 "Переводы строк внутри argv допустимы. "
-                "Параметр summary обязателен: одной строкой объясни, зачем команда и что ожидаешь увидеть — "
-                "человек видит этот текст в диалоге подтверждения и решает по нему. "
+                "Параметр summary обязателен всегда: одной строкой объясни, зачем команда и что ожидаешь увидеть — "
+                "человек видит этот текст в диалоге подтверждения и в журнале запусков. "
                 "Для GUI/долгого процесса — detach=true (без ожидания); иначе ждём вывод до таймаута. "
                 "В allowlist detach — суффикс id! в настройках. "
                 "Предпочитай run_tests и run_allowed; run_shell — только если нет подходящего пресета или id."

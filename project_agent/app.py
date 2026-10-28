@@ -251,6 +251,8 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self.shell_limit_var = ctk.StringVar(value=str(DEFAULT_SHELL_PER_TURN))
         self.auto_write_project = False
         self.auto_write_var = ctk.BooleanVar(value=False)
+        self.auto_shell_no_confirm = False
+        self.auto_shell_no_confirm_var = ctk.BooleanVar(value=False)
         self.prefer_cheap_provider = False
         self.prefer_cheap_var = ctk.BooleanVar(value=False)
         self.last_chats: dict[str, str] = {}
@@ -645,6 +647,8 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self.agent_shell_var.set(self.agent_shell_enabled)
         self.auto_write_project = bool(data.get("auto_write_project"))
         self.auto_write_var.set(self.auto_write_project)
+        self.auto_shell_no_confirm = bool(data.get("auto_shell_no_confirm"))
+        self.auto_shell_no_confirm_var.set(self.auto_shell_no_confirm)
         self.prefer_cheap_provider = bool(data.get("prefer_cheap_provider"))
         self.prefer_cheap_var.set(self.prefer_cheap_provider)
         self._apply_font(data.get("ui_font"), data.get("code_font"), rebuild_chat=False, reopen_settings=False)
@@ -955,6 +959,29 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self._sync_profile_menu()
         self._persist("Профиль удалён")
 
+    def _on_shell_confirm_toggle(self) -> None:
+        """Свитч «не спрашивать подтверждение для run_shell»: спрашиваем при включении."""
+        if not self.auto_shell_no_confirm_var.get():
+            self.auto_shell_no_confirm = False
+            return
+        parent = self._settings_window
+        if parent is None or not self._window_alive(parent):
+            parent = self
+        dialog = ConfirmDialog(
+            parent,
+            "Безопасность: shell без подтверждения",
+            "Запускать run_shell без диалога подтверждения?",
+            "Команды будут выполняться в папке проекта сразу, без вашего клика.\n\n"
+            "Остаётся в силе: подтверждение для detach (фоновые процессы без вывода и кода "
+            "возврата), для run_tests / run_allowed / git commit / записи файлов и изображений, "
+            "лимит запусков shell за ход и запрет shell-метасимволов.\n\n"
+            "Настройка сохраняется в config.json и действует до выключения свитча.",
+        )
+        self.wait_window(dialog)
+        allowed = bool(dialog.result)
+        self.auto_shell_no_confirm_var.set(allowed)
+        self.auto_shell_no_confirm = allowed
+
     def _restore_project(self, raw: str) -> None:
         text = str(raw or "").strip()
         if not text:
@@ -1031,6 +1058,8 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         settings["context_limit"] = self.context_limit
         settings["auto_write_project"] = bool(self.auto_write_var.get())
         self.auto_write_project = settings["auto_write_project"]
+        settings["auto_shell_no_confirm"] = bool(self.auto_shell_no_confirm_var.get())
+        self.auto_shell_no_confirm = settings["auto_shell_no_confirm"]
         settings["prefer_cheap_provider"] = bool(self.prefer_cheap_var.get())
         self.prefer_cheap_provider = settings["prefer_cheap_provider"]
         settings["ui_font"] = self.ui_font

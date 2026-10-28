@@ -16,6 +16,7 @@
   "shell_max_per_turn": 3,
   "allowed_commands": [],
   "agent_shell_enabled": false,
+  "auto_shell_no_confirm": false,
   "active_profile": "",
   "profiles": [],
   "mcp_servers": [],
