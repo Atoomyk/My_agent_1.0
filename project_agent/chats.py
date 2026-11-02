@@ -19,7 +19,6 @@ MAX_CHAT_JSON_CHARS = 4_000_000
 IMAGE_NOTE = "[изображение опущено при сохранении чата]"
 PROVIDERS = frozenset({"openai", "anthropic", "openai_responses"})
 CHAT_GROUP_LABELS = {"today": "Сегодня", "yesterday": "Вчера", "earlier": "Ранее"}
-CONTENT_KEYS = ("title", "project_dir", "lines", "messages", "provider")
 
 
 def chats_dir() -> Path:
@@ -47,7 +46,9 @@ def _clean_lines(raw) -> list[str]:
     if not isinstance(raw, list):
         return []
     lines = []
-    for item in raw[:MAX_LINES]:
+    # Храним последние строки: хвост беседы нужнее её начала, иначе свежая часть
+    # разговора теряется при перезагрузке, а память и файл расходятся.
+    for item in raw[-MAX_LINES:]:
         if not isinstance(item, str):
             continue
         text = item.replace("\x00", "").rstrip()
@@ -237,7 +238,15 @@ def save_chat(
     lines: list[str],
     messages: list | None = None,
     provider: str = "",
+    fresh: bool = True,
 ) -> None:
+    """Сохранить чат.
+
+    Флаг включён — в беседе появилось новое содержимое, дата меняется.
+    Флаг снят — пересохранение без новых сообщений (открытие, переключение,
+    закрытие окна): дата берётся из файла. Иначе беседа поднимается наверх списка,
+    хотя пользователь ничего в неё не писал.
+    """
     record = _record(
         {
             "id": chat_id,
@@ -254,10 +263,10 @@ def save_chat(
     folder = chats_dir()
     folder.mkdir(parents=True, exist_ok=True)
     path = chat_path(record["id"])
-    # Открытие чата без новых сообщений не должно сдвигать его дату изменения.
-    previous = _read_record(path)
-    if previous is not None and all(previous[key] == record[key] for key in CONTENT_KEYS):
-        if previous["updated"]:
+    if not fresh:
+        # Дату меняет только новое содержимое, а не сам факт сохранения.
+        previous = _read_record(path)
+        if previous is not None and previous["updated"]:
             record["updated"] = previous["updated"]
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1342,9 +1342,15 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         if not line or not self.chat_id:
             return
         self.transcript.append(line)
-        self._store_chat()
+        # Новая строка в ленте — единственный повод сдвинуть дату изменения беседы.
+        self._store_chat(fresh=True)
 
-    def _store_chat(self) -> None:
+    def _store_chat(self, fresh: bool = False) -> None:
+        """Сохранить текущий чат.
+
+        По умолчанию флаг снят: открытие, переключение и закрытие чата не должны
+        делать беседу «свежей» — дату обновляет только ``_remember``.
+        """
         if not self.chat_id or self.project is None or not self.transcript:
             return
         try:
@@ -1361,6 +1367,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
                 lines,
                 messages=messages,
                 provider=provider,
+                fresh=fresh,
             )
         except Exception as exc:
             self.set_status(f"Чат не сохранён: {exc}")

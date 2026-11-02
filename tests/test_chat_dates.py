@@ -32,19 +32,58 @@ class ChatDateTests(unittest.TestCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def test_reopen_without_changes_keeps_date(self):
-        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"])
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=True)
         self._set_updated("2020-01-02T10:00:00")
-        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"])
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=False)
         self.assertEqual(chats.load_chat(self.chat_id)["updated"], "2020-01-02T10:00:00")
 
-    def test_real_change_updates_date(self):
-        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"])
+    def test_silent_save_keeps_date_when_session_differs(self):
+        # Открытие чата могло не восстановить историю модели: provider/messages
+        # в памяти не совпадают с файлом, но новых сообщений нет.
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=True)
         self._set_updated("2020-01-02T10:00:00")
-        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет", "Ассистент: ок"])
+        chats.save_chat(
+            self.chat_id,
+            "Тема",
+            self.project,
+            ["Вы: привет"],
+            messages=[{"role": "user", "content": "привет"}],
+            provider="openai",
+            fresh=False,
+        )
+        record = chats.load_chat(self.chat_id)
+        self.assertEqual(record["updated"], "2020-01-02T10:00:00")
+        self.assertEqual(record["provider"], "openai")
+
+    def test_real_change_updates_date(self):
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=True)
+        self._set_updated("2020-01-02T10:00:00")
+        chats.save_chat(
+            self.chat_id, "Тема", self.project, ["Вы: привет", "Ассистент: ок"], fresh=True
+        )
         self.assertNotEqual(chats.load_chat(self.chat_id)["updated"], "2020-01-02T10:00:00")
 
-    def test_list_contains_updated_for_grouping(self):
+    def test_default_updates_date(self):
+        # Вызовы без флага сохраняют старое поведение: там, где сообщение
+        # действительно добавлено, дата обновляется.
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=True)
+        self._set_updated("2020-01-02T10:00:00")
         chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"])
+        self.assertNotEqual(chats.load_chat(self.chat_id)["updated"], "2020-01-02T10:00:00")
+
+    def test_long_chat_keeps_last_lines_and_date(self):
+        lines = [f"Вы: строка {index}" for index in range(chats.MAX_LINES + 50)]
+        chats.save_chat(self.chat_id, "Тема", self.project, lines, fresh=True)
+        record = chats.load_chat(self.chat_id)
+        self.assertEqual(len(record["lines"]), chats.MAX_LINES)
+        self.assertEqual(record["lines"][0], lines[50])
+        self.assertEqual(record["lines"][-1], lines[-1])
+        self._set_updated("2020-01-02T10:00:00")
+        chats.save_chat(self.chat_id, "Тема", self.project, lines, fresh=False)
+        self.assertEqual(chats.load_chat(self.chat_id)["updated"], "2020-01-02T10:00:00")
+
+    def test_list_contains_updated_for_grouping(self):
+        chats.save_chat(self.chat_id, "Тема", self.project, ["Вы: привет"], fresh=True)
         items = chats.list_chats(self.project)
         self.assertEqual(len(items), 1)
         self.assertTrue(items[0]["updated"])
