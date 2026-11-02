@@ -479,6 +479,11 @@ class ChatViewMixin:
             ),
         )
 
+    def write_limit(self, text: str = "Достигнут лимит шагов.") -> None:
+        """Лимит шагов — штатное завершение хода: та же кнопка «Продолжить», что после стопа."""
+        self._limit_hit = True
+        self.write_stopped(text)
+
     def _forget_retry(self) -> None:
         self._retry_payload = None
         self._can_retry = False

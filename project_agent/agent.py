@@ -114,6 +114,7 @@ class Agent:
         on_stream=None,
         on_error=None,
         on_stopped=None,
+        on_limit=None,
         on_checkpoint=None,
         transcript_len=None,
     ) -> None:
@@ -127,6 +128,8 @@ class Agent:
         self.on_stream = on_stream
         self.on_error = on_error
         self.on_stopped = on_stopped or on_chat
+        # Лимит шагов завершает ход штатно: сообщение просит продолжить, как после стопа.
+        self.on_limit = on_limit or self.on_stopped
         self.on_checkpoint = on_checkpoint
         self.transcript_len = transcript_len or (lambda: 0)
         self.provider = None
@@ -327,7 +330,7 @@ class Agent:
                     outcome = self.toolbox.execute(call.name, call.arguments)
                     self.on_journal(outcome.journal)
                     self.provider.add_tool_result(call.id, call.name, outcome.model_text, outcome.images)
-            self.on_chat(f"Достигнут лимит шагов ({max_steps}).")
+            self.on_limit(f"Достигнут лимит шагов ({max_steps}).")
             self._announce_touched()
             self._publish_context(settings)
             self.on_status("Готово")

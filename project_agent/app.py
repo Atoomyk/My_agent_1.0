@@ -161,6 +161,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self._user_bubbles: list[dict] = []
         self._retry_payload: dict | None = None
         self._can_retry = False
+        self._limit_hit = False
         self._retry_buttons: list[tk.Button] = []
         self._checkpoint_buttons: list[tk.Button] = []
         self._tool_groups: list[dict] = []
@@ -198,6 +199,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
             self.stream_chat,
             self.write_retryable_error,
             on_stopped=self.write_stopped,
+            on_limit=self.write_limit,
             on_checkpoint=self._on_checkpoint,
             transcript_len=lambda: len(self.transcript),
         )
@@ -1073,6 +1075,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
 
     def _turn(self, text: str, images: list, settings: dict, resend: bool = False) -> None:
         self._can_retry = False
+        self._limit_hit = False
         try:
             self.agent.run_turn(text, images, settings, self.stop_event, resend=resend)
         except Exception as exc:
@@ -1103,7 +1106,7 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
                 self._set_retry_enabled(False)
             self.set_status("Остановлено")
         elif self._can_retry:
-            self.set_status("Ошибка API")
+            self.set_status("Лимит шагов" if self._limit_hit else "Ошибка API")
             self._set_retry_enabled(True)
         else:
             self._set_retry_enabled(False)
