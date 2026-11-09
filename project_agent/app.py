@@ -11,6 +11,7 @@ from tkinter import font as tkfont
 
 import customtkinter as ctk
 
+from project_agent import __version__
 from project_agent.agent import Agent
 from project_agent.chat_markup import (
     chat_body,
@@ -123,7 +124,7 @@ from project_agent.ui_widgets import (
 class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, ComposerMixin, FooterMixin, SettingsOpsMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("ProjectAgent")
+        self.title(f"ProjectAgent {__version__}")
         self.geometry("1100x760")
         self.minsize(900, 560)
         self.configure(fg_color=INK)
