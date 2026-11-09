@@ -5,13 +5,20 @@ SaveChangesDialog и FontPickDialog — код перенесён из ``project
 без изменения поведения.
 
 Зависимости: только customtkinter, tkinter, ``ui_theme`` (цвета), ``ui_widgets``
-(кнопки/иконки/шрифты). Импортировать ``project_agent.app`` отсюда ЗАПРЕЩЕНО —
-иначе цикл импортов. Всё, что диалогам нужно от приложения, они берут через
-``master`` (переданный App): ``master.project``, ``master.running``,
-``master.checkpoints``, ``master.reject_checkpoint_file(...)``,
+(кнопки/иконки/шрифты) и ``diff_view`` (строки/метрики diff без Tk).
+Импортировать ``project_agent.app`` отсюда ЗАПРЕЩЕНО — иначе цикл импортов.
+Всё, что диалогам нужно от приложения, они берут через ``master`` (переданный
+App): ``master.project``, ``master.running``, ``master.checkpoints``,
+``master.reject_checkpoint_file(...)``, ``master.open_editor_draft(...)``,
 ``master._reload_clean_editor()``, ``master._refresh_tree()``,
 ``master._refresh_git_badge()``, ``master.set_status(...)``,
-``master.ui_font``, ``master.code_font``.
+``master.write_chat(...)``, ``master.ui_font``, ``master.code_font``.
+
+``ConfirmDialog`` — просмотр изменений перед записью: построчный diff с номерами
+строк, метрики (``+N −M``, фрагменты, размеры), переключение фрагментов кликом по
+``@@``, кнопки «Применить» / «Отклонить» / «Открыть в редакторе». ``result``:
+False — отказ (в том числе переход в редактор), True — принять всё, str — текст,
+собранный из принятых фрагментов.
 """
 
 from __future__ import annotations
@@ -21,11 +28,25 @@ import tkinter as tk
 import customtkinter as ctk
 
 from project_agent.config import DEFAULT_CODE_FONT, DEFAULT_UI_FONT
+from project_agent.diff_view import (
+    NUMBER_WIDTH,
+    build_rows,
+    change_stats,
+    format_fragments,
+    format_selection,
+    format_sizes,
+    format_stats,
+    normalize_text,
+    row_line,
+)
 from project_agent.ui_theme import (
     BORDER,
     DIFF_ADD,
+    DIFF_ADD_BG,
     DIFF_DEL,
+    DIFF_DEL_BG,
     DIFF_HUNK,
+    DIFF_HUNK_BG,
     DIFF_PREVIEW_LINES,
     FIELD,
     INK,
@@ -49,32 +70,37 @@ class ConfirmDialog(ctk.CTkToplevel):
         super().__init__(master)
         self.result: bool | str = False
         self._closed = False
-        self._detail = (detail or "").strip()
-        self._expanded = False
-        self._box = None
-        self._expand_btn = None
-        self._hunk_btns: dict[int, ctk.CTkButton] = {}
         self._path = path
-        self._before = before
-        self._after = after
+        self._detail = (detail or "").strip()
+        self._diff_mode = before is not None and after is not None
+        self._before = normalize_text(before) if before is not None else None
+        self._after = normalize_text(after) if after is not None else None
         self._hunks = []
         self._accepted: dict[int, bool] = {}
-        if before is not None and after is not None:
+        self._expanded = False
+        self._box = None
+        self._stats_bar = None
+        self._choice_label = None
+        self._expand_btn = None
+        self._apply_btn = None
+        self._row_count = 0
+        self._line_hunks: dict[int, int] = {}
+        if self._diff_mode:
             from project_agent.hunks import split_hunks
 
-            self._hunks = split_hunks(before, after)
+            self._hunks = split_hunks(self._before, self._after)
             self._accepted = {item.index: True for item in self._hunks}
+            self._row_count = len(build_rows(self._before, self._after))
             if not self._detail:
                 from project_agent.gitops import preview_unified
 
-                self._detail = preview_unified(before, after, path)
+                self._detail = preview_unified(self._before, self._after, path)
         ui = getattr(master, "ui_font", None) or DEFAULT_UI_FONT
         code = getattr(master, "code_font", None) or DEFAULT_CODE_FONT
         self.title("Подтверждение")
-        hunk_ui = len(self._hunks) > 1
-        tall = bool(self._detail) or hunk_ui
-        self.geometry("640x520" if hunk_ui else ("560x420" if tall else "520x220"))
-        self.minsize(480, 200)
+        tall = bool(self._detail) or self._diff_mode
+        self.geometry("780x600" if self._diff_mode else ("600x440" if tall else "520x220"))
+        self.minsize(520, 240)
         self.resizable(True, True)
         self.configure(fg_color=INK)
         self.transient(master)
@@ -82,38 +108,20 @@ class ConfirmDialog(ctk.CTkToplevel):
         self.grid_columnconfigure(0, weight=1)
         row = 0
         ctk.CTkLabel(
-            self, text=path, wraplength=560, justify="left", anchor="w", text_color=TEXT, font=(ui, 13)
-        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(16, 8))
+            self, text=path, wraplength=700, justify="left", anchor="w", text_color=TEXT, font=(ui, 13)
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(16, 6))
         row += 1
         ctk.CTkLabel(
-            self, text=summary, wraplength=560, justify="left", anchor="w", text_color=MUTED, font=(ui, 12)
-        ).grid(row=row, column=0, sticky="ew", padx=16, pady=4)
+            self, text=summary, wraplength=700, justify="left", anchor="w", text_color=MUTED, font=(ui, 12)
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
         row += 1
-        if hunk_ui:
-            hint = ctk.CTkLabel(
-                self,
-                text="Хунки: клик переключает принять/отклонить. Принять запишет выбранные.",
-                wraplength=560,
-                justify="left",
-                anchor="w",
-                text_color=MUTED,
-                font=(ui, 11),
-            )
-            hint.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
+        if self._diff_mode:
+            self._stats_bar = ctk.CTkFrame(self, fg_color="transparent")
+            self._stats_bar.grid(row=row, column=0, sticky="ew", padx=16, pady=(2, 0))
             row += 1
-            hunk_wrap = ctk.CTkScrollableFrame(self, fg_color="transparent", height=72)
-            hunk_wrap.grid(row=row, column=0, sticky="ew", padx=12, pady=2)
+            self._choice_label = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=(ui, 11))
+            self._choice_label.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
             row += 1
-            for item in self._hunks:
-                btn = quiet_button(
-                    hunk_wrap,
-                    self._hunk_caption(item.index),
-                    lambda index=item.index: self._toggle_hunk(index),
-                    width=520,
-                    height=24,
-                )
-                btn.pack(anchor="w", pady=1)
-                self._hunk_btns[item.index] = btn
         if tall:
             self.grid_rowconfigure(row, weight=1)
             self._box = ctk.CTkTextbox(
@@ -126,67 +134,126 @@ class ConfirmDialog(ctk.CTkToplevel):
                 font=(code, 11),
                 wrap="none",
             )
-            self._box.grid(row=row, column=0, sticky="nsew", padx=16, pady=8)
-            inner = self._box._textbox
-            inner.tag_configure("diff_add", foreground=_tone(DIFF_ADD))
-            inner.tag_configure("diff_del", foreground=_tone(DIFF_DEL))
-            inner.tag_configure("diff_hunk", foreground=_tone(DIFF_HUNK))
-            inner.tag_configure("diff_meta", foreground=_tone(MUTED))
-            self._fill_diff(self._preview_text())
+            self._box.grid(row=row, column=0, sticky="nsew", padx=16, pady=6)
+            self._configure_tags()
+            if self._diff_mode:
+                self._box._textbox.bind("<Button-1>", self._on_diff_click, add="+")
+            self._fill()
+            row += 1
+        if self._diff_mode:
+            hint_row = ctk.CTkFrame(self, fg_color="transparent")
+            hint_row.grid(row=row, column=0, sticky="ew", padx=16, pady=(2, 2))
+            ctk.CTkLabel(
+                hint_row,
+                text="Клик по строке @@ переключает принять/отклонить · Ctrl+Enter — применить",
+                anchor="w",
+                text_color=MUTED,
+                font=(ui, 11),
+            ).pack(side="left")
+            quiet_button(hint_row, "Ничего", self._reject_all, width=72, height=22).pack(side="right")
+            quiet_button(hint_row, "Всё", self._accept_all, width=56, height=22).pack(side="right", padx=(0, 4))
             row += 1
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.grid(row=row, column=0, pady=(8, 16))
-        if tall and self._is_truncated() and not hunk_ui:
+        if self._truncated():
             self._expand_btn = quiet_button(bar, "Показать всё", self._expand_diff, width=140)
             self._expand_btn.pack(side="left", padx=8)
-        refuse_label = "Отклонить" if self._detail or self._hunks else "Нет"
-        accept_label = "Принять" if self._detail or self._hunks else "Да"
+        if self._diff_mode and callable(getattr(master, "open_editor_draft", None)):
+            quiet_button(bar, "Открыть в редакторе", self.open_editor, width=170).pack(side="left", padx=8)
+        wordy = self._diff_mode or bool(self._detail)
+        refuse_label = "Отклонить" if wordy else "Нет"
+        accept_label = "Применить" if self._diff_mode else ("Принять" if self._detail else "Да")
         quiet_button(bar, refuse_label, self.refuse, width=120, mark="close").pack(side="left", padx=8)
-        quiet_button(bar, accept_label, self.allow, width=120, primary=True, mark="check").pack(side="left", padx=8)
+        self._apply_btn = quiet_button(bar, accept_label, self.allow, width=130, primary=True, mark="check")
+        self._apply_btn.pack(side="left", padx=8)
         if self._box is not None:
             bind_wheel_scroll(self._box._textbox, self)
+        self._refresh_stats()
         self.protocol("WM_DELETE_WINDOW", self.refuse)
         self.bind("<Escape>", lambda _event: self.refuse())
+        self.bind("<Control-Return>", lambda _event: self.allow())
         self.after(50, self.focus)
 
-    def _hunk_caption(self, index: int) -> str:
-        accepted = self._accepted.get(index, True)
-        mark = "✓" if accepted else "✗"
-        for item in self._hunks:
-            if item.index == index:
-                return f"{mark} {item.label(64)}"
-        return f"{mark} H{index + 1}"
+    def _configure_tags(self) -> None:
+        inner = self._box._textbox
+        inner.tag_configure("diff_num", foreground=_tone(MUTED))
+        inner.tag_configure("diff_add", foreground=_tone(DIFF_ADD), background=_tone(DIFF_ADD_BG))
+        inner.tag_configure("diff_del", foreground=_tone(DIFF_DEL), background=_tone(DIFF_DEL_BG))
+        inner.tag_configure("diff_hunk", foreground=_tone(DIFF_HUNK), background=_tone(DIFF_HUNK_BG))
+        inner.tag_configure("diff_off", foreground=_tone(MUTED))
+        inner.tag_configure("diff_meta", foreground=_tone(MUTED))
 
-    def _toggle_hunk(self, index: int) -> None:
-        self._accepted[index] = not self._accepted.get(index, True)
-        btn = self._hunk_btns.get(index)
-        if btn is not None:
+    def _chosen(self) -> set[int]:
+        return {index for index, ok in self._accepted.items() if ok}
+
+    def _fill(self) -> None:
+        if self._diff_mode:
+            self._fill_rows()
+        else:
+            self._fill_text(self._preview_text())
+
+    def _fill_rows(self) -> None:
+        """Нарисовать предложение целиком: принятые фрагменты цветные, отклонённые приглушены."""
+        if self._box is None:
+            return
+        limit = None if self._expanded else DIFF_PREVIEW_LINES
+        rows = build_rows(self._before or "", self._after or "", accepted=self._chosen(), limit=limit)
+        inner = self._box._textbox
+        self._box.configure(state="normal")
+        inner.delete("1.0", "end")
+        self._line_hunks = {}
+        for number, row in enumerate(rows, start=1):
+            start = inner.index("end-1c")
+            inner.insert("end", row_line(row) + "\n")
+            end = inner.index("end-1c")
+            if row.kind == "hunk" and row.hunk_index is not None:
+                self._line_hunks[number] = row.hunk_index
+            self._tag_row(inner, row, start, end)
+        self._box.configure(state="disabled")
+
+    def _on_diff_click(self, event) -> None:
+        """Клик по строке ``@@`` переключает её фрагмент.
+
+        Тег-биндинги в Text с ``state=disabled`` не вызываются, поэтому ловим
+        событие на самом виджете и переводим координаты в номер строки. Строки
+        фрагмента намеренно не кликабельны: иначе выделение текста мышью
+        переключало бы фрагмент.
+        """
+        if not self._diff_mode or self._box is None:
+            return
+        try:
+            position = self._box._textbox.index(f"@{int(event.x)},{int(event.y)}")
+            number = int(str(position).split(".")[0])
+        except (tk.TclError, ValueError, TypeError):
+            return
+        index = self._line_hunks.get(number)
+        if index is not None:
+            self._toggle_hunk(index)
+
+    def _tag_row(self, inner, row, start, end) -> None:
+        if row.kind == "hunk":
+            inner.tag_add("diff_hunk", start, end)
+            tag = f"hunk_{row.hunk_index}"
+            inner.tag_add(tag, start, end)
             try:
-                btn.configure(text=self._hunk_caption(index))
+                inner.tag_configure(tag, cursor="hand2")
             except tk.TclError:
                 pass
-        if self._before is not None and self._after is not None:
-            from project_agent.gitops import preview_unified
-            from project_agent.hunks import merge_hunks
+            return
+        if row.kind == "skip":
+            inner.tag_add("diff_meta", start, end)
+            return
+        if row.kind in {"add", "del"} and not row.accepted:
+            inner.tag_add("diff_off", start, end)
+            return
+        numbers_end = f"{start} + {NUMBER_WIDTH * 2 + 2} chars"
+        inner.tag_add("diff_num", start, numbers_end)
+        if row.kind == "add":
+            inner.tag_add("diff_add", numbers_end, end)
+        elif row.kind == "del":
+            inner.tag_add("diff_del", numbers_end, end)
 
-            merged = merge_hunks(self._before, self._after, {i for i, ok in self._accepted.items() if ok})
-            self._detail = preview_unified(self._before, merged, self._path or "file")
-            self._expanded = True
-            self._fill_diff(self._detail)
-
-    def _detail_lines(self) -> list[str]:
-        return self._detail.splitlines()
-
-    def _is_truncated(self) -> bool:
-        return (not self._expanded) and len(self._detail_lines()) > DIFF_PREVIEW_LINES
-
-    def _preview_text(self) -> str:
-        lines = self._detail_lines()
-        if self._expanded or len(lines) <= DIFF_PREVIEW_LINES:
-            return self._detail
-        return "\n".join(lines[:DIFF_PREVIEW_LINES] + ["…"])
-
-    def _fill_diff(self, text: str) -> None:
+    def _fill_text(self, text: str) -> None:
         if self._box is None:
             return
         inner = self._box._textbox
@@ -207,34 +274,139 @@ class ConfirmDialog(ctk.CTkToplevel):
                 inner.tag_add("diff_del", start, end)
         self._box.configure(state="disabled")
 
+    def _refresh_stats(self) -> None:
+        if self._stats_bar is None or not self._diff_mode:
+            return
+        for child in self._stats_bar.winfo_children():
+            child.destroy()
+        stats = change_stats(self._before or "", self._after or "", self._chosen())
+        ui = getattr(self.master, "ui_font", None) or DEFAULT_UI_FONT
+        if stats.hunks == 0:
+            ctk.CTkLabel(
+                self._stats_bar,
+                text=format_stats(stats),
+                anchor="w",
+                text_color=MUTED,
+                font=(ui, 11),
+            ).pack(side="left")
+        else:
+            ctk.CTkLabel(
+                self._stats_bar, text=f"{stats.kind} · ", anchor="w", text_color=MUTED, font=(ui, 11)
+            ).pack(side="left")
+            ctk.CTkLabel(
+                self._stats_bar, text=f"+{stats.plus}", anchor="w", text_color=DIFF_ADD, font=(ui, 11)
+            ).pack(side="left")
+            rest = f" −{stats.minus} · {format_fragments(stats.hunks)} · {format_sizes(stats)}"
+            ctk.CTkLabel(self._stats_bar, text=rest, anchor="w", text_color=MUTED, font=(ui, 11)).pack(side="left")
+        if self._choice_label is not None:
+            try:
+                self._choice_label.configure(text=format_selection(stats))
+            except tk.TclError:
+                pass
+        if self._apply_btn is not None:
+            state = "disabled" if stats.nothing else "normal"
+            try:
+                self._apply_btn.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _toggle_hunk(self, index: int) -> None:
+        """Переключить фрагмент: предложение агента остаётся видимым целиком."""
+        if index not in self._accepted:
+            return
+        self._accepted[index] = not self._accepted[index]
+        self._fill_rows()
+        self._refresh_stats()
+
+    def _accept_all(self) -> None:
+        for index in list(self._accepted):
+            self._accepted[index] = True
+        self._fill_rows()
+        self._refresh_stats()
+
+    def _reject_all(self) -> None:
+        for index in list(self._accepted):
+            self._accepted[index] = False
+        self._fill_rows()
+        self._refresh_stats()
+
+    def _detail_lines(self) -> list[str]:
+        return self._detail.splitlines()
+
+    def _truncated(self) -> bool:
+        if self._expanded:
+            return False
+        if self._diff_mode:
+            return self._row_count > DIFF_PREVIEW_LINES
+        return len(self._detail_lines()) > DIFF_PREVIEW_LINES
+
+    def _preview_text(self) -> str:
+        lines = self._detail_lines()
+        if self._expanded or len(lines) <= DIFF_PREVIEW_LINES:
+            return self._detail
+        return "\n".join(lines[:DIFF_PREVIEW_LINES] + ["…"])
+
     def _expand_diff(self) -> None:
-        if self._expanded or self._box is None:
+        if self._expanded:
             return
         self._expanded = True
-        self._fill_diff(self._detail)
+        self._fill()
         if self._expand_btn is not None:
             self._expand_btn.configure(state="disabled")
         try:
-            self.geometry("640x520")
+            self.geometry("900x680")
         except tk.TclError:
             pass
+
+    def open_editor(self) -> None:
+        """Отдать предложение в панель редактора как несохранённый черновик (без записи)."""
+        if self._closed or not self._diff_mode:
+            return
+        from project_agent.hunks import merge_hunks
+
+        opener = getattr(self.master, "open_editor_draft", None)
+        if not callable(opener):
+            return
+        chosen = self._chosen()
+        if not chosen or len(chosen) == len(self._hunks):
+            text = self._after or ""
+        else:
+            text = merge_hunks(self._before or "", self._after or "", chosen)
+        if not opener(self._path, self._before or "", text):
+            try:
+                self.grab_set()
+            except tk.TclError:
+                pass
+            return
+        self._closed = True
+        self.result = False
+        message = "Открыто в редакторе (черновик), запись отменена"
+        for notify in ("write_chat", "set_status"):
+            handler = getattr(self.master, notify, None)
+            if callable(handler):
+                try:
+                    handler(message)
+                except Exception:
+                    pass
+        self.grab_release()
+        self.destroy()
 
     def allow(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        if self._hunks and self._before is not None and self._after is not None:
-            chosen = {index for index, ok in self._accepted.items() if ok}
+        if self._diff_mode and self._hunks:
+            chosen = self._chosen()
             if not chosen:
-                self.result = False
-            elif len(chosen) == len(self._hunks):
+                return
+            if len(chosen) == len(self._hunks):
                 self.result = True
             else:
                 from project_agent.hunks import merge_hunks
 
-                self.result = merge_hunks(self._before, self._after, chosen)
+                self.result = merge_hunks(self._before or "", self._after or "", chosen)
         else:
             self.result = True
+        self._closed = True
         self.grab_release()
         self.destroy()
 

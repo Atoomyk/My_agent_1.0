@@ -48,6 +48,10 @@ CTX_FULL = ("#c45a4a", "#d46a5a")
 DIFF_ADD = ("#2f6b3c", "#7dba8a")
 DIFF_DEL = ("#a33d3d", "#e08a8a")
 DIFF_HUNK = ("#6a5a8a", "#b0a0d0")
+# Фон строк diff: добавленные/удалённые/заголовки фрагментов.
+DIFF_ADD_BG = ("#e2efe0", "#223026")
+DIFF_DEL_BG = ("#f7dfdc", "#3a2321")
+DIFF_HUNK_BG = ("#e8e3f2", "#2b2536")
 GIT_MOD = ("#b8860b", "#e0b84a")  # modified / dirty folder
 GIT_NEW = ("#2f6b3c", "#7dba8a")  # untracked / added
 GIT_DEL = ("#a33d3d", "#e08a8a")  # deleted (если ещё виден в дереве)

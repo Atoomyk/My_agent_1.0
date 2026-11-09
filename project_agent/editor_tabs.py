@@ -66,6 +66,19 @@ class EditorTabs:
         self._active = len(self._tabs) - 1
         return self._active
 
+    def open_draft(self, path: str, disk_text: str, draft_text: str) -> int:
+        """Открыть путь как несохранённый черновик (saved = текст с диска)."""
+        index = self.find(path)
+        if index < 0:
+            self._tabs.append(EditorTab(path=path, saved=disk_text, text=draft_text))
+            self._active = len(self._tabs) - 1
+            return self._active
+        tab = self._tabs[index]
+        tab.saved = disk_text
+        tab.text = draft_text
+        self._active = index
+        return index
+
     def select(self, index: int) -> EditorTab | None:
         if 0 <= index < len(self._tabs):
             self._active = index

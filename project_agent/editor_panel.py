@@ -151,6 +151,29 @@ class EditorPanelMixin:
         self._rebuild_editor_tab_bar()
         self.after(20, lambda: self._jump_editor_line(line))
 
+    def open_editor_draft(self, relative: str, disk_text: str, draft_text: str) -> bool:
+        """Показать предложенный текст как черновик вкладки, не записывая на диск.
+
+        Возвращает False, если черновик не открыли (нет проекта, путь вне проекта
+        или пользователь отказался заменить уже существующие несохранённые правки).
+        """
+        if self.project is None:
+            return False
+        relative = normalize_relative(relative)
+        if not relative:
+            return False
+        self._flush_editor_to_tab()
+        existing = self.editor_tabs.find(relative)
+        if existing >= 0 and self.editor_tabs.tabs[existing].dirty:
+            if not self._ask(relative, "В редакторе есть несохранённые правки. Заменить черновик?"):
+                return False
+        self.editor_tabs.open_draft(relative, disk_text, draft_text)
+        self._load_active_tab_into_editor()
+        self._rebuild_editor_tab_bar()
+        self._refresh_editor_tab_labels()
+        self.set_status("Черновик открыт в редакторе")
+        return True
+
     def _jump_editor_line(self, line: int) -> None:
         if not self.editor_open:
             return
