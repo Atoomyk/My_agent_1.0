@@ -30,12 +30,12 @@ from project_agent.clipboard import (
     set_clipboard,
     _on_layout_clipboard,
 )
+from project_agent.chat_store import ChatStoreMixin, _GROUP_PREFIX
 from project_agent.chat_view import ChatViewMixin
-from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, new_chat_id, save_chat
+from project_agent.chats import new_chat_id
 from project_agent.checkpoints import (
     CheckpointStack,
     checkpoint_mark,
-    delete_checkpoints,
     parse_checkpoint_mark,
     restorable_paths,
     restore_one_file,
@@ -51,7 +51,6 @@ from project_agent.config import (
     needs_api_key,
     save_config,
     save_font,
-    save_last_chats,
     save_theme,
 )
 from project_agent.context_attach import (
@@ -63,14 +62,12 @@ from project_agent.context_attach import (
     parse_at_paths,
 )
 from project_agent.images import prepare_image
-_GROUP_PREFIX = "__group__:"
-_GROUP_INDENT = "   "
 from project_agent.mcp_client import McpHub
 from project_agent.editor_panel import EditorPanelMixin
 from project_agent.editor_tabs import EditorTabs
 from project_agent.footer import FooterMixin
 from project_agent.output_panel import OutputPanelMixin
-from project_agent.secrets import Scrubber, SecretVault, literals_from_settings, scrub_outbound
+from project_agent.secrets import SecretVault
 from project_agent.index_store import build_index
 from project_agent.testing import (
     DEFAULT_SHELL_PER_TURN,
@@ -121,7 +118,7 @@ from project_agent.ui_widgets import (
 )
 
 
-class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, ComposerMixin, FooterMixin, SettingsOpsMixin, ctk.CTk):
+class App(ChatStoreMixin, OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, ComposerMixin, FooterMixin, SettingsOpsMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"ProjectAgent {__version__}")
@@ -759,47 +756,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         self._show_folder()
         self.after_idle(self._restore_last_chat)
 
-    def _restore_last_chat(self) -> None:
-        if self.project is None:
-            return
-        chat_id = self.last_chats.get(folder_key(self.project), "")
-        record = load_chat(chat_id) if chat_id else None
-        if record is None or folder_key(record["project_dir"]) != folder_key(self.project):
-            self._refresh_chat_list()
-            return
-        self._open_chat(record["id"])
-
-    def _remember_last_chat(self) -> None:
-        if self.project is None:
-            return
-        key = folder_key(self.project)
-        value = self.chat_id or ""
-        if key in self.last_chats and self.last_chats[key] == value:
-            return
-        self.last_chats[key] = value
-        try:
-            save_last_chats(self.last_chats)
-        except Exception as exc:
-            self.set_status(f"Последний чат не запомнен: {exc}")
-
-    def _prune_last_chats(self) -> None:
-        kept: dict[str, str] = {}
-        for key, chat_id in self.last_chats.items():
-            if not key or not Path(key).is_dir():
-                continue
-            if chat_id:
-                record = load_chat(chat_id)
-                if record is None or folder_key(record["project_dir"]) != key:
-                    continue
-            kept[key] = chat_id
-        if kept == self.last_chats:
-            return
-        self.last_chats = kept
-        try:
-            save_last_chats(kept)
-        except Exception:
-            pass
-
     def choose_folder(self) -> None:
         if self.running:
             return
@@ -824,25 +780,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         except Exception as exc:
             self.write_chat(f"Индекс не построен: {exc}")
         self._persist("Папка выбрана")
-
-    def new_chat(self) -> None:
-        if self.running:
-            return
-        self._hide_at_popup()
-        self.clear_attachments()
-        self._store_chat()
-        self.chat_id = None
-        self.chat_title = ""
-        self.transcript.clear()
-        self._forget_retry()
-        self.checkpoints.clear()
-        self._clear_box(self.chat)
-        self.agent.reset_session(announce=False)
-        self._apply_context(0, self.context_limit, False)
-        self._remember_last_chat()
-        self._refresh_chat_list()
-        self._fit_labels()
-        self.set_status("Новый чат")
 
     def _file_menu(self, event) -> str | None:
         row = self.tree.identify_row(event.y)
@@ -1341,134 +1278,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
         else:
             self.set_status("Правки откачены")
 
-    def _remember(self, text: str) -> None:
-        line = text.rstrip()
-        if not line or not self.chat_id:
-            return
-        self.transcript.append(line)
-        # Новая строка в ленте — единственный повод сдвинуть дату изменения беседы.
-        self._store_chat(fresh=True)
-
-    def _store_chat(self, fresh: bool = False) -> None:
-        """Сохранить текущий чат.
-
-        По умолчанию флаг снят: открытие, переключение и закрытие чата не должны
-        делать беседу «свежей» — дату обновляет только ``_remember``.
-        """
-        if not self.chat_id or self.project is None or not self.transcript:
-            return
-        try:
-            scrubber = Scrubber(self.vault, literals_from_settings(self.collect_settings()))
-            lines = [scrubber(line) for line in self.transcript]
-            title = scrubber(self.chat_title) or "Чат"
-            provider, messages = self.agent.export_session()
-            if messages:
-                messages = scrub_outbound(messages, scrubber)
-            save_chat(
-                self.chat_id,
-                title,
-                str(self.project),
-                lines,
-                messages=messages,
-                provider=provider,
-                fresh=fresh,
-            )
-        except Exception as exc:
-            self.set_status(f"Чат не сохранён: {exc}")
-
-    def _refresh_chat_list(self) -> None:
-        if not hasattr(self, "chat_tree"):
-            return
-        self._chat_list_lock = True
-        try:
-            self.chat_tree.delete(*self.chat_tree.get_children())
-            self._style_chat_groups()
-            if self.project is None:
-                return
-            for key, label, items in group_chats(list_chats(str(self.project))):
-                group_iid = f"{_GROUP_PREFIX}{key}"
-                # Пробелы в начале дают отступ заголовка; беседы идут без отступа
-                self.chat_tree.insert(
-                    "", "end", iid=group_iid, text=f"{_GROUP_INDENT}{label}", open=True, tags=("group",)
-                )
-                for item in items:
-                    self.chat_tree.insert(group_iid, "end", iid=item["id"], text=item["title"])
-            if self.chat_id and self.chat_tree.exists(self.chat_id):
-                self.chat_tree.selection_set(self.chat_id)
-                self.chat_tree.focus(self.chat_id)
-                self.chat_tree.see(self.chat_id)
-        finally:
-            self._chat_list_lock = False
-
-    def _style_chat_groups(self) -> None:
-        if not hasattr(self, "chat_tree"):
-            return
-        self.chat_tree.tag_configure(
-            "group",
-            font=(self.ui_font, 8, "italic"),
-            foreground=_tone(HINT),
-        )
-
-    def _on_chat_select(self, _event=None) -> None:
-        if self._chat_list_lock:
-            return
-        selected = self.chat_tree.selection()
-        if not selected:
-            return
-        chat_id = str(selected[0])
-        if chat_id.startswith(_GROUP_PREFIX):
-            # Заголовок группы: только раскрыть/свернуть, чат не открываем
-            self._chat_list_lock = True
-            try:
-                self.chat_tree.selection_remove(chat_id)
-                if self.chat_id and self.chat_tree.exists(self.chat_id):
-                    self.chat_tree.selection_set(self.chat_id)
-            finally:
-                self._chat_list_lock = False
-            return
-        if chat_id == self.chat_id:
-            return
-        if self.running:
-            self._refresh_chat_list()
-            return
-        self._open_chat(chat_id)
-
-    def _open_chat(self, chat_id: str) -> None:
-        self._store_chat()
-        record = load_chat(chat_id)
-        if record is None or self.project is None:
-            self._refresh_chat_list()
-            return
-        self.chat_id = record["id"]
-        self._remember_last_chat()
-        self.chat_title = record["title"]
-        self.transcript = list(record["lines"])
-        self._forget_retry()
-        self.checkpoints.load(self.chat_id, str(self.project))
-        self._sync_checkpoint_marks()
-        self._show_transcript()
-        from project_agent.tools import normalize_agent_mode
-
-        self.agent._agent_mode = normalize_agent_mode(self.collect_settings().get("agent_mode"))
-        restored = False
-        messages = record.get("messages") or []
-        provider = record.get("provider") or ""
-        if messages and provider:
-            restored = self.agent.restore_session(provider, messages)
-        if not restored:
-            self.agent.reset_session(announce=False)
-            self.set_status("Чат открыт. Модель начинает заново.")
-        else:
-            self.set_status("Чат открыт. История модели восстановлена.")
-            settings = self.collect_settings()
-            if self.agent.provider is not None:
-                try:
-                    self.agent._publish_context(settings)
-                except Exception:
-                    self._apply_context(0, self.context_limit, False)
-        self._refresh_chat_list()
-        self._fit_labels()
-
     def _sync_checkpoint_marks(self) -> None:
         valid = {item.id for item in self.checkpoints.items}
         kept = []
@@ -1495,35 +1304,6 @@ class App(OutputPanelMixin, ChatViewMixin, SidePanelMixin, EditorPanelMixin, Com
                 self.checkpoints.save()
             except Exception:
                 pass
-
-    def delete_chat_item(self, chat_id: str) -> None:
-        if self.running or not chat_id:
-            return
-        title = self.chat_tree.item(chat_id, "text") if self.chat_tree.exists(chat_id) else self.chat_title
-        dialog = ConfirmDialog(self, title or "Чат", "Удалить этот чат?")
-        self._dialog = dialog
-        self.wait_window(dialog)
-        self._dialog = None
-        if not dialog.result:
-            return
-        try:
-            delete_chat(chat_id)
-            delete_checkpoints(chat_id)
-        except Exception as exc:
-            self.write_chat(f"Чат не удалён: {exc}")
-            return
-        if chat_id == self.chat_id:
-            self.chat_id = None
-            self.chat_title = ""
-            self.transcript.clear()
-            self._forget_retry()
-            self.checkpoints.clear()
-            self._clear_box(self.chat)
-            self.agent.reset_session(announce=False)
-        self._remember_last_chat()
-        self._refresh_chat_list()
-        self._fit_labels()
-        self.set_status("Чат удалён")
 
     def set_status(self, text: str) -> None:
         shown = text

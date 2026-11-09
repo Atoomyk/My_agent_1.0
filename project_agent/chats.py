@@ -11,6 +11,19 @@ from pathlib import Path
 from project_agent.config import config_dir
 
 _ID = re.compile(r"[0-9a-f]{32}")
+# Версия формата файла чата. 0 — файл без поля ``version`` (сохранён до появления версии).
+CHAT_VERSION = 1
+# Метаданные пишутся в начало файла, поэтому список бесед читает только префикс
+# и не разбирает lines/messages целиком.
+META_HEAD_CHARS = 8_192
+_META_VERSION = re.compile(r'"version"\s*:\s*(\d{1,9})')
+_META_EMPTY_LINES = re.compile(r'"lines"\s*:\s*\[\s*\]')
+_META_FIELDS = (
+    ("id", re.compile(r'"id"\s*:\s*"([0-9a-f]{32})"')),
+    ("title", re.compile(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"')),
+    ("project_dir", re.compile(r'"project_dir"\s*:\s*"((?:[^"\\]|\\.)*)"')),
+    ("updated", re.compile(r'"updated"\s*:\s*"((?:[^"\\]|\\.)*)"')),
+)
 MAX_LINES = 400
 MAX_LINE = 8_000
 MAX_MESSAGES = 200
@@ -40,6 +53,48 @@ def _norm(path: str) -> str:
     if not text:
         return ""
     return os.path.normcase(str(Path(text).expanduser().resolve(strict=False)))
+
+
+def _clean_title(raw) -> str:
+    return " ".join(str(raw or "").split())[:80] or "Чат"
+
+
+def chat_version(data) -> int:
+    """Версия формата записи. Файлы без поля считаем нулевой версией."""
+    if not isinstance(data, dict):
+        return 0
+    try:
+        value = int(data.get("version", 0))
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def _migrate_0_to_1(data: dict) -> dict:
+    # Версия 1 отличается от 0 только явным полем version: набор полей тот же,
+    # чистку и обрезку по-прежнему делает _record. Шаг нужен как место для
+    # будущих переносов (отдельные файлы ленты и истории модели).
+    data["version"] = 1
+    return data
+
+
+_MIGRATIONS = {0: _migrate_0_to_1}
+
+
+def migrate(data):
+    """Привести запись чата к ``CHAT_VERSION``. None — формат новее, чем мы умеем читать."""
+    if not isinstance(data, dict):
+        return None
+    version = chat_version(data)
+    if version > CHAT_VERSION:
+        return None
+    while version < CHAT_VERSION:
+        step = _MIGRATIONS.get(version)
+        if step is None:
+            return None
+        data = step(data)
+        version += 1
+    return data
 
 
 def _clean_lines(raw) -> list[str]:
@@ -195,12 +250,13 @@ def sanitize_messages(raw) -> list[dict]:
 
 
 def _record(data) -> dict | None:
-    if not isinstance(data, dict):
+    data = migrate(data)
+    if data is None:
         return None
     chat_id = str(data.get("id") or "")
     if not _ID.fullmatch(chat_id):
         return None
-    title = " ".join(str(data.get("title") or "").split())[:80] or "Чат"
+    title = _clean_title(data.get("title"))
     project_dir = str(data.get("project_dir") or "")
     updated = str(data.get("updated") or "")
     lines = _clean_lines(data.get("lines"))
@@ -211,7 +267,9 @@ def _record(data) -> dict | None:
     if not messages or not provider:
         messages = []
         provider = ""
+    # version идёт первым: список чатов читает только начало файла.
     return {
+        "version": CHAT_VERSION,
         "id": chat_id,
         "title": title,
         "project_dir": project_dir,
@@ -229,6 +287,42 @@ def _read_record(path: Path) -> dict | None:
         return _record(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _read_meta(path: Path) -> dict | None:
+    """Метаданные из начала файла — без разбора lines и messages.
+
+    None означает «читай файл целиком»: старый/нестандартный порядок полей,
+    битый JSON, пустая лента. Полный разбор остаётся источником истины.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(META_HEAD_CHARS)
+    except OSError:
+        return None
+    if not head:
+        return None
+    found_version = _META_VERSION.search(head)
+    if found_version is not None and int(found_version.group(1)) > CHAT_VERSION:
+        return None
+    if _META_EMPTY_LINES.search(head):
+        # _record такую запись отбрасывает — ведём себя так же.
+        return None
+    meta: dict[str, str] = {}
+    previous = -1
+    for key, pattern in _META_FIELDS:
+        match = pattern.search(head)
+        if match is None or match.start() <= previous:
+            return None
+        previous = match.start()
+        if key == "id":
+            meta[key] = match.group(1)
+            continue
+        try:
+            meta[key] = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            return None
+    return meta
 
 
 def save_chat(
@@ -295,6 +389,17 @@ def list_chats(project_dir: str) -> list[dict]:
     found = []
     for path in folder.glob("*.json"):
         if path.suffix != ".json" or path.name.endswith(".tmp"):
+            continue
+        meta = _read_meta(path)
+        if meta is not None and meta["id"] == path.stem:
+            if _norm(meta["project_dir"]) == target:
+                found.append(
+                    {
+                        "id": meta["id"],
+                        "title": _clean_title(meta["title"]),
+                        "updated": meta["updated"],
+                    }
+                )
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
