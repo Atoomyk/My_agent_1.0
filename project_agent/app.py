@@ -152,6 +152,8 @@ class App(ChatStoreMixin, OutputPanelMixin, ChatViewMixin, SidePanelMixin, Edito
         self.chat_title = ""
         self.transcript: list[str] = []
         self._chat_list_lock = False
+        self._chat_save_job = None
+        self._chat_save_pending = False
         self._stream_open = False
         self._stream_origin = "1.0"
         self._stream_body_at = "1.0"

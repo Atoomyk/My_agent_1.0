@@ -2,7 +2,9 @@
 
 Перенесено из ``project_agent.app`` дословно, без изменения поведения.
 Внутри — только та часть ``App``, которая относится к чатам: создание беседы
-(``new_chat``), запись ленты и истории модели (``_store_chat``/``_remember``),
+(``new_chat``), запись ленты и истории модели (``_remember`` → отложенная запись
+``_schedule_chat_save``/``_run_chat_save`` с паузой ``CHAT_SAVE_DELAY_MS``,
+немедленная ``_store_chat`` → ``_write_chat``),
 список чатов в боковой панели (``_refresh_chat_list``, ``_style_chat_groups``,
 ``_on_chat_select``), открытие и восстановление (``_open_chat``,
 ``_restore_last_chat``), память о последнем чате (``_remember_last_chat``,
@@ -39,9 +41,46 @@ from project_agent.ui_widgets import _tone
 
 _GROUP_PREFIX = "__group__:"
 _GROUP_INDENT = "   "
+# Пауза перед отложенной записью чата: за один ход строк в ленте много,
+# а полная перезапись файла на каждую — квадратичная цена.
+CHAT_SAVE_DELAY_MS = 800
 
 
 class ChatStoreMixin:
+    def _schedule_chat_save(self) -> None:
+        """Отложить запись чата: за один ход строк в ленте много.
+
+        Каждая строка раньше переписывала файл целиком (Scrubber по всей ленте,
+        export_session по всей истории, json.dumps всего файла), то есть цена
+        хода росла квадратично. Теперь запись одна — после паузы. Все прочие
+        вызовы ``_store_chat`` остаются синхронными и вызывают ``_cancel_chat_save``.
+        """
+        self._chat_save_pending = True
+        if getattr(self, "_chat_save_job", None) is not None:
+            return
+        try:
+            self._chat_save_job = self.after(CHAT_SAVE_DELAY_MS, self._run_chat_save)
+        except Exception:
+            # Нет цикла Tk (тесты, ранний старт) — пишем сразу, как раньше.
+            self._run_chat_save()
+
+    def _run_chat_save(self) -> None:
+        self._chat_save_job = None
+        if not getattr(self, "_chat_save_pending", False):
+            return
+        self._chat_save_pending = False
+        self._write_chat(fresh=True)
+
+    def _cancel_chat_save(self) -> None:
+        job = getattr(self, "_chat_save_job", None)
+        if job is None:
+            return
+        self._chat_save_job = None
+        try:
+            self.after_cancel(job)
+        except Exception:
+            pass
+
     def new_chat(self) -> None:
         if self.running:
             return
@@ -67,10 +106,22 @@ class ChatStoreMixin:
             return
         self.transcript.append(line)
         # Новая строка в ленте — единственный повод сдвинуть дату изменения беседы.
-        self._store_chat(fresh=True)
+        self._schedule_chat_save()
 
     def _store_chat(self, fresh: bool = False) -> None:
-        """Сохранить текущий чат.
+        """Записать чат сразу — там, где откладывать нельзя.
+
+        Отложенная запись отменяется: если в ленте были несохранённые строки,
+        ``fresh`` принудительно включается, иначе переключение чата сразу после
+        сообщения оставило бы старую дату и беседа не поднялась бы в списке.
+        """
+        pending = bool(getattr(self, "_chat_save_pending", False))
+        self._cancel_chat_save()
+        self._chat_save_pending = False
+        self._write_chat(fresh=fresh or pending)
+
+    def _write_chat(self, fresh: bool = False) -> None:
+        """Записать чат на диск.
 
         По умолчанию флаг снят: открытие, переключение и закрытие чата не должны
         делать беседу «свежей» — дату обновляет только ``_remember``.
