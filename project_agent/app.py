@@ -305,6 +305,7 @@ class App(ChatStoreMixin, OutputPanelMixin, ChatViewMixin, SidePanelMixin, Edito
         )
         self.chat_head.grid(row=0, column=0, sticky="ew")
         self.chat_head.bind("<Configure>", lambda _event: self._fit_labels())
+        self.chat_head.bind("<Double-Button-1>", lambda _event: self.rename_current_chat())
         self.git_label = ctk.CTkLabel(
             head_bar, text="", anchor="e", text_color=MUTED, font=self._font(11), cursor="hand2"
         )
@@ -446,6 +447,7 @@ class App(ChatStoreMixin, OutputPanelMixin, ChatViewMixin, SidePanelMixin, Edito
             activeforeground=_tone(TEXT),
             font=self._px_font(12),
         )
+        menu.add_command(label="Переименовать", command=lambda: self.rename_chat_item(str(row)))
         menu.add_command(label="Удалить", command=lambda: self.delete_chat_item(str(row)))
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -963,7 +965,8 @@ class App(ChatStoreMixin, OutputPanelMixin, ChatViewMixin, SidePanelMixin, Edito
         created = self.chat_id is None
         if created:
             self.chat_id = new_chat_id()
-            self.chat_title = " ".join(note.split())[:80] or "Чат"
+            if not self.chat_title:
+                self.chat_title = " ".join(note.split())[:80] or "Чат"
             self.transcript.clear()
             self.checkpoints.clear()
             self._remember_last_chat()

@@ -704,7 +704,13 @@ class TurnDiffDialog(ctk.CTkToplevel):
 
 
 class NameDialog(ctk.CTkToplevel):
-    def __init__(self, master, initial: str = "", title: str = "Профиль") -> None:
+    def __init__(
+        self,
+        master,
+        initial: str = "",
+        title: str = "Профиль",
+        label: str = "Имя профиля",
+    ) -> None:
         super().__init__(master)
         self.result = ""
         self._closed = False
@@ -715,7 +721,7 @@ class NameDialog(ctk.CTkToplevel):
         self.configure(fg_color=INK)
         self.transient(master)
         self.grab_set()
-        ctk.CTkLabel(self, text="Имя профиля", anchor="w", text_color=MUTED, font=(ui, 12)).pack(
+        ctk.CTkLabel(self, text=label, anchor="w", text_color=MUTED, font=(ui, 12)).pack(
             fill="x", padx=16, pady=(16, 4)
         )
         self.entry = ctk.CTkEntry(

@@ -435,6 +435,24 @@ def group_chats(items: list[dict], today: date | None = None) -> list[tuple[str,
     return [(key, CHAT_GROUP_LABELS[key], buckets[key]) for key in CHAT_GROUP_LABELS if buckets[key]]
 
 
+def rename_chat(chat_id: str, title: str) -> str | None:
+    """Переименовать сохранённый чат, не меняя дату ``updated`` и историю."""
+    record = load_chat(chat_id)
+    if record is None:
+        return None
+    cleaned = _clean_title(title)
+    save_chat(
+        record["id"],
+        cleaned,
+        record["project_dir"],
+        record["lines"],
+        messages=record["messages"],
+        provider=record["provider"],
+        fresh=False,
+    )
+    return cleaned
+
+
 def delete_chat(chat_id: str) -> None:
     path = chat_path(chat_id)
     if path.is_file():

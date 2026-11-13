@@ -145,6 +145,7 @@ class SidePanelMixin:
         self.chat_tree.configure(yscrollcommand=chat_scroll.set)
         self.chat_tree.bind("<<TreeviewSelect>>", self._on_chat_select)
         self.chat_tree.bind("<Button-3>", self._chat_menu)
+        self.chat_tree.bind("<F2>", self._on_chat_f2)
         self.side_tabs.set("Файлы")
         self._show_side_tab("Файлы")
         self.body.add(side, stretch="never", minsize=SIDE_MIN, sticky="nsew")

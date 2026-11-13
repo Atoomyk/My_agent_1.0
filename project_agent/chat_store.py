@@ -31,10 +31,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, save_chat
+from project_agent.chats import delete_chat, group_chats, list_chats, load_chat, rename_chat, save_chat
 from project_agent.checkpoints import delete_checkpoints
 from project_agent.config import folder_key, save_last_chats
-from project_agent.dialogs import ConfirmDialog
+from project_agent.dialogs import ConfirmDialog, NameDialog
 from project_agent.secrets import Scrubber, literals_from_settings, scrub_outbound
 from project_agent.ui_theme import HINT
 from project_agent.ui_widgets import _tone
@@ -280,6 +280,82 @@ class ChatStoreMixin:
             save_last_chats(kept)
         except Exception:
             pass
+
+    def _on_chat_f2(self, _event=None) -> str | None:
+        if self.running or not hasattr(self, "chat_tree"):
+            return None
+        selected = self.chat_tree.selection()
+        if not selected:
+            return None
+        chat_id = str(selected[0])
+        if chat_id.startswith(_GROUP_PREFIX):
+            return None
+        self.rename_chat_item(chat_id)
+        return "break"
+
+    def _ask_chat_title(self, initial: str) -> str:
+        dialog = NameDialog(
+            self,
+            initial=initial,
+            title="Переименовать беседу",
+            label="Название беседы",
+        )
+        self.wait_window(dialog)
+        raw = " ".join(str(dialog.result or "").split())
+        if not raw:
+            return ""
+        scrubber = Scrubber(self.vault, literals_from_settings(self.collect_settings()))
+        return " ".join(scrubber(raw).split())[:80]
+
+    def rename_current_chat(self) -> None:
+        if self.running:
+            return
+        if self.chat_id:
+            self.rename_chat_item(self.chat_id)
+            return
+        if self.project is None:
+            return
+        name = self._ask_chat_title(self.chat_title)
+        if not name or name == self.chat_title:
+            return
+        self.chat_title = name
+        self._fit_labels()
+        self.set_status("Беседа переименована")
+
+    def rename_chat_item(self, chat_id: str) -> None:
+        if self.running or not chat_id or str(chat_id).startswith(_GROUP_PREFIX):
+            return
+        if hasattr(self, "chat_tree") and self.chat_tree.exists(chat_id):
+            old = str(self.chat_tree.item(chat_id, "text") or "")
+        elif chat_id == self.chat_id:
+            old = self.chat_title
+        else:
+            record = load_chat(chat_id)
+            old = record["title"] if record else ""
+        name = self._ask_chat_title(old)
+        if not name or name == old:
+            return
+        if chat_id == self.chat_id and getattr(self, "_chat_save_pending", False):
+            self._store_chat()
+        try:
+            saved_title = rename_chat(chat_id, name)
+        except Exception as exc:
+            self.write_chat(f"Чат не переименован: {exc}")
+            return
+        if saved_title is None:
+            if chat_id == self.chat_id:
+                self.chat_title = name
+                self._fit_labels()
+                self.set_status("Беседа переименована")
+            else:
+                self._refresh_chat_list()
+                self.set_status("Чат не найден")
+            return
+        if chat_id == self.chat_id:
+            self.chat_title = saved_title
+            self._fit_labels()
+        self._refresh_chat_list()
+        self.set_status("Беседа переименована")
 
     def delete_chat_item(self, chat_id: str) -> None:
         if self.running or not chat_id:
