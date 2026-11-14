@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import re
 from pathlib import Path
@@ -144,68 +145,56 @@ def _split_import_names(raw: str) -> list[str]:
 def _sym(name: str, qualname: str, kind: str, line: int, lang: str) -> dict:
     return {"name": name, "qualname": qualname, "kind": kind, "line": line, "lang": lang}
 
+def _collect_module_imports(statements: list[ast.stmt], imports: list[dict]) -> None:
+    for node in statements:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append({"module": alias.name, "names": [], "line": node.lineno})
+        elif isinstance(node, ast.ImportFrom):
+            module = ("." * node.level) + (node.module or "")
+            names = [alias.name for alias in node.names]
+            imports.append({"module": module, "names": names or ["*"], "line": node.lineno})
+        elif isinstance(node, ast.If):
+            _collect_module_imports(node.body, imports)
+            _collect_module_imports(node.orelse, imports)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            _collect_module_imports(node.body, imports)
+        elif isinstance(node, ast.Try):
+            _collect_module_imports(node.body, imports)
+            for handler in node.handlers:
+                _collect_module_imports(handler.body, imports)
+            _collect_module_imports(node.orelse, imports)
+            _collect_module_imports(node.finalbody, imports)
+        elif hasattr(ast, "TryStar") and isinstance(node, ast.TryStar):
+            _collect_module_imports(node.body, imports)
+            for handler in node.handlers:
+                _collect_module_imports(handler.body, imports)
+            _collect_module_imports(node.orelse, imports)
+            _collect_module_imports(node.finalbody, imports)
+        elif hasattr(ast, "Match") and isinstance(node, ast.Match):
+            for case in node.cases:
+                _collect_module_imports(case.body, imports)
+
 
 def parse_python_file(text: str) -> tuple[list[dict], list[dict]]:
-    """Топ-уровень class/def + методы класса; import / from import."""
+    """AST-based Python index of module/class functions and imports."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, TypeError):
+        return [], []
+
     symbols: list[dict] = []
     imports: list[dict] = []
-    class_name: str | None = None
-    class_indent = -1
-    method_indent = -1
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        class_match = _CLASS.match(line)
-        if class_match:
-            indent = _indent_width(class_match.group(1))
-            name = class_match.group(2)
-            if indent == 0:
-                class_name = name
-                class_indent = 0
-                method_indent = -1
-                symbols.append(_sym(name, name, "class", number, "py"))
-            elif class_name is not None and indent <= class_indent:
-                class_name = None
-                class_indent = -1
-                method_indent = -1
-            continue
-        def_match = _DEF.match(line)
-        if def_match:
-            indent = _indent_width(def_match.group(1))
-            name = def_match.group(2)
-            if indent == 0:
-                class_name = None
-                class_indent = -1
-                method_indent = -1
-                symbols.append(_sym(name, name, "def", number, "py"))
-            elif class_name is not None and indent > class_indent:
-                if method_indent < 0:
-                    method_indent = indent
-                if indent == method_indent:
-                    qual = f"{class_name}.{name}"
-                    symbols.append(_sym(name, qual, "method", number, "py"))
-            continue
-        stripped = line.lstrip()
-        indent = _indent_width(line[: len(line) - len(stripped)])
-        if class_name is not None and indent == 0 and not stripped.startswith("@"):
-            class_name = None
-            class_indent = -1
-            method_indent = -1
-        if indent != 0:
-            continue
-        from_match = _FROM_IMPORT.match(line)
-        if from_match:
-            module = from_match.group(1).strip()
-            names = _split_import_names(from_match.group(2))
-            imports.append({"module": module, "names": names or ["*"], "line": number})
-            continue
-        import_match = _IMPORT.match(line)
-        if import_match:
-            for part in import_match.group(1).split(","):
-                piece = part.strip().split(" as ", 1)[0].strip()
-                if piece:
-                    imports.append({"module": piece, "names": [], "line": number})
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.append(_sym(node.name, node.name, "def", node.lineno, "py"))
+        elif isinstance(node, ast.ClassDef):
+            symbols.append(_sym(node.name, node.name, "class", node.lineno, "py"))
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    symbols.append(_sym(member.name, f"{node.name}.{member.name}", "method", member.lineno, "py"))
+    _collect_module_imports(tree.body, imports)
     return symbols, imports
 
 

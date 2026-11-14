@@ -1234,7 +1234,9 @@ class IndexStoreTests(unittest.TestCase):
                 self.assertEqual(found, ["src/app.py"])
                 self.assertIn("файлов", index_summary(root))
                 (root / "src" / "app.py").write_text("print(2)\n", encoding="utf-8")
+                self.assertIn("устарело записей: 1", index_summary(root))
                 touch_file(root, "src/app.py")
+                self.assertNotIn("устарело записей: 1", index_summary(root))
                 loaded = load_index(root)
                 entry = next(item for item in loaded["files"] if item["path"] == "src/app.py")
                 self.assertEqual(entry["size"], (root / "src" / "app.py").stat().st_size)
@@ -1268,8 +1270,10 @@ class IndexStoreTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 (root / "b.py").write_text("from a import Foo\n", encoding="utf-8")
+                (root / "side.ts").write_text("export const value = 1;\n", encoding="utf-8")
                 (root / "ui.tsx").write_text(
                     "import { Foo } from './a';\n"
+                    "import { value } from './side';\n"
                     "export const Widget = () => null;\n"
                     "export class Panel {\n"
                     "  render() { return null; }\n"
@@ -1305,6 +1309,22 @@ class IndexStoreTests(unittest.TestCase):
                 importers = box.execute("project_index", {"action": "importers", "query": "a"})
                 self.assertIn("b.py", importers.model_text)
                 self.assertIn("ui.tsx", importers.model_text)
+                definition = box.execute("project_index", {"action": "definition", "query": "Foo.bar"})
+                self.assertIn("a.py:5", definition.model_text)
+                self.assertNotIn("Foo (class)", definition.model_text)
+                dependencies = box.execute("project_index", {"action": "dependencies", "path": "b.py"})
+                self.assertIn("a.py", dependencies.model_text)
+                dependents = box.execute("project_index", {"action": "dependents", "path": "a.py"})
+                self.assertEqual(dependents.model_text, "b.py")
+                js_dependencies = box.execute("project_index", {"action": "dependencies", "path": "ui.tsx"})
+                self.assertIn("side.ts", js_dependencies.model_text)
+                js_dependents = box.execute("project_index", {"action": "dependents", "path": "side.ts"})
+                self.assertIn("ui.tsx", js_dependents.model_text)
+                graph = box.execute("project_index", {"action": "graph", "path": "ui.tsx"})
+                self.assertIn("ui.tsx -> side.ts", graph.model_text)
+                references = box.execute("project_index", {"action": "references", "query": "Foo"})
+                self.assertIn("b.py:1", references.model_text)
+                self.assertIn("эвристический", references.model_text)
             finally:
                 if previous is None:
                     os.environ.pop("APPDATA", None)
@@ -1333,6 +1353,188 @@ class IndexStoreTests(unittest.TestCase):
         modules = {item["module"] for item in imports}
         self.assertIn("x", modules)
         self.assertIn("a.b", modules)
+
+    def test_python_ast_handles_decorators_async_and_multiline_imports(self):
+        from project_agent.symbols import parse_python_file
+
+        source = '''from package.module import (
+    first,
+    second as renamed,
+)
+@decorator
+class Outer:
+    @classmethod
+    async def build(cls):
+        def local():
+            pass
+async def top():
+    pass
+'''
+        symbols, imports = parse_python_file(source)
+        self.assertEqual(
+            [(item["qualname"], item["kind"]) for item in symbols],
+            [("Outer", "class"), ("Outer.build", "method"), ("top", "def")],
+        )
+        self.assertEqual(imports[0]["module"], "package.module")
+        self.assertEqual(imports[0]["names"], ["first", "second"])
+
+    def test_import_dependencies_resolve_relative_python_imports(self):
+        from project_agent.index_store import _resolve_project_imports
+
+        files = {
+            "pkg/__init__.py": {"imports": [], "symbols": []},
+            "pkg/consumer.py": {
+                "imports": [
+                    {"module": ".", "names": ["sibling"], "line": 1},
+                    {"module": ".sibling", "names": ["Thing"], "line": 2},
+                    {"module": "external_pkg", "names": [], "line": 3},
+                ],
+                "symbols": [],
+            },
+            "pkg/sibling.py": {"imports": [], "symbols": []},
+        }
+        _resolve_project_imports(Path("."), files)
+        self.assertEqual(files["pkg/consumer.py"]["dependencies"], ["pkg/sibling.py"])
+        self.assertEqual(files["pkg/consumer.py"]["imports"][0]["target"], "pkg/sibling.py")
+        self.assertEqual(files["pkg/consumer.py"]["imports"][1]["target"], "pkg/sibling.py")
+        self.assertNotIn("target", files["pkg/consumer.py"]["imports"][2])
+
+    def test_python_ast_collects_conditional_module_imports_not_function_locals(self):
+        from project_agent.symbols import parse_python_file
+
+        source = (
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from pkg.types import Model\n"
+            "try:\n"
+            "    import ujson as json\n"
+            "except ImportError:\n"
+            "    import json\n"
+            "def f():\n"
+            "    import local_only\n"
+        )
+        _symbols, imports = parse_python_file(source)
+        modules = [item["module"] for item in imports]
+        self.assertIn("pkg.types", modules)
+        self.assertIn("ujson", modules)
+        self.assertIn("json", modules)
+        self.assertNotIn("local_only", modules)
+
+    def test_import_dependencies_resolve_parent_and_multiple_imports(self):
+        from project_agent.index_store import _resolve_project_imports
+
+        files = {
+            "pkg/__init__.py": {"imports": [], "symbols": []},
+            "pkg/alpha.py": {"imports": [], "symbols": []},
+            "pkg/beta.py": {"imports": [], "symbols": []},
+            "pkg/sub/__init__.py": {"imports": [], "symbols": []},
+            "pkg/sub/consumer.py": {
+                "imports": [
+                    {"module": "..", "names": ["alpha", "beta"], "line": 1},
+                    {"module": "..alpha", "names": ["Thing"], "line": 2},
+                    {"module": "....outside", "names": ["X"], "line": 3},
+                ],
+                "symbols": [],
+            },
+            "pkg/sub/alpha.py": {"imports": [], "symbols": []},
+        }
+        _resolve_project_imports(Path("."), files)
+        self.assertEqual(files["pkg/sub/consumer.py"]["dependencies"], ["pkg/alpha.py", "pkg/beta.py"])
+        self.assertEqual(
+            files["pkg/sub/consumer.py"]["imports"][0]["targets"],
+            ["pkg/alpha.py", "pkg/beta.py"],
+        )
+        self.assertEqual(files["pkg/sub/consumer.py"]["imports"][1]["target"], "pkg/alpha.py")
+        self.assertNotIn("target", files["pkg/sub/consumer.py"]["imports"][2])
+
+    def test_index_migration_same_size_new_files_cycles_and_security(self):
+        from project_agent.index_store import (
+            SYMBOLS_VERSION,
+            build_index,
+            import_graph,
+            index_summary,
+            load_symbols,
+            save_symbols,
+            search_symbol_references,
+            symbols_path,
+            touch_file,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            try:
+                root = Path(tmp) / "proj"
+                root.mkdir()
+                (root / "a.py").write_text("from b import B\nclass Foo:\n    pass\n", encoding="utf-8")
+                (root / "b.py").write_text("from a import Foo\nclass B:\n    pass\nMyFoo = 1\nFooBar = 2\n", encoding="utf-8")
+                outside = Path(tmp) / "secret.py"
+                outside.write_text("Foo = 'secret'\n", encoding="utf-8")
+
+                build_index(root)
+
+                # 1. Старая версия символьного индекса (version < SYMBOLS_VERSION) вызывает пересборку
+                sym_file = symbols_path(root)
+                old_payload = json.loads(sym_file.read_text(encoding="utf-8"))
+                old_payload["version"] = SYMBOLS_VERSION - 1
+                sym_file.write_text(json.dumps(old_payload), encoding="utf-8")
+                self.assertEqual(load_symbols(root)["built_at"], 0)
+                self.assertIn("символьный индекс не построен", index_summary(root))
+
+                # Пересборка через ensure_symbols и проверка графа циклов + нормализованных путей в tools
+                box = Toolbox(SecretVault(), lambda *_: True, McpHub(), lambda: {"api_key": "", "mcp_servers": []})
+                box.set_root(root)
+                defn = box.execute("project_index", {"action": "definition", "query": "Foo"})
+                self.assertIn("a.py:2: Foo (class)", defn.model_text)
+                graph = box.execute("project_index", {"action": "graph", "path": "./a.py"})
+                self.assertIn("a.py -> b.py", graph.model_text)
+                self.assertIn("b.py -> a.py", graph.model_text)
+                deps = box.execute("project_index", {"action": "dependencies", "path": ".\\b.py"})
+                self.assertEqual(deps.model_text, "a.py")
+
+                # 2. Границы слова в search_symbol_references: Foo не должно находить MyFoo/FooBar
+                refs, _ = search_symbol_references(root, "Foo")
+                self.assertTrue(any("b.py:1:" in item for item in refs))
+                self.assertFalse(any("MyFoo" in item or "FooBar" in item for item in refs))
+
+                # 3. Защита от чтения вне root при подмене пути в symbols.json
+                cur_sym = load_symbols(root)
+                cur_sym["files"]["../secret.py"] = {"mtime": 0, "mtime_ns": 0, "size": 10, "symbols": [], "imports": []}
+                save_symbols(root, cur_sym)
+                refs_safe, _ = search_symbol_references(root, "Foo")
+                self.assertFalse(any("secret.py" in item for item in refs_safe))
+                build_index(root)
+
+                # 4. Изменение файла с тем же размером и добавление нового файла без touch_file
+                old_stat = (root / "a.py").stat()
+                same_len_text = "from b import B\nclass Baz:\n    pass\n"
+                self.assertEqual(len(same_len_text), len("from b import B\nclass Foo:\n    pass\n"))
+                (root / "a.py").write_text(same_len_text, encoding="utf-8")
+                os.utime(root / "a.py", ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000))
+                self.assertIn("устарело записей: 1", index_summary(root))
+                self.assertIn("символьный индекс устарел", index_summary(root))
+                touch_file(root, "a.py")
+                self.assertNotIn("устарело записей:", index_summary(root))
+
+                (root / "c.py").write_text("x = 1\n", encoding="utf-8")
+                summary_with_new = index_summary(root)
+                self.assertIn("есть новые файлы", summary_with_new)
+                self.assertIn("символьный индекс устарел", summary_with_new)
+
+                # 5. Удаление файла через touch_file пересчитывает зависимости
+                (root / "b.py").unlink()
+                touch_file(root, "b.py")
+                self.assertEqual(import_graph(root, "a.py")[0], [])
+            finally:
+                if previous is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = previous
+
+    def test_invalid_python_returns_empty_index_without_raising(self):
+        from project_agent.symbols import parse_python_file
+
+        self.assertEqual(parse_python_file("def unfinished(:\n    pass\n"), ([], []))
 
     def test_parse_js_symbols(self):
         from project_agent.symbols import parse_js_file, resolve_js_relative
@@ -1635,7 +1837,9 @@ class AllowedCommandTests(unittest.TestCase):
             self.assertEqual(cmd, ["python", "-m", "ruff", "check"])
             self.assertFalse(det)
             self.assertIn("ruff_check", list_allowed_ids(custom))
-            parsed = parse_allowed_text(f"gui_app!: {sys.executable} -c pass")
+            executable = sys.executable
+            command_head = f'"{executable}"' if any(char.isspace() for char in executable) else executable
+            parsed = parse_allowed_text(f"gui_app!: {command_head} -c pass")
             self.assertTrue(parsed[0]["detach"])
             self.assertIn("gui_app!:", format_allowed_text(parsed))
             _, gui_cmd, gui_det = resolve_allowed(root, "gui_app", parsed)

@@ -16,6 +16,7 @@ from project_agent.paths import (
     PathError,
     is_binary_name,
     is_image_name,
+    normalize_relative,
     relative_posix,
     resolve_inside,
 )
@@ -50,11 +51,16 @@ from project_agent.testing import (
     spawn_detached,
 )
 from project_agent.index_store import (
+    MAX_FIND,
     build_index,
     find_importers,
     find_paths,
+    find_symbol_definitions,
     find_symbols,
+    import_graph,
     index_summary,
+    list_dependencies,
+    search_symbol_references,
     list_imports,
     load_index,
     touch_file,
@@ -188,16 +194,17 @@ TOOL_SPECS = [
     {
         "name": "project_index",
         "description": (
-            "Индекс проекта: пути и лёгкие символы/импорты Python и JS/TS (не LSP). "
-            "action=summary|refresh|find|find_symbol|imports|importers. "
-            "find/find_symbol/importers — query; imports — path к .py/.js/.ts/.go/.ps1/.rs. "
+            "Индекс проекта: пути, определения символов и связи импортов Python/JS/TS (не LSP). "
+            "action=summary|refresh|find|find_symbol|definition|references|graph|dependencies|dependents|imports|importers. "
+            "find/find_symbol/definition/references/importers — query; "
+            "imports/graph/dependencies/dependents — path к исходнику. "
             "В ответ только совпадения, не весь индекс."
         ),
         "parameters": _schema(
             {
-                "action": _string("summary, refresh, find, find_symbol, imports или importers."),
-                "query": _string("Подстрока пути/символа/модуля."),
-                "path": _string("Для imports: путь к исходному файлу относительно корня."),
+                "action": _string("summary, refresh, find, find_symbol, definition, references, graph, dependencies, dependents, imports или importers."),
+                "query": _string("Для find/find_symbol/definition/references/importers: подстрока или имя символа/модуля."),
+                "path": _string("Для imports/graph/dependencies/dependents: путь к исходному файлу относительно корня."),
             },
             ["action"],
         ),
@@ -799,21 +806,74 @@ class Toolbox:
             if len(found) >= 80:
                 body += "\n(список обрезан)"
             return ToolOutcome(body, f"project_index: find_symbol {len(found)}")
+        if action in {"definition", "find_definition", "find_definitions"}:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome("Для definition нужна query с точным именем или qualname.", "project_index: definition пусто")
+            found, _data = find_symbol_definitions(root, query)
+            if not found:
+                return ToolOutcome(f"Точное определение «{query}» не найдено.", "project_index: definition 0")
+            body = "\n".join(found)
+            if len(found) >= MAX_FIND:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: definition {len(found)}")
+        if action in {"references", "find_references"}:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome("Для references нужна query с именем символа.", "project_index: references пусто")
+            found, _data = search_symbol_references(root, query)
+            if not found:
+                return ToolOutcome(f"Упоминаний «{query}» не найдено.", "project_index: references 0")
+            body = "\n".join(found)
+            if len(found) >= MAX_FIND:
+                body += "\n(список обрезан)"
+            body += "\n(эвристический текстовый поиск; возможны совпадения в комментариях и строках)"
+            return ToolOutcome(body, f"project_index: references {len(found)}")
+        if action == "graph":
+            raw_path = str(args.get("path") or args.get("query") or "").strip()
+            if not raw_path:
+                return ToolOutcome("Для graph нужен path к исходному файлу.", "project_index: graph пусто")
+            rel = normalize_relative(raw_path)
+            found, data = import_graph(root, rel)
+            if rel not in (data.get("files") or {}):
+                return ToolOutcome(f"Файл «{raw_path}» не найден в символьном индексе.", "project_index: graph нет")
+            if not found:
+                return ToolOutcome("Зависимостей для графа не найдено.", "project_index: graph 0")
+            body = "\n".join(found)
+            if len(found) >= MAX_FIND:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: graph {len(found)}")
+        if action in {"dependencies", "dependents"}:
+            raw_path = str(args.get("path") or args.get("query") or "").strip()
+            if not raw_path:
+                return ToolOutcome(f"Для {action} нужен path к исходному файлу.", f"project_index: {action} пусто")
+            rel = normalize_relative(raw_path)
+            reverse = action == "dependents"
+            found, data = list_dependencies(root, rel, reverse=reverse)
+            if rel not in (data.get("files") or {}):
+                return ToolOutcome(f"Файл «{raw_path}» не найден в символьном индексе.", f"project_index: {action} нет")
+            if not found:
+                return ToolOutcome("Связанных файлов не найдено.", f"project_index: {action} 0")
+            body = "\n".join(found)
+            if len(found) >= MAX_FIND:
+                body += "\n(список обрезан)"
+            return ToolOutcome(body, f"project_index: {action} {len(found)}")
         if action == "imports":
-            path = str(args.get("path") or args.get("query") or "").strip()
-            if not path:
+            raw_path = str(args.get("path") or args.get("query") or "").strip()
+            if not raw_path:
                 return ToolOutcome(
                     "Для imports нужен path к .py/.js/.ts/.go/.ps1/.rs.",
                     "project_index: imports пусто",
                 )
-            found, data = list_imports(root, path)
-            if path not in (data.get("files") or {}) and not found:
+            rel = normalize_relative(raw_path)
+            found, data = list_imports(root, rel)
+            if rel not in (data.get("files") or {}) and not found:
                 return ToolOutcome(
-                    f"Файл «{path}» не в символьном индексе (нужен .py/.js/.ts/… ≤1 МБ). Обновите refresh.",
+                    f"Файл «{raw_path}» не в символьном индексе (нужен .py/.js/.ts/… ≤1 МБ). Обновите refresh.",
                     "project_index: imports нет",
                 )
             if not found:
-                return ToolOutcome(f"В «{path}» импортов не найдено.", "project_index: imports 0")
+                return ToolOutcome(f"В «{raw_path}» импортов не найдено.", "project_index: imports 0")
             body = "\n".join(found)
             if len(found) >= 80:
                 body += "\n(список обрезан)"
@@ -833,7 +893,7 @@ class Toolbox:
                 body += "\n(список обрезан)"
             return ToolOutcome(body, f"project_index: importers {len(found)}")
         return ToolOutcome(
-            "action: summary, refresh, find, find_symbol, imports или importers.",
+            "action: summary, refresh, find, find_symbol, definition, references, graph, dependencies, dependents, imports или importers.",
             "project_index: неизвестно",
         )
 

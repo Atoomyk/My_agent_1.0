@@ -27,7 +27,7 @@ SYSTEM_AGENT = """Ты помощник по файлам проекта. Реж
 Браузер не встроен: если в настройках MCP есть playwright — используй инструмент browser (navigate → snapshot → click/type по ref). Свой Chrome ProjectAgent не запускает.
 Push и reset --hard недоступны.
 {shell_policy}
-Чтобы быстро найти файл по имени или фрагменту пути — project_index action=find. Символы Python/JS/TS/Go/PowerShell/Rust — find_symbol; импорты файла — imports+path; кто импортирует — importers. Не содержимое файлов и не LSP.
+Чтобы быстро найти файл по имени или фрагменту пути — project_index action=find. Символы Python/JS/TS/Go/PowerShell/Rust — find_symbol; точное определение — definition; упоминания — references; импорты файла — imports+path; зависимости/граф — dependencies/dependents/graph+path; кто импортирует — importers. Не содержимое файлов и не LSP.
 Перед правкой читай связанные файлы (импорты, соседние модули, тесты по имени) — не правь вслепую и не крути много мелких шагов наугад.
 После правок кода, если тесты включены в настройках, запускай run_tests и по выводу решай, нужна ли ещё правка.
 Лимит запусков тестов за один ход задан в настройках. При повторном том же FAIL или сообщении СТОП — больше не вызывай инструменты (в т.ч. run_tests), кратко опиши проблему.
@@ -42,7 +42,7 @@ SYSTEM_ASK = """Ты помощник по файлам проекта. Режи
 Метки вида [[SEC:...:N]] заменяют пароли и ключи. Не пытайся их раскрыть.
 Не выходи за пределы проекта. Каталоги .git, __pycache__, node_modules, .venv, dist и build недоступны.
 В Ask нельзя менять проект: нет write_file, apply_patch, run_tests, run_allowed, run_shell, git commit, generate_image, browser, call_mcp_tool.
-Можно: list_dir, read_file, search, project_index (find/find_symbol/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
+Можно: list_dir, read_file, search, project_index (summary/find/find_symbol/definition/references/graph/dependencies/dependents/imports/importers), view_image, web_search, list_mcp_tools, git status/diff/log.
 Отвечай на языке пользователя. Когда ответ готов — текстом без инструментов.
 """
 
